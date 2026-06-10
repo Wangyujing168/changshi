@@ -18,7 +18,6 @@ with st.sidebar:
 
     st.markdown("### 功能导航")
     st.markdown("- 智能问答（已上线）")
-    st.markdown("- Excel数据入库（开发中）")
     st.markdown("- 指标对比分析（开发中）")
     st.markdown("- 材料价格趋势（开发中）")
 
