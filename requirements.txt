@@ -1,0 +1,18 @@
+# ===== 绿化造价智能助手 - 依赖包 =====
+# Phase 1: 问答功能（精简版）
+
+# Web 界面
+streamlit>=1.28.0
+
+# 数据处理
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# DeepSeek API 调用（兼容 OpenAI 接口）
+openai>=1.0.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# Phase 2 再加:
+# chromadb>=0.4.0  (向量检索)
