@@ -18,15 +18,15 @@ from data_loader import load_all_data, get_text_chunks
 def _expand_spec_range(query: str) -> list[str]:
     """
     将用户输入的规格数值展开为对应的数据区间。
-    规则：胸径/地径 X cm → 区间 (X-1).0-(X-1).9
+    规则：胸径/地径/高度 X → 区间 (X-1).0-(X-1).9
     例如："胸径12cm" → ["11.0-11.9"]
           "地径7cm"  → ["6.0-6.9"]
-          "高度3.5m" → 直接匹配原文
+          "高度3.5m" → ["2.5-3.4"]
     """
     expanded = []
 
-    # 匹配 "胸径12cm"、"地径7" 等模式
-    for m in re.finditer(r'(胸径|地径)\s*(\d+\.?\d*)\s*(cm|m)?', query):
+    # 匹配 "胸径12cm"、"地径7"、"高度3.5m" 等模式
+    for m in re.finditer(r'(胸径|地径|高度)\s*(\d+\.?\d*)\s*(cm|m)?', query):
         try:
             num = float(m.group(2))
         except ValueError:
