@@ -18,15 +18,16 @@ from data_loader import load_all_data, get_text_chunks
 def _expand_spec_range(query: str) -> list[str]:
     """
     将用户输入的规格数值展开为对应的数据区间。
-    规则：胸径/地径/高度 X → 区间 (X-1).0-(X-1).9
+    规则：胸径/地径 X cm → 区间 (X-1).0-(X-1).9
     例如："胸径12cm" → ["11.0-11.9"]
           "地径7cm"  → ["6.0-6.9"]
-          "高度3.5m" → ["2.5-3.4"]
+          "胸径15cm" → ["14.0-14.9"]
+    注意：高度的区间划分方式不同（如 3.5-3.9m），不适用此公式，直接原文匹配即可。
     """
     expanded = []
 
-    # 匹配 "胸径12cm"、"地径7"、"高度3.5m" 等模式
-    for m in re.finditer(r'(胸径|地径|高度)\s*(\d+\.?\d*)\s*(cm|m)?', query):
+    # 匹配 "胸径12cm"、"地径7" 等模式（高度不适用此公式，直接原文匹配）
+    for m in re.finditer(r'(胸径|地径)\s*(\d+\.?\d*)\s*(cm|m)?', query):
         try:
             num = float(m.group(2))
         except ValueError:
@@ -99,6 +100,15 @@ class CostRAGEngine:
                 if expanded in spec:
                     score += 8  # 高权重，仅次于精确品种名匹配
                     break
+
+            # 3b. 查询中的数字直接匹配规格文本（用于高度等不适用X-1公式的规格）
+            query_nums = re.findall(r'(\d+\.?\d*)', query)
+            for num in query_nums:
+                # 过滤太短的数字（如单位换算中的"1"）
+                if len(num) >= 2 or '.' in num:
+                    if num in spec:
+                        score += 7
+                        break
 
             # 4. 类别关键词匹配
             cat_keywords = {
