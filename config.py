@@ -17,6 +17,10 @@ PROJECT_ROOT = pathlib.Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / "data"
 HISTORY_DATA_DIR = PROJECT_ROOT / "history_data"  # 后续放历史项目 Excel
 
+# ===== 联网搜索配置 =====
+WEB_SEARCH_ENABLED = True    # 是否启用联网搜索兜底
+SCORE_THRESHOLD = 5          # 数据库匹配分数低于此值时触发联网搜索
+
 # ===== 系统提示词 =====
 SYSTEM_PROMPT = """你是园林绿化工程造价助手，专门回答绿化工程造价相关问题。
 

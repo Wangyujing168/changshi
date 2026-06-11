@@ -9,6 +9,8 @@ from config import (
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
     SYSTEM_PROMPT,
+    WEB_SEARCH_ENABLED,
+    SCORE_THRESHOLD as CONFIG_SCORE_THRESHOLD,
 )
 from data_loader import load_all_data, get_text_chunks
 
@@ -61,6 +63,9 @@ class CostRAGEngine:
             if name not in self._name_index:
                 self._name_index[name] = []
             self._name_index[name].append(chunk)
+
+        # 联网搜索缓存
+        self._web_cache: dict[str, str] = {}
 
         pass  # Engine initialized
 
@@ -132,12 +137,16 @@ class CostRAGEngine:
 
         # 按分数排序，取 top_k
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [c for _, c in scored[:top_k]]
+        results = []
+        for s, c in scored[:top_k]:
+            c = c.copy()
+            c["_score"] = s
+            results.append(c)
+        return results
 
-    def build_context(self, query: str, top_k: int = 10) -> str:
-        """构建发给 LLM 的上下文"""
-        results = self.search(query, top_k)
-
+    @staticmethod
+    def _format_context(results: list[dict]) -> str:
+        """将检索结果列表格式化为 LLM 上下文文本"""
         if not results:
             return "未在数据库中检索到相关数据。"
 
@@ -163,20 +172,117 @@ class CostRAGEngine:
 
         return "\n".join(context_parts)
 
+    def build_context(self, query: str, top_k: int = 10) -> str:
+        """构建发给 LLM 的上下文"""
+        results = self.search(query, top_k)
+        return self._format_context(results)
+
+    def _web_search(self, query: str, max_results: int = 5) -> str:
+        """联网搜索（Bing）并格式化为 LLM 上下文"""
+        if not WEB_SEARCH_ENABLED:
+            return ""
+
+        # 检查缓存
+        cache_key = query.strip().lower()
+        if cache_key in self._web_cache:
+            return self._web_cache[cache_key]
+
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            resp = requests.get(
+                "https://www.bing.com/search",
+                params={"q": query, "count": max_results},
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = []
+
+            # Bing 搜索结果通常在 li.b_algo 元素中
+            for item in soup.select("li.b_algo")[:max_results]:
+                title_el = item.select_one("h2 a")
+                if not title_el:
+                    continue
+                title = title_el.get_text(strip=True)
+                href = title_el.get("href", "")
+                body_el = item.select_one(".b_caption p, .b_lineclamp2, .b_algoSlug")
+                body = body_el.get_text(strip=True) if body_el else ""
+                if title:
+                    results.append({"title": title, "href": href, "body": body})
+
+            if not results:
+                self._web_cache[cache_key] = ""
+                return ""
+
+            parts = ["## 网络搜索结果"]
+            parts.append("以下是从互联网搜索到的相关信息：\n")
+            for i, r in enumerate(results, 1):
+                parts.append(f"### {i}. {r['title']}")
+                if r["href"]:
+                    parts.append(f"来源：{r['href']}")
+                parts.append(f"{r['body']}\n")
+
+            result = "\n".join(parts)
+            self._web_cache[cache_key] = result
+            return result
+        except Exception:
+            return ""  # 静默失败，回退到数据库模式
+
+    @staticmethod
+    def _merge_contexts(db_context: str, web_context: str) -> str:
+        """合并数据库和网络上下文字段"""
+        parts = []
+        if db_context and db_context != "未在数据库中检索到相关数据。":
+            parts.append(db_context)
+        if web_context:
+            parts.append(web_context)
+        if not parts:
+            return "未在数据库中检索到相关数据。"
+        return "\n\n".join(parts)
+
+    SCORE_THRESHOLD = CONFIG_SCORE_THRESHOLD  # 低于此分数触发联网搜索
+
     def ask(self, query: str) -> str:
         """
         执行一次问答：
-        1. 检索相关数据
-        2. 拼接上下文
-        3. 调用 DeepSeek 生成回答
+        1. 检索本地数据库
+        2. 判断是否需要联网搜索兜底
+        3. 拼接上下文
+        4. 调用 DeepSeek 生成回答
         """
-        # 检索
-        context = self.build_context(query)
+        # 1. 检索本地数据库
+        db_results = self.search(query, top_k=10)
+        db_has_results = len(db_results) > 0
+        max_score = max(r.get("_score", 0) for r in db_results) if db_results else 0
+        needs_web = WEB_SEARCH_ENABLED and (not db_has_results or max_score < self.SCORE_THRESHOLD)
 
-        # 构建消息
+        # 2. 构建数据库上下文
+        db_context = self._format_context(db_results)
+
+        # 3. 必要时联网搜索
+        web_context = ""
+        if needs_web:
+            web_context = self._web_search(query)
+
+        # 4. 合并上下文
+        context = self._merge_contexts(db_context, web_context)
+
+        # 5. 构建消息
+        source_desc = "## 检索来源说明"
+        if web_context:
+            source_desc += "\n- [数据库检索结果] 来自本地绿化工程造价指标数据库\n- [网络搜索结果] 来自互联网搜索，作为补充参考\n- 优先使用数据库数据，数据库无数据时可参考网络信息，并标注来源"
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"""请根据以下数据库检索结果回答用户问题。
+            {"role": "user", "content": f"""{source_desc}
 
 ## 检索结果
 {context}
@@ -184,15 +290,19 @@ class CostRAGEngine:
 ## 用户问题
 {query}
 
-请用专业简洁的语言回答，引用具体数据。如果没有查到相关数据，请如实告知。"""}
+请用专业简洁的语言回答。规则：
+1. 优先引用数据库中的具体数据
+2. 如果数据库没有相关数据，使用网络搜索结果作为参考
+3. 如果两者都没有，如实告知并给出通用建议
+4. 使用网络信息时请标注来源"""}
         ]
 
-        # 调用 DeepSeek
+        # 6. 调用 DeepSeek
         try:
             response = self.client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
                 messages=messages,
-                temperature=0.3,  # 低温度，保证专业性
+                temperature=0.3,
                 max_tokens=2000,
             )
             return response.choices[0].message.content
@@ -202,13 +312,29 @@ class CostRAGEngine:
     def chat(self, query: str, history: list[dict] = None) -> str:
         """
         多轮对话模式（保留对话历史）。
+        本地数据库优先，查不到时自动联网搜索。
         """
         if history is None:
             history = []
 
-        # 每次对话都检索最新数据
-        context = self.build_context(query)
+        # 1. 检索本地数据库
+        db_results = self.search(query, top_k=10)
+        db_has_results = len(db_results) > 0
+        max_score = max(r.get("_score", 0) for r in db_results) if db_results else 0
+        needs_web = WEB_SEARCH_ENABLED and (not db_has_results or max_score < self.SCORE_THRESHOLD)
 
+        # 2. 构建数据库上下文
+        db_context = self._format_context(db_results)
+
+        # 3. 必要时联网搜索
+        web_context = ""
+        if needs_web:
+            web_context = self._web_search(query)
+
+        # 4. 合并上下文
+        context = self._merge_contexts(db_context, web_context)
+
+        # 5. 构建消息
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
         # 添加历史对话
@@ -216,15 +342,24 @@ class CostRAGEngine:
             messages.append(msg)
 
         # 添加当前查询和检索结果
+        source_note = ""
+        if web_context:
+            source_note = "\n（数据库检索结果来自本地绿化工程造价指标库，网络搜索结果来自互联网搜索作为补充。优先使用数据库数据，无数据时参考网络信息并标注来源。）"
+
         messages.append({
             "role": "user",
-            "content": f"""## 数据库检索结果
+            "content": f"""## 检索结果
 {context}
+{source_note}
 
 ## 用户问题
 {query}
 
-请根据检索结果回答。检索结果中没有的信息，结合你的专业知识补充说明。"""
+请根据检索结果回答。规则：
+1. 优先引用数据库中的具体数据
+2. 数据库无数据时使用网络搜索结果作为参考
+3. 两者都没有时如实告知并给出通用建议
+4. 使用网络信息时请标注来源"""
         })
 
         try:
