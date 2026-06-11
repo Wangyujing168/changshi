@@ -15,16 +15,18 @@ from config import (
 from data_loader import load_all_data, get_text_chunks
 
 
-def _expand_spec_range(query: str) -> list[str]:
+def _expand_spec_range(query: str) -> dict[str, list[str]]:
     """
     将用户输入的规格数值展开为对应的数据区间。
     规则：胸径/地径 X cm → 区间 (X-1).0-(X-1).9
-    例如："胸径12cm" → ["11.0-11.9"]
-          "地径7cm"  → ["6.0-6.9"]
-          "胸径15cm" → ["14.0-14.9"]
-    注意：高度的区间划分方式不同（如 3.5-3.9m），不适用此公式，直接原文匹配即可。
+    例如："胸径12cm" → ranges: ["11.0-11.9", "11-11.9"], singles: ["11.0", "11"]
+
+    返回两个列表：
+    - ranges:  范围格式，匹配全文（name+spec+text）
+    - singles: 单数字格式，仅匹配 name+spec（防止在系数等无关数字上假阳性）
     """
-    expanded = []
+    ranges = []
+    singles = []
 
     # 匹配 "胸径12cm"、"地径7" 等模式（高度不适用此公式，直接原文匹配）
     for m in re.finditer(r'(胸径|地径)\s*(\d+\.?\d*)\s*(cm|m)?', query):
@@ -35,12 +37,12 @@ def _expand_spec_range(query: str) -> list[str]:
 
         # 胸径/地径: X → (X-1).0 ~ (X-1).9
         lower = num - 1
-        expanded.append(f"{lower:.1f}-{lower + 0.9:.1f}")  # 11.0-11.9
-        expanded.append(f"{int(lower)}-{int(lower)}.9")    # 11-11.9
-        expanded.append(f"{lower:.1f}")                     # 11.0
-        expanded.append(f"{int(lower)}")                    # 11
+        ranges.append(f"{lower:.1f}-{lower + 0.9:.1f}")   # 11.0-11.9
+        ranges.append(f"{int(lower)}-{int(lower)}.9")     # 11-11.9
+        singles.append(f"{lower:.1f}")                      # 11.0
+        singles.append(f"{int(lower)}")                     # 11
 
-    return expanded
+    return {"ranges": ranges, "singles": singles}
 
 
 class CostRAGEngine:
@@ -76,7 +78,7 @@ class CostRAGEngine:
         采用关键词匹配 + 品种名模糊匹配 + 规格区间智能映射。
         """
         scored = []
-        expanded_ranges = _expand_spec_range(query)
+        expanded = _expand_spec_range(query)
 
         for chunk in self.chunks:
             score = 0
@@ -96,17 +98,24 @@ class CostRAGEngine:
 
             # 3. 规格区间智能映射匹配
             # 用户说"胸径12"→映射到"11.0-11.9"
-            for expanded in expanded_ranges:
-                if expanded in spec:
-                    score += 8  # 高权重，仅次于精确品种名匹配
+            # ranges:  范围格式匹配全文（spec+name+text，灌木规格可能嵌在 name 里）
+            # singles: 单数字只匹配 name+spec（防止在系数 1.0794 等处假阳性）
+            search_target = f"{spec} {name} {text}"
+            name_spec_target = f"{spec} {name}"
+            for r in expanded["ranges"]:
+                if r in search_target:
+                    score += 8
+                    break
+            for s in expanded["singles"]:
+                if s in name_spec_target:
+                    score += 5
                     break
 
-            # 3b. 查询中的数字直接匹配规格文本（用于高度等不适用X-1公式的规格）
+            # 3b. 查询中的数字直接匹配原文（用于高度等不适用X-1公式的规格）
             query_nums = re.findall(r'(\d+\.?\d*)', query)
             for num in query_nums:
-                # 过滤太短的数字（如单位换算中的"1"）
                 if len(num) >= 2 or '.' in num:
-                    if num in spec:
+                    if num in name_spec_target:
                         score += 7
                         break
 
