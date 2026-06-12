@@ -16,6 +16,7 @@ import pathlib
 PROJECT_ROOT = pathlib.Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / "data"
 HISTORY_DATA_DIR = PROJECT_ROOT / "history_data"  # 后续放历史项目 Excel
+KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "knowledge_base"  # 二类费规则知识库
 
 # ===== 联网搜索配置 =====
 WEB_SEARCH_ENABLED = True    # 是否启用联网搜索兜底

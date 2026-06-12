@@ -28,7 +28,10 @@ with st.sidebar:
         engine = get_engine()
         total = len(engine.chunks)
         cats = len(engine.data)
+        kb_count = len(engine.knowledge)
         st.success(f"已加载 {cats} 个类别，共 {total} 条记录")
+        if kb_count > 0:
+            st.info(f"知识库：{kb_count} 个条目")
     except Exception as e:
         st.error(f"数据加载失败：{e}")
 

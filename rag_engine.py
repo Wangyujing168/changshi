@@ -11,8 +11,10 @@ from config import (
     SYSTEM_PROMPT,
     WEB_SEARCH_ENABLED,
     SCORE_THRESHOLD as CONFIG_SCORE_THRESHOLD,
+    KNOWLEDGE_BASE_DIR,
 )
 from data_loader import load_all_data, get_text_chunks
+from knowledge_loader import load_knowledge_base, get_knowledge_chunks
 
 
 def _expand_spec_range(query: str) -> dict[str, list[str]]:
@@ -58,6 +60,10 @@ class CostRAGEngine:
         # 加载数据
         self.data = load_all_data()
         self.chunks = get_text_chunks(self.data)
+
+        # 加载二类费知识库
+        self.knowledge = load_knowledge_base(KNOWLEDGE_BASE_DIR)
+        self.knowledge_chunks = get_knowledge_chunks(self.knowledge)
 
         # 构建品种名索引，用于快速匹配
         self._name_index = {}
@@ -154,42 +160,118 @@ class CostRAGEngine:
             if score > 0:
                 scored.append((score, chunk))
 
-        # 按分数排序，取 top_k
-        scored.sort(key=lambda x: x[0], reverse=True)
-        results = []
-        for s, c in scored[:top_k]:
+        # ===== 知识库检索 =====
+        kc_scored = []
+        for kc in self.knowledge_chunks:
+            kc_score = 0
+            kc_text = kc.get("text", "")
+            kc_title = kc.get("title", "")
+
+            # A. 标题关键词匹配
+            title_lower = kc_title.lower()
+            query_lower = query.lower()
+            # 标题整体出现在查询中
+            if any(word in query for word in kc_title.replace("-", " ").replace("—", " ").split() if len(word) >= 2):
+                kc_score += 8
+
+            # B. 内容关键词匹配
+            # 二类费相关关键词
+            fee_keywords = ["建设管理费", "勘察设计费", "监理费", "招标代理费", "可行性研究费",
+                          "二类费", "管理费", "设计费", "监理", "招标", "可研", "代建",
+                          "费率", "计费", "收费标准", "如何计算", "怎么算", "计算规则",
+                          "财建", "发改价格", "计价格"]
+            for kw in fee_keywords:
+                if kw in query and kw in kc_text:
+                    kc_score += 5
+                    break
+
+            # C. 查询词直接匹配内容
+            query_words = re.findall(r'[一-鿿]{2,}', query)
+            for w in query_words:
+                if w in kc_text:
+                    kc_score += 2
+
+            if kc_score > 0:
+                kc_scored.append((kc_score, kc))
+
+        kc_scored.sort(key=lambda x: x[0], reverse=True)
+
+        # 合并两个来源的结果，知识库结果放入后段
+        data_results = []
+        for s, c in scored:
             c = c.copy()
             c["_score"] = s
-            results.append(c)
-        return results
+            c["_source"] = "database"
+            data_results.append(c)
+
+        kb_results = []
+        for s, kc in kc_scored[:5]:  # 知识库最多 5 条
+            kc = kc.copy()
+            kc["_score"] = s
+            kc["_source"] = "knowledge"
+            kb_results.append(kc)
+
+        # 合并：前 80% 给数据库，后 20% 给知识库（保证知识库结果能出现）
+        db_slots = max(top_k - min(2, len(kb_results)), int(top_k * 0.8))
+        data_results = data_results[:db_slots]
+        kb_slots = top_k - len(data_results)
+        kb_results = kb_results[:kb_slots]
+
+        combined = data_results + kb_results
+        combined.sort(key=lambda x: x["_score"], reverse=True)
+        return combined[:top_k]
 
     @staticmethod
     def _format_context(results: list[dict]) -> str:
-        """将检索结果列表格式化为 LLM 上下文文本"""
+        """将检索结果列表格式化为 LLM 上下文文本，区分数据库和知识库"""
         if not results:
-            return "未在数据库中检索到相关数据。"
+            return "未检索到相关数据。"
 
-        context_parts = ["以下是从绿化工程造价指标数据库中检索到的相关数据：\n"]
+        db_results = [r for r in results if r.get("_source") != "knowledge"]
+        kb_results = [r for r in results if r.get("_source") == "knowledge"]
 
-        # 按类别分组展示
-        by_category = {}
-        for r in results:
-            cat = r["category"]
-            if cat not in by_category:
-                by_category[cat] = []
-            by_category[cat].append(r)
+        parts = []
 
-        for cat, items in by_category.items():
-            context_parts.append(f"\n### {cat}")
-            for item in items:
-                unit = item.get("unit", "元/株")
-                seedling_info = f"（其中苗木价格 {item.get('苗木价格', '')} 元）" if item.get('苗木价格') else ""
-                context_parts.append(
-                    f"- {item['name']}（{item['spec']}）："
-                    f"综合指标 **{item['comprehensive']}{unit}** {seedling_info}"
-                )
+        # ===== 数据库结果 =====
+        if db_results:
+            parts.append("## 数据库检索结果")
+            parts.append("以下是从绿化工程造价指标数据库中检索到的相关数据：\n")
 
-        return "\n".join(context_parts)
+            by_category = {}
+            for r in db_results:
+                cat = r.get("category", "其他")
+                if cat not in by_category:
+                    by_category[cat] = []
+                by_category[cat].append(r)
+
+            for cat, items in by_category.items():
+                parts.append(f"\n### {cat}")
+                for item in items:
+                    unit = item.get("unit", "元/株")
+                    seedling_info = f"（其中苗木价格 {item.get('苗木价格', '')} 元）" if item.get('苗木价格') else ""
+                    parts.append(
+                        f"- {item['name']}（{item['spec']}）："
+                        f"综合指标 **{item['comprehensive']}{unit}** {seedling_info}"
+                    )
+        else:
+            parts.append("## 数据库检索结果")
+            parts.append("未在数据库中检索到相关数据。")
+
+        # ===== 知识库结果 =====
+        if kb_results:
+            parts.append("\n## 二类费规则参考")
+            parts.append("以下是从工程造价二类费知识库中检索到的相关规则：\n")
+            for i, item in enumerate(kb_results, 1):
+                title = item.get("title", "未知条目")
+                content = item.get("content", item.get("text", ""))
+                source = item.get("source", "")
+                parts.append(f"### {i}. {title}")
+                if source:
+                    parts.append(f"（来源：{source}）")
+                parts.append(f"{content[:1500]}")  # 限制长度
+                parts.append("")
+
+        return "\n".join(parts)
 
     def build_context(self, query: str, top_k: int = 10) -> str:
         """构建发给 LLM 的上下文"""
