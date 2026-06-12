@@ -5,7 +5,7 @@ import pandas as pd
 from pathlib import Path
 
 # 数据目录（先读取你已有的 data 目录）
-DEFAULT_DATA_DIR = Path(r"c:\Users\wangy\.claude\projects\data")
+DEFAULT_DATA_DIR = Path(r"c:\Users\wangy\.claude\projects\data\绿化指标")
 
 
 def load_all_data(data_dir: Path = DEFAULT_DATA_DIR) -> dict:
