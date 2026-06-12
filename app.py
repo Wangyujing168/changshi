@@ -28,7 +28,7 @@ with st.sidebar:
         engine = get_engine()
         total = len(engine.chunks)
         cats = len(engine.data)
-        kb_count = len(engine.knowledge)
+        kb_count = len(getattr(engine, 'knowledge', []))
         st.success(f"已加载 {cats} 个类别，共 {total} 条记录")
         if kb_count > 0:
             st.info(f"知识库：{kb_count} 个条目")
@@ -119,11 +119,14 @@ if prompt:
                 results = engine.search(prompt, top_k=5)
                 if results:
                     for r in results:
-                        u = r.get("unit", "元/株")
-                        st.markdown(
-                            f"- [{r['category']}] {r['name']}（{r['spec']}）"
-                            f" -> 综合指标 **{r['comprehensive']}**{u}"
-                        )
+                        if r.get("_source") == "knowledge":
+                            st.markdown(f"- 📄 [{r.get('title', '知识库')}] 来源：{r.get('source', '')}")
+                        else:
+                            u = r.get("unit", "元/株")
+                            st.markdown(
+                                f"- [{r['category']}] {r['name']}（{r['spec']}）"
+                                f" -> 综合指标 **{r['comprehensive']}**{u}"
+                            )
                 else:
                     st.caption("未匹配到相关数据")
 
