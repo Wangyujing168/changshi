@@ -155,6 +155,9 @@ def get_text_chunks(data: dict) -> list[dict]:
                 "name": r["品种"],
                 "spec": r["规格"],
                 "comprehensive": r["综合指标"],
+                "苗木价格": r["苗木价格"],
+                "栽植费用": r["栽植费用"],
+                "主材取费系数": r["主材取费系数"],
                 "unit": unit,
             })
     return chunks

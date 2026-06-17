@@ -14,7 +14,14 @@ from config import (
     KNOWLEDGE_BASE_DIR,
 )
 from data_loader import load_all_data, get_text_chunks
-from knowledge_loader import load_knowledge_base, get_knowledge_chunks
+from fee_engine import detect_and_calculate, format_for_llm
+from knowledge_loader import (
+    load_knowledge_base,
+    search_knowledge_base,
+    format_knowledge_context,
+)
+from config import KNOWLEDGE_BASE_DIR
+
 
 
 def _expand_spec_range(query: str) -> dict[str, list[str]]:
@@ -63,7 +70,7 @@ class CostRAGEngine:
 
         # 加载二类费知识库
         self.knowledge = load_knowledge_base(KNOWLEDGE_BASE_DIR)
-        self.knowledge_chunks = get_knowledge_chunks(self.knowledge)
+        
 
         # 构建品种名索引，用于快速匹配
         self._name_index = {}
@@ -75,6 +82,9 @@ class CostRAGEngine:
 
         # 联网搜索缓存
         self._web_cache: dict[str, str] = {}
+
+        # Load knowledge base
+        self.knowledge_chunks = load_knowledge_base(KNOWLEDGE_BASE_DIR)
 
         pass  # Engine initialized
 
@@ -359,27 +369,91 @@ class CostRAGEngine:
         3. 拼接上下文
         4. 调用 DeepSeek 生成回答
         """
+        # 0. 二类费规则引擎检测
+        fee_result = detect_and_calculate(query)
+        fee_context = ""
+        fee_instruction = ""
+        if fee_result:
+            fee_context = format_for_llm(fee_result)
+            has_amount = fee_result.get("has_amount")
+            is_sheji = fee_result.get("fee_type") == "工程设计费"
+            if has_amount:
+                if is_sheji:
+                    fee_instruction = (
+                        "\n\n> # ⚠️ 工程设计费 — 最高优先级指令\n\n"
+                        "> 程序已完成精确计算，结果直接展示在界面上。\n"
+                        "> **你只能确认上述金额和依据文件，禁止输出任何计算过程。**\n"
+                        "> 禁止说\"无法计算\"\"数据不足\"\"需查表\"。\n\n"
+                        "> ## 🚫 常见错误（禁止在确认中说这些）\n"
+                        "> - **桥梁/地铁/隧道属于「交通运输工程」，不是建筑市政**\n"
+                        "> - **园林绿化系数是 1.1，不是 1.2**\n"
+                        "> - 确认时只说金额和依据，**禁止重新分类工程类型**"
+                    )
+                else:
+                    fee_instruction = (
+                        "\n\n> **⚠️ 程序已完成计算。你只能确认上述金额和依据文件。"
+                        "禁止输出任何计算过程、查表步骤、内插法、公式。"
+                        "禁止说\"无法计算\"\"数据不足\"\"需查表\"。**"
+                    )
+            else:
+                if is_sheji:
+                    fee_instruction = (
+                        "\n\n> # ⚠️ 工程设计费 — 最高优先级指令\n\n"
+                        "> 附表一和附表二已由程序直接展示给用户，你**不需要也不允许**再输出任何表格。\n"
+                        "> **严禁重新输出任何系数表或系数值！**\n"
+                        "> 你只能做解释性描述，但决不能列出具体数字。\n\n"
+                        "> ## 🚫 常见错误（训练数据经常搞错）\n"
+                        "> - **桥梁工程属于「交通运输工程」，不是建筑市政**\n"
+                        "> - **园林绿化系数是 1.1（不是 1.2）**\n"
+                        "> - 用户问系数值 → 回答「请查阅上方程序生成的附表二」\n"
+                        "> - 用户问分类归属 → 只能回答大类名称，**严禁说出系数数字**"
+                    )
+                else:
+                    fee_instruction = (
+                        "\n\n> **[最高优先级] 上述费率表和调整系数来自政策文件引擎，数据权威准确。"
+                        "你必须逐字引用检索结果中的数据，不得使用模型训练数据覆盖。"
+                        "如需精确计算，请让用户提供具体金额参数。**"
+                    )
+
         # 1. 检索本地数据库
         db_results = self.search(query, top_k=10)
         db_has_results = len(db_results) > 0
         max_score = max(r.get("_score", 0) for r in db_results) if db_results else 0
         needs_web = WEB_SEARCH_ENABLED and (not db_has_results or max_score < self.SCORE_THRESHOLD)
 
-        # 2. 构建数据库上下文
+        # 2. 检索知识库
+        kb_results = search_knowledge_base(query, self.knowledge_chunks, top_k=5)
+        kb_context = format_knowledge_context(kb_results)
+
+        # 3. 构建数据库上下文
         db_context = self._format_context(db_results)
 
-        # 3. 必要时联网搜索
+        # 4. 必要时联网搜索
         web_context = ""
         if needs_web:
             web_context = self._web_search(query)
 
-        # 4. 合并上下文
-        context = self._merge_contexts(db_context, web_context)
+        # 5. 合并上下文
+        normal_context = self._merge_contexts(db_context, web_context)
 
-        # 5. 构建消息
+        if has_amount := (fee_result and fee_result.get("has_amount")):
+            context = fee_context
+        else:
+            parts = []
+            if fee_context:
+                parts.append(fee_context)
+            if kb_context and kb_context != "未在知识库中检索到相关政策文件。":
+                parts.append(kb_context)
+            if normal_context and normal_context != "未在数据库中检索到相关数据。":
+                parts.append(normal_context)
+            context = "\n\n---\n\n".join(parts) if parts else "未检索到相关数据。"
+
+        # 6. 构建消息
         source_desc = "## 检索来源说明"
         if web_context:
-            source_desc += "\n- [数据库检索结果] 来自本地绿化工程造价指标数据库\n- [网络搜索结果] 来自互联网搜索，作为补充参考\n- 优先使用数据库数据，数据库无数据时可参考网络信息，并标注来源"
+            source_desc += "\n- [数据库检索结果] 来自本地绿化工程造价指标数据库\n- [知识库检索结果] 来自政策文件知识库\n- [网络搜索结果] 来自互联网搜索，作为补充参考"
+        else:
+            source_desc += "\n- [数据库检索结果] 来自本地绿化工程造价指标数据库\n- [知识库检索结果] 来自政策文件知识库"
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -387,6 +461,7 @@ class CostRAGEngine:
 
 ## 检索结果
 {context}
+{fee_instruction}
 
 ## 用户问题
 {query}
@@ -394,8 +469,8 @@ class CostRAGEngine:
 请用专业简洁的语言回答。重要规则：
 1. 【费率/计算规则/收费标准】必须严格使用上方检索结果中的数据，不要使用你训练数据中的旧版本信息
 2. 优先引用数据库中的具体数据
-3. 如果数据库没有相关数据，使用网络搜索结果作为参考
-4. 如果两者都没有，如实告知并给出通用建议
+3. 如果数据库没有相关数据，使用知识库搜索结果作为参考
+4. 如果都没有，如实告知并给出通用建议
 5. 使用网络信息时请标注来源"""}
         ]
 
@@ -419,24 +494,86 @@ class CostRAGEngine:
         if history is None:
             history = []
 
+        # 0. 二类费规则引擎检测
+        fee_result = detect_and_calculate(query)
+        fee_context = ""
+        fee_instruction = ""
+        if fee_result:
+            fee_context = format_for_llm(fee_result)
+            has_amount = fee_result.get("has_amount")
+            is_sheji = fee_result.get("fee_type") == "工程设计费"
+            if has_amount:
+                if is_sheji:
+                    fee_instruction = (
+                        "\n\n> # ⚠️ 工程设计费 — 最高优先级指令\n\n"
+                        "> 程序已完成精确计算，结果直接展示在界面上。\n"
+                        "> **你只能确认上述金额和依据文件，禁止输出任何计算过程。**\n"
+                        "> 禁止说\"无法计算\"\"数据不足\"\"需查表\"。\n\n"
+                        "> ## 🚫 常见错误（禁止在确认中说这些）\n"
+                        "> - **桥梁/地铁/隧道属于「交通运输工程」，不是建筑市政**\n"
+                        "> - **园林绿化系数是 1.1，不是 1.2**\n"
+                        "> - 确认时只说金额和依据，**禁止重新分类工程类型**"
+                    )
+                else:
+                    fee_instruction = (
+                        "\n\n> **⚠️ 程序已完成计算。你只能确认上述金额和依据文件。"
+                        "禁止输出任何计算过程、查表步骤、内插法、公式。"
+                        "禁止说\"无法计算\"\"数据不足\"\"需查表\"。**"
+                    )
+            else:
+                if is_sheji:
+                    fee_instruction = (
+                        "\n\n> # ⚠️ 工程设计费 — 最高优先级指令\n\n"
+                        "> 附表一和附表二已由程序直接展示给用户，你**不需要也不允许**再输出任何表格。\n"
+                        "> **严禁重新输出任何系数表或系数值！**\n"
+                        "> 你只能做解释性描述，但决不能列出具体数字。\n\n"
+                        "> ## 🚫 常见错误（训练数据经常搞错）\n"
+                        "> - **桥梁工程属于「交通运输工程」，不是建筑市政**\n"
+                        "> - **园林绿化系数是 1.1（不是 1.2）**\n"
+                        "> - 用户问系数值 → 回答「请查阅上方程序生成的附表二」\n"
+                        "> - 用户问分类归属 → 只能回答大类名称，**严禁说出系数数字**"
+                    )
+                else:
+                    fee_instruction = (
+                        "\n\n> **[最高优先级] 上述费率表和调整系数来自政策文件引擎，数据权威准确。"
+                        "你必须逐字引用检索结果中的数据，不得使用模型训练数据覆盖。"
+                        "如需精确计算，请让用户提供具体金额参数。**"
+                    )
+
         # 1. 检索本地数据库
         db_results = self.search(query, top_k=10)
         db_has_results = len(db_results) > 0
         max_score = max(r.get("_score", 0) for r in db_results) if db_results else 0
         needs_web = WEB_SEARCH_ENABLED and (not db_has_results or max_score < self.SCORE_THRESHOLD)
 
-        # 2. 构建数据库上下文
+        # 2. 检索知识库
+        kb_results = search_knowledge_base(query, self.knowledge_chunks, top_k=5)
+        kb_context = format_knowledge_context(kb_results)
+
+        # 3. 构建数据库上下文
         db_context = self._format_context(db_results)
 
-        # 3. 必要时联网搜索
+        # 4. 必要时联网搜索
         web_context = ""
         if needs_web:
             web_context = self._web_search(query)
 
-        # 4. 合并上下文
-        context = self._merge_contexts(db_context, web_context)
+        # 5. 合并上下文
+        normal_context = self._merge_contexts(db_context, web_context)
 
-        # 5. 构建消息
+        if fee_result and fee_result.get("has_amount"):
+            context = fee_context
+        else:
+            parts = []
+            if fee_context:
+                parts.append(fee_context)
+            if kb_context and kb_context != "未在知识库中检索到相关政策文件。":
+                parts.append(kb_context)
+            if normal_context and normal_context != "未在数据库中检索到相关数据。":
+                parts.append(normal_context)
+            context = "\n\n---\n\n".join(parts) if parts else "未检索到相关数据。"
+
+        # 6. 构建消息
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
         # 添加历史对话
@@ -446,21 +583,22 @@ class CostRAGEngine:
         # 添加当前查询和检索结果
         source_note = ""
         if web_context:
-            source_note = "\n（数据库检索结果来自本地绿化工程造价指标库，网络搜索结果来自互联网搜索作为补充。优先使用数据库数据，无数据时参考网络信息并标注来源。）"
+            source_note = "\n（数据库检索结果来自本地绿化工程造价指标库，知识库检索结果来自政策文件，网络搜索结果来自互联网搜索作为补充。优先使用数据库和知识库数据。）"
 
         messages.append({
             "role": "user",
             "content": f"""## 检索结果
 {context}
 {source_note}
+{fee_instruction}
 
 ## 用户问题
 {query}
 
 请根据检索结果回答。重要规则：
 1. 【费率/计算规则/收费标准】必须严格使用上方检索结果中的数据，不要使用你训练数据中的旧版本信息
-2. 优先引用数据库中的具体数据
-3. 数据库无数据时使用网络搜索结果作为参考
+2. 优先引用数据库和知识库中的具体数据
+3. 数据库和知识库都无数据时使用网络搜索结果作为参考
 4. 两者都没有时如实告知并给出通用建议
 5. 使用网络信息时请标注来源"""
         })
