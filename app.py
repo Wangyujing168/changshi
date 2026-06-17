@@ -270,7 +270,7 @@ if prompt:
             fee_result = detect_and_calculate(prompt)
 
             if fee_result and fee_result.get("has_amount"):
-                # === 引擎精确计算 ===
+                # === 引擎精确计算：全部费种直接展示，不经过 LLM ===
                 is_sheji = fee_result.get("fee_type") == "工程设计费"
 
                 st.markdown("### 计算结果（程序精确计算）")
@@ -281,15 +281,22 @@ if prompt:
                     _render_sheji_static(fee_result)
                     response = _build_sheji_text(fee_result)
                 else:
+                    # 非设计费：也跳过 LLM，用静态确认
                     st.divider()
-                    st.caption("以下为 AI 补充说明：")
-                    history = [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in st.session_state.messages[:-1]
-                        if m["role"] in ("user", "assistant")
-                    ]
-                    response = engine.chat(prompt, history)
-                    st.markdown(response)
+                    fee_name = fee_result.get("费种", "")
+                    result_val = fee_result.get("结果(万元)") or fee_result.get("结果(元)")
+                    unit = "万元" if "结果(万元)" in fee_result else "元"
+                    basis = fee_result.get("依据", "")
+                    params = fee_result.get("参数", {})
+                    desc = fee_result.get("说明", "")
+                    st.success(
+                        f"以上为程序依据 **{basis}** 精确计算结果。\n\n"
+                        f"计算结果：**{result_val} {unit}**\n\n"
+                        f"{desc}"
+                    )
+                    response = (
+                        f"根据{basis}，{fee_name}计算结果为 **{result_val} {unit}**。"
+                    )
 
             elif fee_result and not fee_result.get("has_amount"):
                 # === 无金额参考模式 ===
