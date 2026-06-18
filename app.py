@@ -53,12 +53,22 @@ def _render_engine_card(fee_result):
                 )
         steps = fee_result.get("计算步骤")
         if steps:
-            st.markdown("**分档计算**：")
-            for s in steps:
-                st.markdown(
-                    f"- {s.get('区间', '')}：{s.get('金额(万元)', '')}万元 "
-                    f"× {s.get('费率(%)', '')}% = **{s.get('费用(万元)', '')}万元**"
-                )
+            # 区分两种步骤格式：粗略估算类（有"步骤"/"公式"/"结果"）vs 分档累进类（有"区间"/"费率"）
+            if steps[0].get("步骤"):
+                st.markdown("**计算过程**：")
+                for i, s in enumerate(steps, 1):
+                    formula = s.get("公式", "")
+                    result_step = s.get("结果", "")
+                    st.markdown(
+                        f"**{i}. {s.get('步骤', '')}**：{formula} → **{result_step}**"
+                    )
+            else:
+                st.markdown("**分档计算**：")
+                for s in steps:
+                    st.markdown(
+                        f"- {s.get('区间', '')}：{s.get('金额(万元)', '')}万元 "
+                        f"× {s.get('费率(%)', '')}% = **{s.get('费用(万元)', '')}万元**"
+                    )
         if "分摊" in fee_result:
             st.caption(fee_result["分摊"])
         adjustment = fee_result.get("计费额调整")
@@ -204,6 +214,7 @@ with st.sidebar:
 
     st.markdown("### 二类费计算")
     examples_fee = [
+        "建安工程费131万，设备费160万，桥梁工程，勘察费多少？",
         "工程总概算8000万，建设管理费多少？",
         "中标金额6000万工程招标代理费",
         "交易服务费 中标额2000万",
@@ -215,11 +226,33 @@ with st.sidebar:
             st.session_state.current_query = ex
 
     st.divider()
+
+    # 持久化调试面板
+    if "debug_info" in st.session_state:
+        st.markdown("### 🔍 引擎调试")
+        d = st.session_state.debug_info
+        if "error" in d:
+            st.error(f"异常: {d['error']}")
+        else:
+            st.write(f"prompt: `{d.get('prompt','')}`")
+            st.write(f"fee_type: `{d['fee_type']}`")
+            st.write(f"has_amount: `{d['has_amount']}`")
+            st.write(f"费种: {d.get('费种','')}")
+            st.write(f"结果: {d.get('结果','')}")
+        if st.button("清除调试", key="clear_debug"):
+            del st.session_state.debug_info
+            st.rerun()
+
+    st.divider()
     st.caption("Powered by DeepSeek v4")
 
 # ===== 主界面 =====
 st.title("🌿 绿化工程造价智能问答")
-st.caption("基于园林绿化工程指标数据库，提供专业造价问答服务")
+st.caption("基于园林绿化工程指标数据库，提供专业造价问答服务 | v2026-06-18-03")
+
+# 全局调试：检查 current_query 状态
+if "current_query" in st.session_state:
+    st.warning(f"**:bug: current_query 已设置:** `{st.session_state.current_query[:80]}`")
 
 # 初始化引擎
 with st.spinner("正在加载数据库和 AI 模型..."):
@@ -260,14 +293,45 @@ else:
 if prompt:
     # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # 调试：将检测结果存入 session_state，跨 rerun 持久化
+    try:
+        debug_fee = detect_and_calculate(prompt)
+        st.session_state.debug_info = {
+            "prompt": prompt[:80],
+            "fee_type": debug_fee.get("fee_type") if debug_fee else "None",
+            "has_amount": debug_fee.get("has_amount") if debug_fee else "N/A",
+            "费种": debug_fee.get("费种", "") if debug_fee else "",
+            "结果": str(debug_fee.get("结果(万元)", debug_fee.get("结果(元)", ""))) if debug_fee else "",
+        }
+    except Exception as e:
+        st.session_state.debug_info = {"error": str(e)}
+        debug_fee = None
+
+    # 关键：fee_result 必须在后续分支中使用
+    fee_result = debug_fee
+
     with st.chat_message("user"):
         st.markdown(prompt)
 
     # 生成回答
     with st.chat_message("assistant"):
+        # DEBUG（用 st.write 确保可见）
+        st.write(f"🔍 DEBUG A: prompt='{prompt[:60]}' | len={len(prompt)}")
+        try:
+            fee_result = detect_and_calculate(prompt)
+            st.write(f"🔍 DEBUG B: fee_result is None = {fee_result is None}, type={type(fee_result).__name__}")
+            if fee_result:
+                st.write(f"🔍 DEBUG C: fee_type={fee_result.get('fee_type')}, has_amount={fee_result.get('has_amount')}")
+        except Exception as e:
+            st.write(f"🔍 DEBUG EXCEPTION: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+            fee_result = None
+
         with st.spinner("正在检索数据并生成回答..."):
             # 二类费规则引擎
-            fee_result = detect_and_calculate(prompt)
+            # fee_result = detect_and_calculate(prompt)  # 已在上方调用
 
             if fee_result and fee_result.get("has_amount"):
                 # === 引擎精确计算：全部费种直接展示，不经过 LLM ===
@@ -287,16 +351,60 @@ if prompt:
                     result_val = fee_result.get("结果(万元)") or fee_result.get("结果(元)")
                     unit = "万元" if "结果(万元)" in fee_result else "元"
                     basis = fee_result.get("依据", "")
-                    params = fee_result.get("参数", {})
                     desc = fee_result.get("说明", "")
-                    st.success(
-                        f"以上为程序依据 **{basis}** 精确计算结果。\n\n"
-                        f"计算结果：**{result_val} {unit}**\n\n"
-                        f"{desc}"
+                    ft = fee_result.get("fee_type", "")
+
+                    # 粗略估算类费种（《市政工程设计概算编制办法》）
+                    is_rough = ft in (
+                        "勘察费", "劳动安全卫生评审费",
+                        "场地准备费及临时设施费", "工程保险费",
                     )
-                    response = (
-                        f"根据{basis}，{fee_name}计算结果为 **{result_val} {unit}**。"
-                    )
+                    if is_rough:
+                        # 粗略估算：构建完整 markdown 响应（跨 rerun 持久化）
+                        mid_val = fee_result.get("结果中值(万元)")
+                        mid_text = f"（中值约 **{mid_val} 万元**）" if mid_val else ""
+
+                        # 构建计算过程
+                        steps = fee_result.get("计算步骤", [])
+                        steps_md = ""
+                        if steps:
+                            steps_md = "### 计算过程\n\n"
+                            for i, s in enumerate(steps, 1):
+                                step_name = s.get("步骤", "")
+                                formula = s.get("公式", "")
+                                result_step = s.get("结果", "")
+                                steps_md += f"**{i}. {step_name}**：{formula} → **{result_step}**\n\n"
+
+                        # 构建费率明细表
+                        detail = fee_result.get("费率明细", [])
+                        detail_md = ""
+                        if detail:
+                            detail_md = "### 费率-费用对照表\n\n"
+                            detail_md += "| 费率 | 费用（万元） |\n"
+                            detail_md += "|------|-------------|\n"
+                            for d in detail:
+                                detail_md += f"| {d['费率']} | **{d['费用(万元)']}** |\n"
+                            detail_md += "\n"
+
+                        response = (
+                            f"## {fee_name}\n\n"
+                            f"**依据**：{basis}\n\n"
+                            f"{steps_md}"
+                            f"{detail_md}"
+                            f"---\n\n"
+                            f"### 估算结果\n\n"
+                            f"估算范围：**{result_val} {unit}** {mid_text}\n\n"
+                            f"{desc}"
+                        )
+                    else:
+                        st.success(
+                            f"以上为程序依据 **{basis}** 精确计算结果。\n\n"
+                            f"计算结果：**{result_val} {unit}**\n\n"
+                            f"{desc}"
+                        )
+                        response = (
+                            f"根据{basis}，{fee_name}计算结果为 **{result_val} {unit}**。"
+                        )
 
             elif fee_result and not fee_result.get("has_amount"):
                 # === 无金额参考模式 ===
@@ -355,13 +463,69 @@ if prompt:
                     st.divider()
                     st.caption("以下为 AI 补充说明（仅作解释性描述，数字以上表为准）：")
 
-                history = [
-                    {"role": m["role"], "content": m["content"]}
-                    for m in st.session_state.messages[:-1]
-                    if m["role"] in ("user", "assistant")
-                ]
-                response = engine.chat(prompt, history)
-                st.markdown(response)
+                is_kancha = (fee_result.get("fee_type") == "勘察费")
+
+                if is_kancha:
+                    # 勘察费（无金额时）：展示计算方法和费率说明
+                    import pandas as pd
+                    st.markdown("### 工程勘察费 — 计算方法")
+                    st.info(
+                        "**工程勘察费**依据《工程勘察设计收费管理规定》（计价格[2002]10号）"
+                        "的 **工程勘察收费标准** 部分计算。\n\n"
+                        "⚠️ **与工程设计费的重要区别**：工程勘察费按**实物工作量**定额计费，"
+                        "不是按投资额比例。\n\n"
+                        "**精确计算公式**：\n"
+                        "- 工程勘察收费 = 工程勘察收费基准价 × (1 ± 20%)\n"
+                        "- 工程勘察收费基准价 = 实物工作收费 + 技术工作收费\n"
+                        "- 实物工作收费 = 收费基价 × 实物工作量 × 附加调整系数\n"
+                        "- 技术工作收费 = 实物工作收费 × 技术工作收费比例\n\n"
+                        "**粗略估算方法**（《市政工程设计概算编制办法》，中国计划出版社）：\n"
+                        "- 通用项目：第一部分工程费 × **0.8%~1.1%**\n"
+                        "- 建筑项目：第一部分工程费 × **0.3%~0.5%**\n\n"
+                        "💡 提供建安费和设备费金额，程序可按上述百分比法粗略估算。"
+                        "精确计算请提供勘察类型和实物工作量。"
+                    )
+
+                    jianan_detected = fee_result.get("检测到建安费(万元)")
+                    shebei_detected = fee_result.get("检测到设备费(万元)")
+                    amt_detected = fee_result.get("检测到金额(万元)")
+                    if jianan_detected is not None:
+                        st.metric("建安工程费", f"{jianan_detected} 万元")
+                        if shebei_detected is not None:
+                            st.metric("设备购置费", f"{shebei_detected} 万元")
+                    elif amt_detected is not None:
+                        st.metric("检测到金额", f"{amt_detected} 万元")
+
+                    st.divider()
+                    st.markdown("**需明确的参数（精确计算）**：")
+                    st.markdown(
+                        "1. 勘察类型（工程测量/岩土工程勘察/水文地质勘察/工程物探等 16 大类）\n"
+                        "2. 实物工作量（钻孔深度、测量面积/比例尺、取样数量等）\n"
+                        "3. 复杂程度等级（简单/中等/复杂）\n"
+                        "4. 附加调整系数（气温/高程/带状/水域等）"
+                    )
+                    st.caption("详细费率表见知识库《计价格[2002]10号》工程勘察收费标准章节。")
+
+                    # 构建响应文本
+                    response = (
+                        f"工程勘察费依据《工程勘察设计收费管理规定》（计价格[2002]10号）"
+                        f"的工程勘察收费标准计算。\n\n"
+                        f"⚠️ 与工程设计费不同，勘察费按**实物工作量**定额计费"
+                        f"（如钻探米数、测量面积等），不是按投资额比例。\n\n"
+                        f"**粗略估算**（《市政工程设计概算编制办法》）："
+                        f"通用 0.8%~1.1%，建筑 0.3%~0.5%。\n"
+                        f"**精确计算**需提供勘察类型（16大类）、实物工作量、复杂程度、附加调整系数。\n\n"
+                        f"详细费率表见知识库《计价格[2002]10号》工程勘察收费标准章节。"
+                    )
+
+                else:
+                    history = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in st.session_state.messages[:-1]
+                        if m["role"] in ("user", "assistant")
+                    ]
+                    response = engine.chat(prompt, history)
+                    st.markdown(response)
 
                 with st.expander("查看计费依据"):
                     st.markdown(f"**{fee_result.get('费种', '')}**")

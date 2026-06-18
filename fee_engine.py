@@ -316,6 +316,9 @@ _FEE_PATTERNS: list[tuple[str, str]] = [
     ("施工图审查费", r"施工图审查|图审[费费]|津价管.*46"),
     ("水土保持费", r"水土保持.*(?:费|方案编制|监测|验收|咨询)|保监.*22"),
     ("环境影响咨询费", r"环境影响(?:咨询|评价).*[费费]|环评[费费]|计价格.*125"),
+    ("劳动安全卫生评审费", r"劳动安全卫生评审|安全卫生评审费|安全评审费|劳安评审"),
+    ("场地准备费及临时设施费", r"场地准备费|临时设施费|场地准备及临时设施|场地.*准备.*费"),
+    ("工程保险费", r"工程保险[费费]|工程一切险|工程险|工程.*保险"),
 ]
 
 
@@ -824,6 +827,200 @@ def calc_shuibao(amount_yi: float, service_type: str = "方案编制") -> dict:
 
 
 # ============================================================
+# 粗略估算类费种（《市政工程设计概算编制办法》）
+# ============================================================
+
+def _detect_project_type(query: str) -> str:
+    """检测项目类型（用于勘察费粗略估算的费率选取：建筑 vs 通用）"""
+    if re.search(r"建筑|房建|住宅|公建|办公楼|教学楼|医院|商场|酒店|场馆", query):
+        return "建筑"
+    return "通用"
+
+
+def _build_rate_detail(total: float, lo: float, hi: float) -> list[dict]:
+    """
+    按 0.1% 间隔生成费率-费用对照表。
+
+    参数：
+        total: 第一部分工程费（万元）
+        lo: 起始费率（%）
+        hi: 结束费率（%）
+
+    返回：[{"费率": "0.5%", "费用(万元)": 1.455}, ...]
+    """
+    detail = []
+    rate = lo
+    while rate <= hi + 0.001:  # 浮点容差
+        fee = round(total * rate / 100.0, 4)
+        detail.append({"费率": f"{rate:.1f}%", "费用(万元)": fee})
+        rate = round(rate + 0.1, 1)
+    return detail
+
+
+def calc_kancha_rough(
+    jianan: float,
+    shebei: float = 0,
+    project_type: str = "通用",
+) -> dict:
+    """
+    工程勘察费粗略估算（《市政工程设计概算编制办法》，中国计划出版社）。
+
+    - 通用项目：第一部分工程费 × 0.8%, 0.9%, 1.0%, 1.1%
+    - 建筑项目：第一部分工程费 × 0.3%, 0.4%, 0.5%
+
+    精确计算应依据计价格[2002]10号，按实物工作量定额计费。
+    """
+    total = jianan + shebei
+
+    rates_map = {
+        "建筑": (0.3, 0.5),
+        "通用": (0.8, 1.1),
+    }
+    lo, hi = rates_map.get(project_type, (0.8, 1.1))
+
+    detail = _build_rate_detail(total, lo, hi)
+    fee_lo, fee_hi = detail[0]["费用(万元)"], detail[-1]["费用(万元)"]
+    fee_mid = round((fee_lo + fee_hi) / 2, 4)
+
+    return {
+        "费种": "工程勘察费（粗略估算）",
+        "依据": (
+            "粗略估算依据《市政工程设计概算编制办法》（中国计划出版社）；"
+            "精确计算依据《工程勘察设计收费管理规定》（计价格[2002]10号）工程勘察收费标准"
+        ),
+        "计算公式": f"第一部分工程费 × 费率（{project_type}项目，{lo}%~{hi}%，间隔 0.1%）",
+        "参数": {
+            "第一部分工程费(万元)": total,
+            "= 建安工程费(万元)": jianan,
+            "+ 设备购置费(万元)": shebei,
+            "项目类型": project_type,
+            "费率区间": f"{lo}%~{hi}%",
+            "间隔": "0.1%",
+        },
+        "结果(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果范围(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果中值(万元)": fee_mid,
+        "费率明细": detail,
+        "计算步骤": [
+            {"步骤": "确定第一部分工程费",
+             "公式": f"建安工程费 + 设备购置费 = {jianan} + {shebei}",
+             "结果": f"{total} 万元"},
+            {"步骤": "判定项目类型",
+             "公式": "根据查询关键词自动匹配",
+             "结果": f"{project_type}项目"},
+            {"步骤": "逐费率计算",
+             "公式": f"第一部分工程费 × {lo}%~{hi}%，间隔 0.1%",
+             "结果": f"共 {len(detail)} 档，详见费率明细表"},
+        ],
+        "说明": (
+            f"第一部分工程费 {total:.0f} 万元（建安 {jianan:.0f} 万 + 设备 {shebei:.0f} 万），"
+            f"{project_type}项目，费率 {lo}%~{hi}%（间隔 0.1%），"
+            f"勘察费粗略估算范围为 **{fee_lo:.4f} ~ {fee_hi:.4f} 万元**"
+            f"（中值约 **{fee_mid:.4f} 万元**）。\n\n"
+            f"⚠️ 此为粗略估算，精确计算需按计价格[2002]10号以实物工作量定额计费。"
+            f"如需精确计算，请提供勘察类型（工程测量/岩土勘察/水文地质等）和实物工作量"
+            f"（钻探米数、测量面积等）。"
+        ),
+    }
+
+
+def calc_laodong_anquan(total_wan: float) -> dict:
+    """
+    劳动安全卫生评审费（《市政工程设计概算编制办法》，中国计划出版社）。
+
+    第一部分工程费用 × 0.1%, 0.2%, 0.3%, 0.4%, 0.5%
+    """
+    lo, hi = 0.1, 0.5
+    detail = _build_rate_detail(total_wan, lo, hi)
+    fee_lo, fee_hi = detail[0]["费用(万元)"], detail[-1]["费用(万元)"]
+    fee_mid = round((fee_lo + fee_hi) / 2, 4)
+
+    return {
+        "费种": "劳动安全卫生评审费",
+        "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
+        "计算公式": f"第一部分工程费用 × {lo}%~{hi}%（间隔 0.1%）",
+        "参数": {"第一部分工程费用(万元)": total_wan, "费率区间": f"{lo}%~{hi}%", "间隔": "0.1%"},
+        "结果(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果范围(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果中值(万元)": fee_mid,
+        "费率明细": detail,
+        "计算步骤": [
+            {"步骤": "确定第一部分工程费用", "公式": "建安工程费 + 设备购置费", "结果": f"{total_wan} 万元"},
+            {"步骤": "逐费率计算", "公式": f"费率区间 {lo}%~{hi}%，间隔 0.1%", "结果": f"共 {len(detail)} 档"},
+        ],
+        "说明": (
+            f"第一部分工程费用 {total_wan:.0f} 万元，费率 {lo}%~{hi}%（间隔 0.1%），"
+            f"劳动安全卫生评审费估算范围为 **{fee_lo:.4f} ~ {fee_hi:.4f} 万元**"
+            f"（中值约 **{fee_mid:.4f} 万元**）。"
+        ),
+    }
+
+
+def calc_changdi_zhunbei(total_wan: float) -> dict:
+    """
+    场地准备费及临时设施费（《市政工程设计概算编制办法》，中国计划出版社）。
+
+    第一部分工程费用 × 0.5%, 0.6%, ..., 2.0%（间隔 0.1%）
+    """
+    lo, hi = 0.5, 2.0
+    detail = _build_rate_detail(total_wan, lo, hi)
+    fee_lo, fee_hi = detail[0]["费用(万元)"], detail[-1]["费用(万元)"]
+    fee_mid = round((fee_lo + fee_hi) / 2, 4)
+
+    return {
+        "费种": "场地准备费及临时设施费",
+        "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
+        "计算公式": f"第一部分工程费用 × {lo}%~{hi}%（间隔 0.1%）",
+        "参数": {"第一部分工程费用(万元)": total_wan, "费率区间": f"{lo}%~{hi}%", "间隔": "0.1%"},
+        "结果(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果范围(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果中值(万元)": fee_mid,
+        "费率明细": detail,
+        "计算步骤": [
+            {"步骤": "确定第一部分工程费用", "公式": "建安工程费 + 设备购置费", "结果": f"{total_wan} 万元"},
+            {"步骤": "逐费率计算", "公式": f"费率区间 {lo}%~{hi}%，间隔 0.1%", "结果": f"共 {len(detail)} 档"},
+        ],
+        "说明": (
+            f"第一部分工程费用 {total_wan:.0f} 万元，费率 {lo}%~{hi}%（间隔 0.1%），"
+            f"场地准备费及临时设施费估算范围为 **{fee_lo:.4f} ~ {fee_hi:.4f} 万元**"
+            f"（中值约 **{fee_mid:.4f} 万元**）。"
+        ),
+    }
+
+
+def calc_gongcheng_baoxian(total_wan: float) -> dict:
+    """
+    工程保险费（《市政工程设计概算编制办法》，中国计划出版社）。
+
+    第一部分工程费用 × 0.3%, 0.4%, 0.5%, 0.6%
+    """
+    lo, hi = 0.3, 0.6
+    detail = _build_rate_detail(total_wan, lo, hi)
+    fee_lo, fee_hi = detail[0]["费用(万元)"], detail[-1]["费用(万元)"]
+    fee_mid = round((fee_lo + fee_hi) / 2, 4)
+
+    return {
+        "费种": "工程保险费",
+        "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
+        "计算公式": f"第一部分工程费用 × {lo}%~{hi}%（间隔 0.1%）",
+        "参数": {"第一部分工程费用(万元)": total_wan, "费率区间": f"{lo}%~{hi}%", "间隔": "0.1%"},
+        "结果(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果范围(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果中值(万元)": fee_mid,
+        "费率明细": detail,
+        "计算步骤": [
+            {"步骤": "确定第一部分工程费用", "公式": "建安工程费 + 设备购置费", "结果": f"{total_wan} 万元"},
+            {"步骤": "逐费率计算", "公式": f"费率区间 {lo}%~{hi}%，间隔 0.1%", "结果": f"共 {len(detail)} 档"},
+        ],
+        "说明": (
+            f"第一部分工程费用 {total_wan:.0f} 万元，费率 {lo}%~{hi}%（间隔 0.1%），"
+            f"工程保险费估算范围为 **{fee_lo:.4f} ~ {fee_hi:.4f} 万元**"
+            f"（中值约 **{fee_mid:.4f} 万元**）。"
+        ),
+    }
+
+
+# ============================================================
 # 费种参考信息（无金额时返回费率表/规则说明）
 # ============================================================
 
@@ -1015,9 +1212,10 @@ def _get_fee_reference(fee_type: str) -> dict:
                 "合并 = 各系数相加 − 个数 + 1\n\n"
                 "**气温附加**：≥35°C 或 ≤-10°C 时，气温附加系数 1.2\n"
                 "**高程附加**：2000-3000m 1.1，3001-3500m 1.2，3501-4000m 1.3，>4000m 协商\n\n"
-                "**估算参考**：在缺乏详细勘察工作量数据时，工程勘察费通常可按"
-                "**工程设计费的 30%~60%** 粗略估算，或按建安工程费的 0.2%~0.8% 估算"
-                "（注：此为行业经验值，非政策文件规定，实际应以实物工作量精确计算为准）。"
+                "**粗略估算**（《市政工程设计概算编制办法》，中国计划出版社）：\n"
+                "- 通用项目：第一部分工程费 × 0.8%~1.1%（间隔 0.1%）\n"
+                "- 建筑项目：第一部分工程费 × 0.3%~0.5%（间隔 0.1%）\n\n"
+                "⚠️ 以上为粗略估算方法，精确计算仍需按计价格[2002]10号以实物工作量定额计费。"
             ),
         },
         "可行性研究费": {
@@ -1082,6 +1280,48 @@ def _get_fee_reference(fee_type: str) -> dict:
                 (">100", "110 以上", "—", "13 以上", "—"),
             ],
             "计算说明": "⚠️ 125号文精确费率表在原PDF附件中，上表为区间参考值。具体收费在此范围内由双方协商确定。",
+        },
+        "劳动安全卫生评审费": {
+            "费种": "劳动安全卫生评审费",
+            "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
+            "计费方式": "第一部分工程费用 × 0.1%~0.5%",
+            "参数说明": "第一部分工程费用 = 建安工程费 + 设备购置费（万元）",
+            "费率表": [
+                ("费率下限", "费率上限"),
+                ("0.1%", "0.5%"),
+            ],
+            "计算说明": (
+                "劳动安全卫生评审费 = 第一部分工程费用 × 0.1%~0.5%。\n"
+                "例如：第一部分工程费用 1000 万元，评审费 ≈ 1~5 万元。"
+            ),
+        },
+        "场地准备费及临时设施费": {
+            "费种": "场地准备费及临时设施费",
+            "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
+            "计费方式": "第一部分工程费用 × 0.5%~2.0%",
+            "参数说明": "第一部分工程费用 = 建安工程费 + 设备购置费（万元）",
+            "费率表": [
+                ("费率下限", "费率上限"),
+                ("0.5%", "2.0%"),
+            ],
+            "计算说明": (
+                "场地准备费及临时设施费 = 第一部分工程费用 × 0.5%~2.0%。\n"
+                "例如：第一部分工程费用 1000 万元，场地准备费 ≈ 5~20 万元。"
+            ),
+        },
+        "工程保险费": {
+            "费种": "工程保险费",
+            "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
+            "计费方式": "第一部分工程费用 × 0.3%~0.6%",
+            "参数说明": "第一部分工程费用 = 建安工程费 + 设备购置费（万元）",
+            "费率表": [
+                ("费率下限", "费率上限"),
+                ("0.3%", "0.6%"),
+            ],
+            "计算说明": (
+                "工程保险费 = 第一部分工程费用 × 0.3%~0.6%。\n"
+                "例如：第一部分工程费用 1000 万元，保险费 ≈ 3~6 万元。"
+            ),
         },
     }
     return refs.get(fee_type, {
@@ -1278,19 +1518,57 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             svc = "方案编制"
         result = calc_shuibao(amount_yi, svc)
     elif fee_type == "勘察费":
-        # 工程勘察费（计价格[2002]10号）— 按实物工作量定额计费，不是按投资额
-        # 无法仅凭建安费/设备费直接计算；直接返回参考信息，含知识库详细费率表
-        ref = _get_fee_reference("勘察费")
-        ref["fee_type"] = fee_type
-        ref["has_amount"] = False
-        # 附带提取到的金额信息，供 LLM 参考
+        # 工程勘察费 — 精确计算需按计价格[2002]10号实物工作量定额
+        # 粗略估算按《市政工程设计概算编制办法》百分比法
         jianan_kc, shebei_kc = _extract_jianli_components(query)
         if jianan_kc is not None:
-            ref["检测到建安费(万元)"] = jianan_kc
-            ref["检测到设备费(万元)"] = shebei_kc
+            project_type = _detect_project_type(query)
+            result = calc_kancha_rough(jianan_kc, shebei_kc or 0, project_type)
         elif amount is not None:
-            ref["检测到金额(万元)"] = amount
-        return ref
+            project_type = _detect_project_type(query)
+            result = calc_kancha_rough(amount, 0, project_type)
+        else:
+            # 无金额 → 返回参考信息
+            ref = _get_fee_reference("勘察费")
+            ref["fee_type"] = fee_type
+            ref["has_amount"] = False
+            return ref
+    elif fee_type == "劳动安全卫生评审费":
+        jianan_l, shebei_l = _extract_jianli_components(query)
+        total_l = (jianan_l or 0) + (shebei_l or 0)
+        if total_l > 0:
+            result = calc_laodong_anquan(total_l)
+        elif amount is not None:
+            result = calc_laodong_anquan(amount)
+        else:
+            ref = _get_fee_reference("劳动安全卫生评审费")
+            ref["fee_type"] = fee_type
+            ref["has_amount"] = False
+            return ref
+    elif fee_type == "场地准备费及临时设施费":
+        jianan_c, shebei_c = _extract_jianli_components(query)
+        total_c = (jianan_c or 0) + (shebei_c or 0)
+        if total_c > 0:
+            result = calc_changdi_zhunbei(total_c)
+        elif amount is not None:
+            result = calc_changdi_zhunbei(amount)
+        else:
+            ref = _get_fee_reference("场地准备费及临时设施费")
+            ref["fee_type"] = fee_type
+            ref["has_amount"] = False
+            return ref
+    elif fee_type == "工程保险费":
+        jianan_b, shebei_b = _extract_jianli_components(query)
+        total_b = (jianan_b or 0) + (shebei_b or 0)
+        if total_b > 0:
+            result = calc_gongcheng_baoxian(total_b)
+        elif amount is not None:
+            result = calc_gongcheng_baoxian(amount)
+        else:
+            ref = _get_fee_reference("工程保险费")
+            ref["fee_type"] = fee_type
+            ref["has_amount"] = False
+            return ref
     elif fee_type == "环境影响咨询费":
         result = {
             "费种": "环境影响咨询费",
