@@ -138,6 +138,8 @@ def _build_sheji_text(fee_result):
     """构建工程设计费的对话历史文本"""
     params = fee_result.get("参数", {})
     prof = params.get("专业调整系数", "")
+    complexity = params.get("复杂程度系数", "")
+    additional = params.get("附加调整系数", "")
     jifei = params.get("计费额(万元)", "")
     jijia = params.get("收费基价(万元)", "")
     basic = fee_result.get("基本设计收费(万元)")
@@ -146,6 +148,8 @@ def _build_sheji_text(fee_result):
         f"根据计价格[2002]10号，计费额{jifei}万元，"
         f"收费基价{jijia}万元（附表一内插），"
         f"专业调整系数{prof}，"
+        f"复杂程度系数{complexity}，"
+        f"附加调整系数{additional}，"
         f"基本设计收费 **{basic} 万元**。"
     )
     other_items = fee_result.get("其他设计收费明细") or []
@@ -248,7 +252,7 @@ with st.sidebar:
 
 # ===== 主界面 =====
 st.title("🌿 绿化工程造价智能问答")
-st.caption("基于园林绿化工程指标数据库，提供专业造价问答服务 | v2026-06-18-03")
+st.caption("基于园林绿化工程指标数据库，提供专业造价问答服务 | v2026-06-22 设计费三系数输出")
 
 # 全局调试：检查 current_query 状态
 if "current_query" in st.session_state:

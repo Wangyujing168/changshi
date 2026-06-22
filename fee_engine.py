@@ -310,7 +310,7 @@ _FEE_PATTERNS: list[tuple[str, str]] = [
     ("招标代理费", r"招标代理|招标.*收费|计价格.*1980"),
     ("交易服务费", r"交易服务费|工程建设交易|津发改.*979"),
     ("监理费", r"监理.*(?:费|收费|服务费)|施工监理.*收费|发改价格.*670"),
-    ("工程设计费", r"工程(?:勘察)?设计费?[^用]|基本设计收费|勘察设计收费|设计收费基价|设计费.*(?:计费|计算|收费|多少|怎么|如何|专业|调整|系数|表|区分|分类|有哪些|是什么|怎么区分)|设计费\s*[？?]|设计费\s*$|计价格.*10号"),
+    ("工程设计费", r"工程(?:勘察)?设计费?[^用]|基本设计收费|勘察设计收费|设计收费基价|设计费.*(?:计费|计算|收费|多少|怎么|如何|专业|调整|系数|表|区分|分类|有哪些|是什么|怎么区分|复杂|Ⅰ|Ⅱ|Ⅲ|I级|II级|III级|\d)|设计费\s*[？?]|设计费\s*$|计价格.*10号"),
     ("勘察费", r"勘察费|工程勘察(?!设计)|岩土.*勘察.*费|水文地质.*勘察.*费|勘察.*(?:多少|计算|怎么|如何|收费|取费|标准|定额)"),
     ("可行性研究费", r"可行性研究|可研|项目建议书|前期工作咨询|计价格.*1283"),
     ("施工图审查费", r"施工图审查|图审[费费]|津价管.*46"),
@@ -652,8 +652,6 @@ def calc_sheji(
     other_total = round(sum(f for _, f in other_items), 4)
     benchmark = round(basic_design + other_total, 4)  # 基准价
 
-    has_coef = any(c != 1.0 for c in [professional_coef, complexity_coef, additional_coef])
-
     params: dict = {
         "计费额(万元)": amount_wan,
         "收费基价(万元)": base_price,
@@ -665,17 +663,12 @@ def calc_sheji(
         params["附加系数明细"] = f"{' + '.join(str(c) for c in additional_coefs)} → 合并后 {additional_coef:.2f}"
 
     desc = f"计费额 {amount_wan:.0f} 万元，收费基价 {base_price:.4f} 万元"
-    if has_coef:
-        coef_parts = []
-        if professional_coef != 1.0:
-            coef_parts.append(f"专业系数 {professional_coef}")
-        if complexity_coef != 1.0:
-            coef_parts.append(f"复杂系数 {complexity_coef}")
-        if additional_coef != 1.0:
-            coef_parts.append(f"附加系数 {additional_coef}")
-        desc += f"，{'×'.join(coef_parts)}，基本设计收费 **{basic_design:.4f} 万元**"
-    else:
-        desc += f"，基本设计收费 **{basic_design:.4f} 万元**"
+    coef_parts = [
+        f"专业系数 {professional_coef}",
+        f"复杂系数 {complexity_coef}",
+        f"附加系数 {additional_coef}",
+    ]
+    desc += f"，{'×'.join(coef_parts)}，基本设计收费 **{basic_design:.4f} 万元**"
 
     if other_items:
         desc += "\n其他设计收费："
@@ -1376,7 +1369,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
         # 自动检测系数（无金额模式下也匹配，避免 LLM 自行猜测）
         if fee_type == "工程设计费":
             prof = _extract_sheji_professional_coef(query)
-            comp = _extract_coef(query, r"复杂.*?系数.*?(\d+\.?\d*)", 1.0)
+            comp = _extract_sheji_complexity_coef(query)
             ref["auto_detected_coefs"] = {
                 "专业调整系数": prof,
                 "复杂程度系数": comp,
@@ -1448,7 +1441,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             )
     elif fee_type == "工程设计费":
         prof = _extract_sheji_professional_coef(query)
-        comp = _extract_coef(query, r"复杂.*?系数.*?(\d+\.?\d*)", 1.0)
+        comp = _extract_sheji_complexity_coef(query)
         # 附加调整系数 — 可能多个（1.0.9.3: 不能连乘，需合并）
         addi_matches = re.findall(r"附加.*?系数.*?(\d+\.?\d*)", query)
         addi_list = [float(m) for m in addi_matches] if addi_matches else None
@@ -1637,11 +1630,31 @@ def _extract_jianli_complexity_coef(query: str) -> float:
     # 2. 关键词匹配（III → II → I 顺序，不可颠倒）
     if re.search(r'III级|Ⅲ级', query):
         return 1.15
+    if re.search(r'II级|Ⅱ级|较复杂', query):
+        return 1.0
     if re.search(r'(?<!较)复杂', query):
+        return 1.15
+    if re.search(r'I级|Ⅰ级|简单', query):
+        return 0.85
+    return 1.0
+
+
+def _extract_sheji_complexity_coef(query: str) -> float:
+    """自动匹配工程设计费复杂程度调整系数（计价格[2002]10号 1.0.9.2）。
+    优先显式数字，其次关键词匹配，默认 1.0（II级/较复杂）。
+    匹配顺序 III → II → I，避免罗马数字子串误匹配（如 I级 匹配 III级）。"""
+    # 1. 显式数字：复杂程度系数 1.15 / 工程复杂程度系数 0.85 等
+    m = re.search(r'复杂.*?(?:系数|程度).*?(\d+\.?\d*)', query)
+    if m:
+        return float(m.group(1))
+    # 2. 关键词匹配（III → II → I 顺序，不可颠倒；II级必须在裸"复杂"之前）
+    if re.search(r'III级|Ⅲ级', query):
         return 1.15
     if re.search(r'II级|Ⅱ级|较复杂', query):
         return 1.0
-    if re.search(r'I级|Ⅰ级|简单', query):
+    if re.search(r'(?<!较)复杂', query):
+        return 1.15
+    if re.search(r'I级|Ⅰ级|简单|一般', query):
         return 0.85
     return 1.0
 
