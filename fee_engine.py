@@ -174,6 +174,34 @@ SHIGONG_SHENCHA_RATES: dict[str, dict[str, float]] = {
 }
 # 幕墙/深基坑等单项：1.6‰，最低 1000 元
 
+# 建市[2007]86号 工程设计资质标准 — 各行业大中小项目划分标准
+# 用于施工图审查费的项目规模自动判定（津价管[2011]46号 第七条）
+# 格式：(下限, 上限, 大型阈值, 中型上限) — 小于等于下限→小型，大于等于上限→大型，之间→中型
+
+# 建筑行业（建筑工程）— 一般公共建筑：单体建筑面积(m²)
+JIANZHU_GONGGONG_M2: tuple[float, float] = (5000, 20000)   # ≤5000小, 5000~20000中, ≥20000大
+# 建筑行业（建筑工程）— 一般公共建筑：建筑高度(m)
+JIANZHU_GONGGONG_H: tuple[float, float] = (24, 50)          # ≤24小, 24~50中, ≥50大
+# 住宅/宿舍：层数
+JIANZHU_ZHUZHAI_CENG: tuple[float, float] = (12, 20)        # ≤12小, 12~20中, >20大
+# 住宅小区/工厂生活区：总建筑面积(m²)
+JIANZHU_XIAOQU_M2: tuple[float, float] = (0, 300000)        # ≤30万中, >30万大（无小型）
+
+# 市政行业 — 各子项规模划分
+SHIZHENG_SCALE: dict[str, tuple[float, float]] = {
+    "道路": (4, 10),          # 万m²: ≤4小, 4~10中, ≥10大
+    "桥梁": (30, 100),        # 多孔跨径(m): ≤30小, 30~100中, ≥100大（单孔: ≤30小, 30~40中, ≥40大）
+    "给水": (5, 20),          # 万吨/日: ≤5小, 5~20中, ≥20大
+    "排水": (4, 10),          # 万吨/日: ≤4小, 4~10中, ≥10大
+    "隧道": (250, 1000),      # m: ≤250小, 250~1000中, ≥1000大
+    "风景园林": (100, 1000),  # 万元: ≤100小, 100~1000中, >1000大
+    "燃气": (10, 30),         # 万m³/日
+    "热力": (150, 500),       # 万m²
+}
+
+# 工业行业 — 按投资额划分（简化，实际按细分行业有不同标准）
+GONGYE_SCALE: tuple[float, float] = (3000, 10000)  # 万元: ≤3000小, 3000~10000中, ≥10000大
+
 # 保监[2005]22 号 水土保持咨询服务费（单位：土建投资_亿元, 费用_万元）
 SHUIBAO_TUDI_TOUZI: list[float] = [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
                                    11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0]
@@ -283,10 +311,10 @@ def _extract_amount(query: str) -> float | None:
     if m:
         return float(m.group(1)) * 10000
 
-    # 万元
-    m = re.search(r'(\d+\.?\d*)\s*万', query)
-    if m:
-        return float(m.group(1))
+    # 万元 — 取所有匹配中最大的（当"建安费131万+设备费160万"时取160而非131）
+    m_wan = re.findall(r'(\d+\.?\d*)\s*万', query)
+    if m_wan:
+        return max(float(x) for x in m_wan)
 
     # …元以上 / …元
     m = re.search(r'(\d+\.?\d*)\s*元', query)
@@ -733,22 +761,32 @@ def calc_shigong_shencha(
     sheji_fee: float | None = None,
 ) -> dict:
     """
-    施工图审查费（津价管[2011]46号）。
+    施工图审查费（津价管[2011]46号 + 建市[2007]86号）。
 
-    住宅类：按建筑面积 m²
-    公建/工业/市政类：按勘察设计费 × 费率
+    住宅类：按建筑面积 × 单价（元/m²）
+    公建/工业/市政类：按勘察设计费（计价格[2002]10号计算）× 费率(%)
+    项目大中小划分：建市[2007]86号《工程设计资质标准》
     """
+    size_desc = {"大型": "大型", "中型": "中型", "小型": "小型"}.get(size, size)
+
     if project_type == "住宅":
         rate_per_m2 = SHIGONG_SHENCHA_ZHUZHAI.get(size, 1.7)
         fee = round(amount * rate_per_m2, 2)
-        desc = f"住宅 {size} 项目，建筑面积 {amount:.0f} m²，审查费 **{fee:.2f} 元**"
+        desc = f"住宅 {size_desc} 项目，建筑面积 {amount:.0f} m² × {rate_per_m2} 元/m²，审查费 **{fee:.2f} 元**"
         return {
-            "费种": f"施工图审查费（住宅{size}）",
-            "依据": "《市发展改革委关于施工图审查收费标准的通知》（津价管[2011]46号）",
+            "费种": f"施工图审查费（住宅{size_desc}）",
+            "依据": "《市发展改革委关于施工图审查收费标准的通知》（津价管[2011]46号）\n"
+                    "项目规模划分依据：《工程设计资质标准》（建市[2007]86号）",
             "计算公式": f"审查费 = 建筑面积 × {rate_per_m2} 元/m²",
-            "参数": {"建筑面积(m²)": amount, "项目规模": size, "单价(元/m²)": rate_per_m2},
+            "参数": {"建筑面积(m²)": amount, "项目规模": size_desc, "单价(元/m²)": rate_per_m2},
             "结果(元)": fee,
             "说明": desc,
+            "计算步骤": [
+                {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": "住宅类"},
+                {"步骤": "判定项目规模", "公式": "建市[2007]86号：住宅按层数（≤12小/12~20中/>20大）", "结果": f"{size_desc}项目"},
+                {"步骤": "查找收费标准", "公式": f"津价管[2011]46号 第一条：住宅{size_desc} {rate_per_m2}元/m²", "结果": f"{rate_per_m2} 元/m²"},
+                {"步骤": "计算审查费", "公式": f"{amount:.0f} m² × {rate_per_m2} 元/m²", "结果": f"{fee:.2f} 元"},
+            ],
         }
 
     # 公建/工业/市政：以勘察设计费为基数
@@ -757,20 +795,36 @@ def calc_shigong_shencha(
 
     if sheji_fee is not None:
         fee = round(sheji_fee * rate_pct / 100.0, 4)
-        desc = f"{project_type} {size} 项目，设计费 {sheji_fee:.0f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
-        params = {"勘察设计费(万元)": sheji_fee, "项目类型": project_type, "项目规模": size, "费率(%)": rate_pct}
+        desc = f"{project_type} {size_desc} 项目，设计费 {sheji_fee:.4f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
+        params = {"勘察设计费(万元)": sheji_fee, "项目类型": project_type, "项目规模": size_desc, "费率(%)": rate_pct}
+        steps = [
+            {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": f"{project_type}类"},
+            {"步骤": "判定项目规模", "公式": "建市[2007]86号各行业大中小项目划分标准", "结果": f"{size_desc}项目"},
+            {"步骤": "计算勘察设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee:.4f} 万元"},
+            {"步骤": "查找审查费率", "公式": f"津价管[2011]46号：{project_type}类{size_desc} {rate_pct}%", "结果": f"{rate_pct}%"},
+            {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {rate_pct}%", "结果": f"{fee:.4f} 万元"},
+        ]
     else:
         fee = round(amount * rate_pct / 100.0, 4)
-        desc = f"{project_type} {size} 项目，计费基数 {amount:.0f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
-        params = {"计费基数(万元)": amount, "项目类型": project_type, "项目规模": size, "费率(%)": rate_pct}
+        desc = f"{project_type} {size_desc} 项目，计费基数 {amount:.0f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
+        params = {"计费基数(万元)": amount, "项目类型": project_type, "项目规模": size_desc, "费率(%)": rate_pct}
+        steps = [
+            {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": f"{project_type}类"},
+            {"步骤": "判定项目规模", "公式": "建市[2007]86号各行业大中小项目划分标准", "结果": f"{size_desc}项目"},
+            {"步骤": "查找审查费率", "公式": f"津价管[2011]46号：{project_type}类{size_desc} {rate_pct}%", "结果": f"{rate_pct}%"},
+            {"步骤": "计算审查费", "公式": f"{amount:.0f} 万元 × {rate_pct}%", "结果": f"{fee:.4f} 万元"},
+        ]
 
     return {
-        "费种": f"施工图审查费（{project_type}{size}）",
-        "依据": "《市发展改革委关于施工图审查收费标准的通知》（津价管[2011]46号）",
-        "计算公式": f"审查费 = 勘察设计费 × {rate_pct}%",
+        "费种": f"施工图审查费（{project_type}{size_desc}）",
+        "依据": "《市发展改革委关于施工图审查收费标准的通知》（津价管[2011]46号）\n"
+                "项目规模划分依据：《工程设计资质标准》（建市[2007]86号）\n"
+                "勘察设计费计算依据：《工程勘察设计收费管理规定》（计价格[2002]10号）",
+        "计算公式": f"审查费 = 勘察设计费 × {rate_pct}%（勘察设计费按计价格[2002]10号计算）",
         "参数": params,
         "结果(万元)": fee,
-        "说明": desc + "；幕墙/深基坑单项工程按 1.6‰ 计取（最低 1000 元）",
+        "说明": desc + "\n幕墙/深基坑单项工程按 1.6‰ 计取（最低 1000 元）",
+        "计算步骤": steps,
     }
 
 
@@ -828,6 +882,135 @@ def _detect_project_type(query: str) -> str:
     if re.search(r"建筑|房建|住宅|公建|办公楼|教学楼|医院|商场|酒店|场馆", query):
         return "建筑"
     return "通用"
+
+
+def _detect_project_size_86(query: str, project_type: str) -> str:
+    """
+    根据建市[2007]86号《工程设计资质标准》自动判定项目规模（大/中/小）。
+
+    优先级：
+    1. 用户显式声明"大型"/"中型"/"小型" → 直接采用
+    2. 查询中包含具体技术参数（建筑面积/层数/道路面积等）→ 查表判定
+    3. 默认 → 中型
+    """
+    # 1. 用户显式声明（最高优先级）
+    if re.search(r"大[型]|大型", query):
+        return "大型"
+    if re.search(r"小[型]|小型", query):
+        return "小型"
+
+    # 2. 根据项目类型查表
+    if project_type == "住宅":
+        # 住宅：按层数判定
+        m = re.search(r"(\d+)\s*层", query)
+        if m:
+            ceng = float(m.group(1))
+            lo, hi = JIANZHU_ZHUZHAI_CENG
+            if ceng > hi:
+                return "大型"
+            elif ceng > lo:
+                return "中型"
+            else:
+                return "小型"
+        # 住宅小区：按总建筑面积判定
+        m = re.search(r"(?:总建筑面积|建筑面积|面积)\s*[:：]?\s*(\d+\.?\d*)\s*万?\s*(?:m2|㎡|平米|平方米)?", query)
+        if m:
+            val = float(m.group(1))
+            unit = "万m²" if re.search(r"万\s*(?:m2|㎡|平米|平方米)?", query) else "m²"
+            if unit == "m²":
+                val = val / 10000  # 转万m²
+            # 按小区标准：>30万m² 大型，≤30万m² 中型
+            if val > 30:
+                return "大型"
+            else:
+                return "中型"
+
+    elif project_type == "公建" or project_type == "建筑":
+        # 公共建筑：按单体建筑面积 或 建筑高度判定
+        m_m2 = re.search(r"(?:单体建筑面积|建筑面积|面积)\s*[:：]?\s*(\d+\.?\d*)\s*万?\s*(?:m2|㎡|平米|平方米)?", query)
+        m_h = re.search(r"(?:建筑高度|高度|檐高)\s*[:：]?\s*(\d+\.?\d*)\s*m?", query)
+        m_ceng = re.search(r"(\d+)\s*层", query)
+
+        size = "中型"  # 默认
+        if m_m2:
+            val = float(m_m2.group(1))
+            if re.search(r"万\s*(?:m2|㎡|平米|平方米)?", query):
+                val = val * 10000  # 转m²
+            lo, hi = JIANZHU_GONGGONG_M2
+            if val >= hi:
+                size = "大型"
+            elif val > lo:
+                size = "中型"
+            else:
+                size = "小型"
+        if m_h:
+            val = float(m_h.group(1))
+            lo_h, hi_h = JIANZHU_GONGGONG_H
+            h_size = "中型"
+            if val > hi_h:
+                h_size = "大型"
+            elif val > lo_h:
+                h_size = "中型"
+            else:
+                h_size = "小型"
+            # 取更高级别（面积和高度以高级别为准）
+            if h_size == "大型" or size == "大型":
+                size = "大型"
+            elif h_size == "小型" and size == "小型":
+                size = "小型"
+        if m_ceng and not m_m2 and not m_h:
+            ceng = float(m_ceng.group(1))
+            if ceng > 20:
+                size = "大型"
+            elif ceng > 12:
+                size = "中型"
+            else:
+                size = "小型"
+        return size
+
+    elif project_type == "市政":
+        # 市政：根据子项类型判定
+        for sub_type, (lo, hi) in SHIZHENG_SCALE.items():
+            if re.search(sub_type, query):
+                # 尝试提取技术参数
+                m = re.search(rf"{sub_type}.*?(\d+\.?\d*)\s*(?:万)?\s*(?:m2|㎡|平米|平方米|m|米|万吨)", query)
+                if not m:
+                    m = re.search(r"(\d+\.?\d*)\s*万?\s*(?:m2|㎡|平米|平方米)", query)
+                if m:
+                    val = float(m.group(1))
+                    # 桥梁：单孔跨径 ≥40m → 大型（建市[2007]86号）
+                    if sub_type == "桥梁" and re.search(r"单[孔跨]|单跨", query):
+                        if val >= 40:
+                            return "大型"
+                        elif val > 30:
+                            return "中型"
+                        else:
+                            return "小型"
+                    if val >= hi:
+                        return "大型"
+                    elif val > lo:
+                        return "中型"
+                    else:
+                        return "小型"
+                break
+        return "中型"  # 市政默认中型
+
+    elif project_type == "工业":
+        # 工业：按投资额判定
+        m = re.search(r"(?:投资额|总投资|工程费|计费额)\s*[:：]?\s*(\d+\.?\d*)\s*万?", query)
+        if m:
+            val = float(m.group(1))
+            lo, hi = GONGYE_SCALE
+            if val >= hi:
+                return "大型"
+            elif val > lo:
+                return "中型"
+            else:
+                return "小型"
+        return "中型"
+
+    # 3. 默认中型
+    return "中型"
 
 
 def _build_rate_detail(total: float, lo: float, hi: float) -> list[dict]:
@@ -1482,21 +1665,42 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             svc = "编制可研报告"
         result = calc_keyan(amount_yi, svc)
     elif fee_type == "施工图审查费":
+        # 津价管[2011]46号 + 建市[2007]86号
         if re.search(r"住宅", query):
             ptype = "住宅"
         elif re.search(r"工业", query):
             ptype = "工业"
-        elif re.search(r"市政", query):
+        elif re.search(r"市政|道路|桥梁|隧道|给水|排水|燃气|热力|轨道交通|风景园林|环境卫生|污水处理|垃圾处理|供热", query):
             ptype = "市政"
         else:
             ptype = "公建"
-        if re.search(r"大[型]|大型", query):
-            size = "大型"
-        elif re.search(r"小[型]|小型", query):
-            size = "小型"
+        # 建市[2007]86号 自动判定项目规模
+        size = _detect_project_size_86(query, ptype)
+        # 非住宅类：以勘察设计费为基数（津价管[2011]46号 第二~四条）
+        sheji_fee = None
+        if ptype != "住宅":
+            # 提取计费额（建安+设备），调用 calc_sheji 计算设计费作为审查费基数
+            jianan_ss, shebei_ss = _extract_jianli_components(query)
+            ss_jifei = amount
+            if jianan_ss is not None:
+                ss_jifei = jianan_ss + (shebei_ss or 0)
+            # 自动匹配设计费专业系数
+            ss_prof = _extract_sheji_professional_coef(query)
+            ss_comp = _extract_sheji_complexity_coef(query)
+            ss_addi = re.findall(r"附加.*?系数.*?(\d+\.?\d*)", query)
+            ss_addi_list = [float(m) for m in ss_addi] if ss_addi else None
+            sheji_result = calc_sheji(ss_jifei, ss_prof, ss_comp, additional_coefs=ss_addi_list)
+            sheji_fee = sheji_result["结果(万元)"]
         else:
-            size = "中型"
-        result = calc_shigong_shencha(amount, ptype, size)
+            # 住宅类：提取建筑面积
+            m_m2 = re.search(r"(?:建筑面积|面积)\s*[:：]?\s*(\d+\.?\d*)\s*万?\s*(?:m2|㎡|平米|平方米)?", query)
+            if m_m2:
+                val = float(m_m2.group(1))
+                if re.search(r"万\s*(?:m2|㎡|平米|平方米)?", query):
+                    amount = val * 10000
+                else:
+                    amount = val
+        result = calc_shigong_shencha(amount, ptype, size, sheji_fee=sheji_fee)
     elif fee_type == "水土保持费":
         amount_yi = _extract_amount_yi(query)
         if amount_yi is None:

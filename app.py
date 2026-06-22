@@ -358,13 +358,15 @@ if prompt:
                     desc = fee_result.get("说明", "")
                     ft = fee_result.get("fee_type", "")
 
+                    # 施工图审查费（津价管[2011]46号 + 建市[2007]86号）
+                    is_shencha = ft == "施工图审查费"
                     # 粗略估算类费种（《市政工程设计概算编制办法》）
                     is_rough = ft in (
                         "勘察费", "劳动安全卫生评审费",
                         "场地准备费及临时设施费", "工程保险费",
                     )
-                    if is_rough:
-                        # 粗略估算：构建完整 markdown 响应（跨 rerun 持久化）
+                    if is_shencha or is_rough:
+                        # 构建完整 markdown 响应（跨 rerun 持久化）
                         mid_val = fee_result.get("结果中值(万元)")
                         mid_text = f"（中值约 **{mid_val} 万元**）" if mid_val else ""
 
@@ -390,16 +392,27 @@ if prompt:
                                 detail_md += f"| {d['费率']} | **{d['费用(万元)']}** |\n"
                             detail_md += "\n"
 
-                        response = (
-                            f"## {fee_name}\n\n"
-                            f"**依据**：{basis}\n\n"
-                            f"{steps_md}"
-                            f"{detail_md}"
-                            f"---\n\n"
-                            f"### 估算结果\n\n"
-                            f"估算范围：**{result_val} {unit}** {mid_text}\n\n"
-                            f"{desc}"
-                        )
+                        if is_shencha:
+                            response = (
+                                f"## {fee_name}\n\n"
+                                f"**依据**：{basis}\n\n"
+                                f"{steps_md}"
+                                f"---\n\n"
+                                f"### 计算结果\n\n"
+                                f"审查费：**{result_val} {unit}**\n\n"
+                                f"{desc}"
+                            )
+                        else:
+                            response = (
+                                f"## {fee_name}\n\n"
+                                f"**依据**：{basis}\n\n"
+                                f"{steps_md}"
+                                f"{detail_md}"
+                                f"---\n\n"
+                                f"### 估算结果\n\n"
+                                f"估算范围：**{result_val} {unit}** {mid_text}\n\n"
+                                f"{desc}"
+                            )
                     else:
                         st.success(
                             f"以上为程序依据 **{basis}** 精确计算结果。\n\n"
