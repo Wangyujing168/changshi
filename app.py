@@ -360,12 +360,16 @@ if prompt:
 
                     # 施工图审查费（津价管[2011]46号 + 建市[2007]86号）
                     is_shencha = ft == "施工图审查费"
+                    # 环评费（计价格[2002]125号 — 四项服务类型全部输出）
+                    is_huanping = ft == "环境影响咨询费"
+                    # 可行性研究费（计价格[1999]1283号 — 内插法详细步骤）
+                    is_keyan = ft == "可行性研究费"
                     # 粗略估算类费种（《市政工程设计概算编制办法》）
                     is_rough = ft in (
                         "勘察费", "劳动安全卫生评审费",
                         "场地准备费及临时设施费", "工程保险费",
                     )
-                    if is_shencha or is_rough:
+                    if is_shencha or is_huanping or is_rough or is_keyan:
                         # 构建完整 markdown 响应（跨 rerun 持久化）
                         mid_val = fee_result.get("结果中值(万元)")
                         mid_text = f"（中值约 **{mid_val} 万元**）" if mid_val else ""
@@ -402,6 +406,78 @@ if prompt:
                                 f"审查费：**{result_val} {unit}**\n\n"
                                 f"{desc}"
                             )
+                        elif is_huanping:
+                            # 四种服务类型结果表
+                            all_svc = fee_result.get("全部服务类型结果", {})
+                            svc_table = ""
+                            if all_svc:
+                                svc_table = "### 四种服务类型全部结果\n\n"
+                                svc_table += "| 服务类型 | 费用范围（万元） | 中值（万元） |\n"
+                                svc_table += "|----------|:--:|:--:|\n"
+                                for svc_name in ["编制报告书", "编制报告表", "评估报告书", "评估报告表"]:
+                                    svc_r = all_svc.get(svc_name, {})
+                                    svc_table += (
+                                        f"| **{svc_name}** "
+                                        f"| {svc_r.get('结果(万元)', '-')} "
+                                        f"| {svc_r.get('结果中值(万元)', '-')} |\n"
+                                    )
+                                svc_table += "\n"
+                            response = (
+                                f"## {fee_name}\n\n"
+                                f"**依据**：{basis}\n\n"
+                                f"{steps_md}"
+                                f"---\n\n"
+                                f"{svc_table}"
+                                f"### 计算结果\n\n"
+                                f"{desc}"
+                            )
+                        elif is_keyan:
+                            # 服务类型结果表（2项或4项）
+                            all_svc = fee_result.get("全部服务类型结果", {})
+                            svc_table = ""
+                            if all_svc:
+                                n = len(all_svc)
+                                if n == 4:
+                                    title = "### 四种服务类型全部结果"
+                                elif n == 2:
+                                    first_key = list(all_svc.keys())[0]
+                                    if "可研" in first_key:
+                                        title = "### 可研报告相关服务类型结果"
+                                    else:
+                                        title = "### 项目建议书相关服务类型结果"
+                                else:
+                                    title = "### 服务类型结果"
+                                svc_table = f"{title}\n\n"
+                                svc_table += "| 服务类型 | 基准价（万元） | 最终费用（万元） |\n"
+                                svc_table += "|----------|:--:|:--:|\n"
+                                for svc_name in all_svc:
+                                    svc_r = all_svc[svc_name]
+                                    base = svc_r.get("基准价(万元)", "-")
+                                    fee = svc_r.get("结果(万元)", "-")
+                                    svc_table += f"| **{svc_name}** | {base} | {fee} |\n"
+                                svc_table += "\n"
+                            n_svc = len(all_svc) if all_svc else 0
+                            if n_svc > 0:
+                                response = (
+                                    f"## {fee_name}\n\n"
+                                    f"**依据**：{basis}\n\n"
+                                    f"{svc_table}"
+                                    f"{steps_md}"
+                                    f"---\n\n"
+                                    f"### 计算结果\n\n"
+                                    f"最终费用：**{result_val} {unit}**\n\n"
+                                    f"{desc}"
+                                )
+                            else:
+                                response = (
+                                    f"## {fee_name}\n\n"
+                                    f"**依据**：{basis}\n\n"
+                                    f"{steps_md}"
+                                    f"---\n\n"
+                                    f"### 计算结果\n\n"
+                                    f"最终费用：**{result_val} {unit}**\n\n"
+                                    f"{desc}"
+                                )
                         else:
                             response = (
                                 f"## {fee_name}\n\n"

@@ -145,14 +145,50 @@ SHEJI_PROFESSIONAL_COEFS: list[tuple[str, float]] = [
 ]
 
 # 计价格[1999]1283 号 建设项目前期工作咨询收费标准（可行性研究费）
-# 格式：(上限_亿元, {服务类型: 收费中值_万元})
-KEYAN_TIERS: list[tuple[float, dict[str, float]]] = [
-    (1.0, {"编制项目建议书": 10, "编制可研报告": 20, "评估项目建议书": 6, "评估可研报告": 7.5}),
-    (5.0, {"编制项目建议书": 25.5, "编制可研报告": 51.5, "评估项目建议书": 10, "评估可研报告": 12.5}),
-    (10.0, {"编制项目建议书": 46, "编制可研报告": 92.5, "评估项目建议书": 13.5, "评估可研报告": 17.5}),
-    (50.0, {"编制项目建议书": 77.5, "编制可研报告": 155, "评估项目建议书": 16, "评估可研报告": 22.5}),
-    (float("inf"), {"编制项目建议书": 112.5, "编制可研报告": 225, "评估项目建议书": 18.5, "评估可研报告": 30}),
-]
+# 格式：{服务类型: [(投资下限_亿, 投资上限_亿, 费用下限_万, 费用上限_万)]}
+# 注：<0.3亿项目由各省自行制定标准，此处按地方补充标准分段
+KEYAN_BRACKETS: dict[str, list[tuple[float, float, float, float]]] = {
+    "编制项目建议书": [
+        (0.0,  0.05, 1.3, 1.3),   # <500万：固定 1.3 万
+        (0.05, 0.1,  1.3, 2.5),   # 500~1000万：1.3~2.5 万
+        (0.1,  0.3,  2.5, 6),     # 1000~3000万：2.5~6 万
+        (0.3,  1.0,  6,   14),
+        (1.0,  5.0,  14,  37),
+        (5.0,  10.0, 37,  55),
+        (10.0, 50.0, 55,  100),
+        (50.0, float("inf"), 100, 125),
+    ],
+    "编制可研报告": [
+        (0.0,  0.05, 2.5, 2.5),   # <500万：固定 2.5 万
+        (0.05, 0.1,  2.5, 5),     # 500~1000万：2.5~5 万
+        (0.1,  0.3,  5,   12),    # 1000~3000万：5~12 万
+        (0.3,  1.0,  12,  28),
+        (1.0,  5.0,  28,  75),
+        (5.0,  10.0, 75,  110),
+        (10.0, 50.0, 110, 200),
+        (50.0, float("inf"), 200, 250),
+    ],
+    "评估项目建议书": [
+        (0.0,  0.05, 1.0, 1.0),   # <500万：固定 1 万
+        (0.05, 0.1,  1.0, 1.7),   # 500~1000万：1~1.7 万
+        (0.1,  0.3,  1.7, 4.0),   # 1000~3000万：1.7~4 万
+        (0.3,  1.0,  4,   8),
+        (1.0,  5.0,  8,   12),
+        (5.0,  10.0, 12,  15),
+        (10.0, 50.0, 15,  17),
+        (50.0, float("inf"), 17, 20),
+    ],
+    "评估可研报告": [
+        (0.0,  0.05, 1.3, 1.3),   # <500万：固定 1.3 万
+        (0.05, 0.1,  1.3, 2.5),   # 500~1000万：1.3~2.5 万
+        (0.1,  0.3,  2.5, 5.0),   # 1000~3000万：2.5~5.0 万
+        (0.3,  1.0,  5,   10),
+        (1.0,  5.0,  10,  15),
+        (5.0,  10.0, 15,  20),
+        (10.0, 50.0, 20,  25),
+        (50.0, float("inf"), 25, 35),
+    ],
+}
 # 行业调整系数（以 1.0 为基准）
 KEYAN_INDUSTRY_COEFS = {
     "石化": 1.3, "化工": 1.3, "钢铁": 1.3,
@@ -161,6 +197,15 @@ KEYAN_INDUSTRY_COEFS = {
     "广播电视": 1.0, "医药": 1.0, "煤炭": 1.0, "火电": 1.0, "核电": 1.0, "机械": 1.0,
     "林业": 0.8, "商业": 0.8, "粮食": 0.8, "建筑": 0.8,
     "建材": 0.7, "公路": 0.7, "铁道": 0.7, "市政": 0.7,
+    # 市政公用工程子项（均属市政行业，系数 0.7）
+    "轨道交通": 0.7, "公共交通": 0.7, "环境卫生": 0.7, "风景园林": 0.7,
+    "给水工程": 0.7, "排水工程": 0.7, "燃气工程": 0.7, "热力工程": 0.7,
+    "桥梁工程": 0.7, "道路工程": 0.7, "隧道工程": 0.7,
+    "污水处理": 0.7, "垃圾处理": 0.7, "垃圾焚烧": 0.7, "垃圾填埋": 0.7,
+    "供热工程": 0.7, "供热管网": 0.7, "热源厂": 0.7, "气源厂": 0.7,
+    "净水厂": 0.7, "处理厂": 0.7, "泵站": 0.7, "BRT": 0.7, "快速公交": 0.7,
+    "给水": 0.7, "排水": 0.7, "燃气": 0.7, "热力": 0.7,
+    "桥梁": 0.7, "道路": 0.7, "隧道": 0.7, "供热": 0.7, "环卫": 0.7,
 }
 
 # 津价管[2011]46 号 施工图审查收费标准
@@ -187,16 +232,37 @@ JIANZHU_ZHUZHAI_CENG: tuple[float, float] = (12, 20)        # ≤12小, 12~20中
 # 住宅小区/工厂生活区：总建筑面积(m²)
 JIANZHU_XIAOQU_M2: tuple[float, float] = (0, 300000)        # ≤30万中, >30万大（无小型）
 
-# 市政行业 — 各子项规模划分
-SHIZHENG_SCALE: dict[str, tuple[float, float]] = {
-    "道路": (4, 10),          # 万m²: ≤4小, 4~10中, ≥10大
-    "桥梁": (30, 100),        # 多孔跨径(m): ≤30小, 30~100中, ≥100大（单孔: ≤30小, 30~40中, ≥40大）
-    "给水": (5, 20),          # 万吨/日: ≤5小, 5~20中, ≥20大
-    "排水": (4, 10),          # 万吨/日: ≤4小, 4~10中, ≥10大
-    "隧道": (250, 1000),      # m: ≤250小, 250~1000中, ≥1000大
-    "风景园林": (100, 1000),  # 万元: ≤100小, 100~1000中, >1000大
-    "燃气": (10, 30),         # 万m³/日
-    "热力": (150, 500),       # 万m²
+# 市政行业 — 各子项规模划分（数据来源：建市[2007]86号 附件3-17 原文）
+# 注意：道路/桥梁不在本表中，由 _detect_project_size_86 特殊处理
+SHIZHENG_SCALE: dict[str, dict[str, tuple[float, float]]] = {
+    "给水": {
+        "净水厂": (5, 10),      # 万m³/日: <5小, 5~10中, ≥10大
+        "泵站": (5, 20),        # 万m³/日: <5小, 5~20中, ≥20大
+        "管道": (1000, 1600),   # 管径mm: <1000小, 1000~1600中, ≥1600大
+    },
+    "排水": {
+        "处理厂": (4, 8),       # 万m³/日: <4小, 4~8中, ≥8大
+        "泵站": (5, 10),        # 万m³/日: <5小, 5~10中, ≥10大
+        "管道": (1000, 1500),   # 管径mm: ≤1000小, 1000~1500中, ≥1500大
+    },
+    "燃气": {
+        "输配系统": (10000, 10000),  # 万m³/年: ≥10000大, <10000中
+        "气源厂": (30, 30),          # 万m³/日: ≥30大, <30中
+    },
+    "热力": {
+        "供热面积": (150, 500),      # 万m²: <150小, 150~500中, ≥500大
+    },
+    "隧道": {
+        "隧道": (1000, 1000),        # 原文：全部大型，但保留数值用于兜底判定
+    },
+    "风景园林": {
+        "风景园林": (100, 1000),     # 万元: ≤100小, 100~1000中, >1000大
+    },
+    "环境卫生": {
+        "填埋": (200, 500),           # 吨/日: <200小, 200~500中, ≥500大
+        "转运站": (150, 400),         # 吨/日: <150小, 150~400中, ≥400大
+        "医疗废弃物": (5, 5),         # 吨/日: ≥5大, <5中
+    },
 }
 
 # 工业行业 — 按投资额划分（简化，实际按细分行业有不同标准）
@@ -720,37 +786,110 @@ def calc_sheji(
     }
 
 
-def calc_keyan(amount_yi: float, service_type: str = "编制可研报告") -> dict:
+def _keyan_interpolate(amount_yi: float, brackets: list[tuple]) -> float:
+    """线性内插计算可行性研究费分档基准价。"""
+    for inv_lo, inv_hi, fee_lo, fee_hi in brackets:
+        if amount_yi <= inv_hi or inv_hi == float("inf"):
+            if inv_hi == float("inf") or amount_yi >= inv_hi:
+                return fee_hi
+            if amount_yi <= inv_lo:
+                return fee_lo
+            # 线性内插
+            ratio = (amount_yi - inv_lo) / (inv_hi - inv_lo)
+            return round(fee_lo + ratio * (fee_hi - fee_lo), 4)
+    return 0.0
+
+
+def _detect_keyan_industry(query: str) -> tuple[str, float]:
+    """从查询中检测行业并返回可行性研究费行业调整系数。"""
+    # 按关键词长度从长到短匹配，避免"建筑"误匹配"建筑材料"
+    sorted_industries = sorted(KEYAN_INDUSTRY_COEFS.keys(), key=len, reverse=True)
+    for ind in sorted_industries:
+        if re.search(ind, query):
+            return ind, KEYAN_INDUSTRY_COEFS[ind]
+    return "未指定（默认1.0）", 1.0
+
+
+def calc_keyan(
+    amount_yi: float,
+    service_type: str = "编制可研报告",
+    industry_coef: float | None = None,
+    industry_name: str = "",
+    complexity_coef: float = 1.0,
+) -> dict:
     """
     可行性研究费（计价格[1999]1283号）。
 
     amount_yi: 估算投资额（亿元）
     service_type: 编制项目建议书 / 编制可研报告 / 评估项目建议书 / 评估可研报告
+    industry_coef: 行业调整系数（0.7~1.3），None 则默认 1.0
+    industry_name: 行业名称（用于展示）
+    complexity_coef: 工程复杂程度调整系数（0.8~1.2，默认 1.0）
     """
-    # 找到对应档位，取中值
-    fee_wan = None
-    for limit, fees in KEYAN_TIERS:
-        if amount_yi <= limit:
-            fee_wan = fees.get(service_type)
+    brackets = KEYAN_BRACKETS.get(service_type)
+    if brackets is None:
+        brackets = KEYAN_BRACKETS["编制可研报告"]
+
+    # 线性内插计算基准价
+    base_fee = _keyan_interpolate(amount_yi, brackets)
+
+    # 行业调整系数
+    if industry_coef is None:
+        industry_coef = 1.0
+        industry_name = industry_name or "未指定（默认1.0）"
+
+    # 总调整系数 = 行业 × 复杂程度
+    total_coef = round(industry_coef * complexity_coef, 4)
+
+    # 最终费用（基准 × 总调整系数）
+    final_fee_mid = round(base_fee * total_coef, 4)
+
+    steps = [
+        {"步骤": "估算投资额", "公式": f"{amount_yi:.4f} 亿元", "结果": f"{amount_yi * 10000:.0f} 万元"},
+        {"步骤": "确定服务类型", "公式": "", "结果": service_type},
+    ]
+
+    # 显示匹配到的分档区间
+    for inv_lo, inv_hi, fee_lo, fee_hi in brackets:
+        if amount_yi <= inv_hi or inv_hi == float("inf"):
+            if amount_yi <= inv_lo and inv_hi < float("inf"):
+                steps.append({"步骤": "所在分档区间", "公式": f"<{inv_hi}亿元", "结果": f"基准价固定 {fee_lo} 万元"})
+            elif inv_hi == float("inf") or amount_yi >= inv_hi:
+                steps.append({"步骤": "所在分档区间", "公式": f"≥{inv_lo}亿元", "结果": f"基准价 {fee_hi} 万元"})
+            else:
+                steps.append({"步骤": "所在分档区间", "公式": f"{inv_lo}~{inv_hi}亿元", "结果": f"基准价 {fee_lo}~{fee_hi} 万元"})
             break
 
-    if fee_wan is None:
-        fee_wan = KEYAN_TIERS[-1][1].get(service_type, 0)
+    steps.extend([
+        {"步骤": "线性内插基准价", "公式": f"插值({amount_yi:.4f})", "结果": f"{base_fee:.4f} 万元"},
+        {"步骤": "行业调整系数", "公式": f"{industry_name}", "结果": str(industry_coef)},
+        {"步骤": "工程复杂程度系数", "公式": f"复杂程度 {complexity_coef}", "result": str(complexity_coef)},
+        {"步骤": "总调整系数", "公式": f"{industry_coef} × {complexity_coef}", "结果": str(total_coef)},
+        {"步骤": "最终费用", "公式": f"{base_fee:.4f} × {total_coef}", "结果": f"{final_fee_mid:.4f} 万元"},
+    ])
 
     return {
         "费种": f"可行性研究费（{service_type}）",
         "依据": "《建设项目前期工作咨询收费暂行规定》（计价格[1999]1283号）",
-        "计算公式": "按估算投资额分档，内插计算（实际应在上下限范围内协商确定）",
+        "计算公式": "基准价 = 按估算投资额分档线性内插；最终费用 = 基准价 × 行业调整系数 × 复杂程度系数",
         "参数": {
             "估算投资额(亿元)": amount_yi,
             "服务类型": service_type,
+            "行业": industry_name,
+            "行业调整系数": industry_coef,
+            "复杂程度系数": complexity_coef,
+            "总调整系数": total_coef,
         },
-        "结果(万元)": fee_wan,
+        "结果(万元)": final_fee_mid,
+        "基准价(万元)": base_fee,
         "说明": (
-            f"估算投资额 {amount_yi:.1f} 亿元，{service_type}"
-            f"收费参考值 **{fee_wan:.0f} 万元**"
-            f"（可乘以行业调整系数 0.7~1.3 和复杂程度系数 0.8~1.2）"
+            f"估算投资额 {amount_yi:.4f} 亿元（{amount_yi * 10000:.0f} 万元），{service_type}\n"
+            f"分档线性内插基准价：**{base_fee:.4f} 万元**\n"
+            f"行业「{industry_name}」调整系数：**{industry_coef}**\n"
+            f"工程复杂程度系数：**{complexity_coef}**\n"
+            f"最终费用 = {base_fee:.4f} × {total_coef} = **{final_fee_mid:.4f} 万元**"
         ),
+        "计算步骤": steps,
     }
 
 
@@ -969,26 +1108,95 @@ def _detect_project_size_86(query: str, project_type: str) -> str:
         return size
 
     elif project_type == "市政":
-        # 市政：根据子项类型判定
-        for sub_type, (lo, hi) in SHIZHENG_SCALE.items():
-            if re.search(sub_type, query):
-                # 尝试提取技术参数
-                m = re.search(rf"{sub_type}.*?(\d+\.?\d*)\s*(?:万)?\s*(?:m2|㎡|平米|平方米|m|米|万吨)", query)
+        # ============================================================
+        # 市政行业 — 依据建市[2007]86号 附件3-17 原文
+        # ============================================================
+
+        # --- 1. 固定为大型的子项（原文明确"全部为大型项目"）---
+        if re.search(r"轨道交通|城市隧道|BRT|快速公交|公交枢纽"
+                     r"|电车系统|公共交通专用道"
+                     r"|垃圾焚烧|生活垃圾焚烧|危险废弃物", query):
+            return "大型"
+
+        # --- 2. 道路工程 — 按道路等级判定（附件3-17 第5项，非面积！）---
+        if re.search(r"道路|快速路|主干道|次干路|支路|苜蓿叶|互通.*立交|立交", query):
+            if re.search(r"快速路|主干道|苜蓿叶|枢纽.*立交|互通.*立交|全互通", query):
+                return "大型"
+            elif re.search(r"次干路|简单.*立交", query):
+                return "中型"
+            elif re.search(r"支路", query):
+                return "小型"
+            else:
+                return "中型"  # 未指定等级，默认中型
+
+        # --- 3. 桥梁工程 — 组合条件判定（附件3-17 第6项，无小型）---
+        if re.search(r"桥梁", query):
+            dankua = None   # 单孔/单跨跨径
+            zongchang = None  # 总长/全长
+
+            # 提取单跨数值
+            m_dk = re.search(r"单[孔跨].*?(\d+\.?\d*)", query)
+            if not m_dk:
+                m_dk = re.search(r"(\d+\.?\d*)\s*(?:m|米).*单[孔跨]", query)
+            if m_dk:
+                dankua = float(m_dk.group(1))
+
+            # 提取总长/全长数值
+            m_zc = re.search(r"(?:总长|全长|总跨|桥长).*?(\d+\.?\d*)", query)
+            if not m_zc:
+                m_zc = re.search(r"(\d+\.?\d*)\s*(?:m|米).*(?:总长|全长|总跨|桥长)", query)
+            if m_zc:
+                zongchang = float(m_zc.group(1))
+
+            # 提取通用"米"参数（兜底：单跨≥40 或 总长≥100 → 大型）
+            if dankua is None and zongchang is None:
+                m_any = re.search(r"(\d+\.?\d*)\s*(?:m|米)(?!\s*(?:万|层|%|％|元))", query)
+                if m_any:
+                    val = float(m_any.group(1))
+                    if val >= 100:
+                        return "大型"   # 大概率是总长
+                    elif val >= 40:
+                        return "大型"   # 大概率是单跨
+                    else:
+                        return "中型"
+
+            if dankua is not None and dankua >= 40:
+                return "大型"
+            if zongchang is not None and zongchang >= 100:
+                return "大型"
+            if dankua is not None or zongchang is not None:
+                return "中型"
+            return "中型"  # 无技术参数，默认中型
+
+        # --- 4. 环境卫生 — 部分子项固定大型已在上面处理 ---
+        # --- 5. SHIZHENG_SCALE 数值查表（给水/排水/燃气/热力/隧道/风景园林等）---
+        for broad_type, sub_dict in SHIZHENG_SCALE.items():
+            if re.search(broad_type, query):
+                # 提取数值（优先匹配带单位的）
+                m = re.search(r"(\d+\.?\d*)\s*万?\s*(?:m3|m³|立方米|吨|万吨|mm|毫米|DN\d*|m|米"
+                             r"|万m2|万㎡|万平米|万平方米)", query)
                 if not m:
-                    m = re.search(r"(\d+\.?\d*)\s*万?\s*(?:m2|㎡|平米|平方米)", query)
+                    m = re.search(r"管径\s*[:：]?\s*(\d+\.?\d*)", query)
+                if not m:
+                    m = re.search(r"DN\s*(\d+\.?\d*)", query)
+                if not m:
+                    m = re.search(r"(\d+\.?\d*)\s*万", query)
                 if m:
                     val = float(m.group(1))
-                    # 桥梁：单孔跨径 ≥40m → 大型（建市[2007]86号）
-                    if sub_type == "桥梁" and re.search(r"单[孔跨]|单跨", query):
-                        if val >= 40:
-                            return "大型"
-                        elif val > 30:
-                            return "中型"
-                        else:
-                            return "小型"
-                    if val >= hi:
+                    # 遍历子类别，匹配最佳阈值
+                    for sub_cat, (lo, hi) in sub_dict.items():
+                        if sub_cat == broad_type or re.search(sub_cat, query):
+                            if val >= hi:
+                                return "大型"
+                            elif val > lo:
+                                return "中型"
+                            else:
+                                return "小型"
+                    # 未匹配子类别，用第一个子类的阈值
+                    first_lo, first_hi = list(sub_dict.values())[0]
+                    if val >= first_hi:
                         return "大型"
-                    elif val > lo:
+                    elif val > first_lo:
                         return "中型"
                     else:
                         return "小型"
@@ -1197,6 +1405,194 @@ def calc_gongcheng_baoxian(total_wan: float) -> dict:
 
 
 # ============================================================
+# 环境影响咨询费 — 计价格[2002]125号
+# ============================================================
+
+# 分档定额基准价表（投资额：亿元，费用：万元）
+# 注：0~0.1亿区间为固定最低价，0.1~0.3亿区间线性内插
+_HUANPING_BRACKETS: list[tuple[float, float, float, float]] = [
+    # (投资下限, 投资上限, 费用下限, 费用上限)
+    (0,     0.1,    5,   5),   # ≤0.1亿：固定 5 万
+    (0.1,   0.3,    5,   6),   # 0.1~0.3亿：5~6 万
+    (0.3,   2,      6,  15),
+    (2,    10,     15,  35),
+    (10,   50,     35,  75),
+    (50,  100,     75, 110),
+    (100,  float("inf"), 110, 110),
+]
+
+_HUANPING_REPORT_TABLE_BRACKETS: list[tuple[float, float, float, float]] = [
+    (0,     0.1,    1,   1),   # ≤0.1亿：固定 1 万
+    (0.1,   0.3,    1,   2),   # 0.1~0.3亿：1~2 万
+    (0.3,   2,      2,   4),
+    (2,    10,      4,   7),
+    (10,   float("inf"), 7, 7),
+]
+
+_HUANPING_EVAL_REPORT_BRACKETS: list[tuple[float, float, float, float]] = [
+    (0,     0.1,  0.8, 0.8),   # ≤0.1亿：固定 0.8 万
+    (0.1,   0.3,  0.8, 1.5),   # 0.1~0.3亿：0.8~1.5 万
+    (0.3,   2,    1.5, 3),
+    (2,    10,    3,   7),
+    (10,   50,    7,   9),
+    (50,  100,    9,  13),
+    (100,  float("inf"), 13, 13),
+]
+
+_HUANPING_EVAL_TABLE_BRACKETS: list[tuple[float, float, float, float]] = [
+    (0,     0.1,  0.5, 0.5),   # ≤0.1亿：固定 0.5 万
+    (0.1,   0.3,  0.5, 0.8),   # 0.1~0.3亿：0.5~0.8 万
+    (0.3,   2,    0.8, 1.5),
+    (2,    10,    1.5, 2),
+    (10,   float("inf"), 2, 2),
+]
+
+# 行业调整系数（计价格[2002]125号 附件二 表1）
+_HUANPING_INDUSTRY_COEF: dict[str, float] = {
+    "化工": 1.2, "冶金": 1.2, "有色": 1.2, "黄金": 1.2, "煤炭": 1.2,
+    "矿产": 1.2, "纺织": 1.2, "化纤": 1.2, "轻工": 1.2, "医药": 1.2,
+    "区域": 1.2,
+    "石化": 1.1, "石油": 1.1, "天然气": 1.1, "水利": 1.1, "水电": 1.1, "旅游": 1.1,
+    "林业": 1.0, "畜牧": 1.0, "渔业": 1.0, "农业": 1.0, "交通": 1.0,
+    "铁道": 1.0, "民航": 1.0, "管线": 1.0, "建材": 1.0, "市政": 1.0,
+    "烟草": 1.0, "兵器": 1.0,
+    "邮电": 0.8, "广播电视": 0.8, "航空": 0.8, "机械": 0.8, "船舶": 0.8,
+    "航天": 0.8, "电子": 0.8, "勘探": 0.8, "社会服务": 0.8, "火电": 0.8,
+    "粮食": 0.6, "建筑": 0.6, "信息产业": 0.6, "仓储": 0.6,
+}
+
+# 环境敏感程度调整系数（计价格[2002]125号 附件二 表2）
+_HUANPING_SENSITIVITY_COEF: dict[str, float] = {
+    "敏感": 1.2, "一般": 0.8,
+}
+
+
+def _huanping_interpolate(invest_yi: float, brackets: list[tuple]) -> float:
+    """线性内插计算分档定额基准价。"""
+    for inv_lo, inv_hi, fee_lo, fee_hi in brackets:
+        if invest_yi <= inv_hi or inv_hi == float("inf"):
+            if inv_hi == float("inf") or invest_yi >= inv_hi:
+                return fee_hi
+            if invest_yi <= inv_lo:
+                return fee_lo
+            # 线性内插
+            ratio = (invest_yi - inv_lo) / (inv_hi - inv_lo)
+            return round(fee_lo + ratio * (fee_hi - fee_lo), 4)
+    return 0.0
+
+
+def _detect_huanping_industry(query: str) -> tuple[str, float]:
+    """从查询中检测行业并返回对应的调整系数。"""
+    # 按关键词长度从长到短匹配，避免"建筑"误匹配"建筑材料"
+    sorted_industries = sorted(_HUANPING_INDUSTRY_COEF.keys(), key=len, reverse=True)
+    for ind in sorted_industries:
+        if re.search(ind, query):
+            return ind, _HUANPING_INDUSTRY_COEF[ind]
+    return "市政（默认）", 1.0
+
+
+def calc_huanping(
+    amount_wan: float,
+    service_type: str = "编制报告书",
+    industry_coef: float | None = None,
+    industry_name: str = "",
+    sensitivity_coef: float = 1.0,
+) -> dict:
+    """
+    环境影响咨询费（计价格[2002]125号）。
+
+    参数：
+        amount_wan: 估算投资额（万元）
+        service_type: 编制报告书 / 编制报告表 / 评估报告书 / 评估报告表
+        industry_coef: 行业调整系数，None 则默认 1.0（市政）
+        industry_name: 行业名称（用于展示）
+        sensitivity_coef: 环境敏感程度调整系数（敏感=1.2, 一般=0.8, 默认1.0）
+    """
+    invest_yi = amount_wan / 10000.0  # 万元 → 亿元
+
+    # 选择分档表
+    bracket_map = {
+        "编制报告书": _HUANPING_BRACKETS,
+        "编制报告表": _HUANPING_REPORT_TABLE_BRACKETS,
+        "评估报告书": _HUANPING_EVAL_REPORT_BRACKETS,
+        "评估报告表": _HUANPING_EVAL_TABLE_BRACKETS,
+    }
+    brackets = bracket_map.get(service_type, _HUANPING_BRACKETS)
+
+    # 线性内插计算基准价
+    base_fee = _huanping_interpolate(invest_yi, brackets)
+
+    # 行业调整系数
+    if industry_coef is None:
+        industry_coef = 1.0
+        industry_name = industry_name or "市政（默认）"
+
+    # 总调整系数 = 行业 × 敏感度
+    total_coef = round(industry_coef * sensitivity_coef, 4)
+
+    # 最终费用（基准 × 总调整系数）
+    final_fee_mid = round(base_fee * total_coef, 4)
+    # 上下 20% 协商浮动
+    final_fee_lo = round(base_fee * total_coef * 0.8, 4)
+    final_fee_hi = round(base_fee * total_coef * 1.2, 4)
+
+    sensitivity_label = {1.2: "敏感", 0.8: "一般", 1.0: "未指定"}.get(sensitivity_coef, str(sensitivity_coef))
+
+    steps = [
+        {"步骤": "估算投资额", "公式": f"{amount_wan} 万元", "结果": f"{invest_yi:.4f} 亿元"},
+        {"步骤": "确定服务类型", "公式": "", "结果": service_type},
+    ]
+
+    # 显示匹配到的分档区间
+    for inv_lo, inv_hi, fee_lo, fee_hi in brackets:
+        if invest_yi <= inv_hi or inv_hi == float("inf"):
+            if invest_yi <= inv_lo:
+                steps.append({"步骤": "所在分档区间", "公式": f"≤{inv_lo}亿元", "结果": f"基准价 {fee_lo} 万元"})
+            elif inv_hi == float("inf") or invest_yi >= inv_hi:
+                steps.append({"步骤": "所在分档区间", "公式": f"≥{inv_lo}亿元", "结果": f"基准价 {fee_hi} 万元"})
+            else:
+                steps.append({"步骤": "所在分档区间", "公式": f"{inv_lo}~{inv_hi}亿元", "结果": f"基准价 {fee_lo}~{fee_hi} 万元"})
+            break
+
+    steps.extend([
+        {"步骤": "线性内插基准价", "公式": f"插值({invest_yi:.4f})", "结果": f"{base_fee:.4f} 万元"},
+        {"步骤": "行业调整系数", "公式": f"{industry_name}", "结果": str(industry_coef)},
+        {"步骤": "环境敏感程度系数", "公式": sensitivity_label, "结果": str(sensitivity_coef)},
+        {"步骤": "总调整系数", "公式": f"{industry_coef} × {sensitivity_coef}", "结果": str(total_coef)},
+        {"步骤": "最终费用(协商浮动±20%前)", "公式": f"{base_fee:.4f} × {total_coef}", "结果": f"{final_fee_mid:.4f} 万元"},
+    ])
+
+    return {
+        "费种": f"环境影响咨询费（{service_type}）",
+        "依据": "《关于规范环境影响咨询收费有关问题的通知》（计价格[2002]125号）\n"
+                "国家计委、国家环境保护总局，2002年1月31日",
+        "计算公式": f"最终收费 = 分档定额基准价 × 行业调整系数({industry_coef}) × 环境敏感程度系数({sensitivity_coef}) × (1 ± 20%)",
+        "参数": {
+            "估算投资额(万元)": amount_wan,
+            "估算投资额(亿元)": invest_yi,
+            "服务类型": service_type,
+            "行业": f"{industry_name}（系数 {industry_coef}）",
+            "环境敏感程度": f"{sensitivity_label}（系数 {sensitivity_coef}）",
+            "总调整系数": total_coef,
+            "协商浮动": "±20%",
+        },
+        "结果(万元)": f"{final_fee_lo:.4f} ~ {final_fee_hi:.4f}",
+        "结果范围(万元)": f"{final_fee_lo:.4f} ~ {final_fee_hi:.4f}",
+        "结果中值(万元)": final_fee_mid,
+        "基准价(万元)": base_fee,
+        "调整系数明细": {"行业系数": industry_coef, "敏感度系数": sensitivity_coef, "总系数": total_coef},
+        "计算步骤": steps,
+        "说明": (
+            f"估算投资额 {invest_yi:.4f} 亿元（{amount_wan:.0f}万元），服务类型「{service_type}」，"
+            f"行业「{industry_name}」系数 {industry_coef}，环境{ sensitivity_label }系数 {sensitivity_coef}。\n"
+            f"分档定额基准价 **{base_fee:.4f} 万元** × 总调整系数 **{total_coef}**"
+            f" = 基准收费 **{final_fee_mid:.4f} 万元**。\n"
+            f"可在上下 20% 幅度内协商确定，即 **{final_fee_lo:.4f} ~ {final_fee_hi:.4f} 万元**。"
+        ),
+    }
+
+
+# ============================================================
 # 费种参考信息（无金额时返回费率表/规则说明）
 # ============================================================
 
@@ -1397,17 +1793,25 @@ def _get_fee_reference(fee_type: str) -> dict:
         "可行性研究费": {
             "费种": "可行性研究费（建设项目前期工作咨询费）",
             "依据": "《建设项目前期工作咨询收费暂行规定》（计价格[1999]1283号）",
-            "计费方式": "按估算投资额分档，取收费中值，可乘以行业调整系数（0.7~1.3）和复杂程度系数（0.8~1.2）",
+            "计费方式": "按估算投资额分档线性内插基准价，乘以行业调整系数（0.7~1.3）和复杂程度系数（0.8~1.2）",
             "参数说明": "估算投资额（亿元）+ 服务类型（编制可研/编制建议书/评估可研/评估建议书）",
             "费率表": [
                 ("估算投资额", "编制建议书", "编制可研", "评估建议书", "评估可研"),
-                ("≤1 亿元", "10 万", "20 万", "6 万", "7.5 万"),
-                ("1~5 亿元", "25.5 万", "51.5 万", "10 万", "12.5 万"),
-                ("5~10 亿元", "46 万", "92.5 万", "13.5 万", "17.5 万"),
-                ("10~50 亿元", "77.5 万", "155 万", "16 万", "22.5 万"),
-                (">50 亿元", "112.5 万", "225 万", "18.5 万", "30 万"),
+                ("<500 万", "1.3 万", "2.5 万", "1.0 万", "1.3 万"),
+                ("500~1000 万", "2.5 万", "5.0 万", "1.7 万", "2.5 万"),
+                ("1000~3000 万", "2.5~6 万", "5~12 万", "1.7~4 万", "2.5~5 万"),
+                ("0.3~1 亿元", "6~14 万", "12~28 万", "4~8 万", "5~10 万"),
+                ("1~5 亿元", "14~37 万", "28~75 万", "8~12 万", "10~15 万"),
+                ("5~10 亿元", "37~55 万", "75~110 万", "12~15 万", "15~20 万"),
+                ("10~50 亿元", "55~100 万", "110~200 万", "15~17 万", "20~25 万"),
+                (">50 亿元", "100~125 万", "200~250 万", "17~20 万", "25~35 万"),
             ],
-            "计算说明": "行业调整系数：石化/化工/钢铁 1.3，石油/天然气/水利 1.2，建筑/林业/商业/粮食 0.8，建材/公路/铁路/市政 0.7",
+            "计算说明": (
+                "行业调整系数：石化/化工/钢铁 1.3，石油/天然气/水利/水电/水运/化纤 1.2，"
+                "有色/黄金/纺织/轻工/邮电/广电/医药/煤炭/火电/机械 1.0，"
+                "林业/商业/粮食/建筑 0.8，建材/公路/铁道/市政 0.7；"
+                "复杂程度系数 0.8~1.2"
+            ),
         },
         "施工图审查费": {
             "费种": "施工图审查费",
@@ -1655,22 +2059,139 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
         amount_yi = _extract_amount_yi(query)
         if amount_yi is None:
             amount_yi = amount / 10000.0  # 万→亿
+        # 检测用户指定了哪种服务类型
+        # 三类输出模式：
+        #   single: 明确 编制X 或 评估X → 只出单项
+        #   pair:   只说 可研报告/项目建议书 没带编制/评估 → 出编制+评估两项
+        #   all:    只说"前期工作"没提具体产出物 → 四项全出
+        svc = "编制可研报告"
+        mode = "all"      # all | pair | single
+        pair_type = None  # "可研" | "建议书"（仅 pair 模式）
         if re.search(r"项目建议书.*评估|评估.*项目建议书", query):
-            svc = "评估项目建议书"
+            svc = "评估项目建议书"; mode = "single"
         elif re.search(r"可研.*评估|评估.*可研|可行性.*评估|评估.*可行性", query):
-            svc = "评估可研报告"
+            svc = "评估可研报告"; mode = "single"
+        elif re.search(r"评估建议书|评估.*建议书", query):
+            svc = "评估项目建议书"; mode = "single"
+        elif re.search(r"编制.*建议书|建议书.*编制", query):
+            svc = "编制项目建议书"; mode = "single"
+        elif re.search(r"编制.*可研|可研.*编制|编制.*可行性|可行性.*编制", query):
+            svc = "编制可研报告"; mode = "single"
         elif re.search(r"项目建议书|建议书", query):
-            svc = "编制项目建议书"
+            svc = "编制项目建议书"; mode = "pair"; pair_type = "建议书"
+        elif re.search(r"可研报告|可行性研究|可研", query):
+            svc = "编制可研报告"; mode = "pair"; pair_type = "可研"
+        elif re.search(r"前期工作", query):
+            svc = "编制可研报告"; mode = "all"
         else:
-            svc = "编制可研报告"
-        result = calc_keyan(amount_yi, svc)
+            svc = "编制可研报告"; mode = "all"
+
+        # 自动检测行业调整系数
+        ind_name, ind_coef = _detect_keyan_industry(query)
+        # 自动检测工程复杂程度系数
+        comp_coef = 1.0
+        comp_m = re.search(r"复杂程度.*?系数.*?(\d+\.?\d*)", query)
+        if comp_m:
+            comp_coef = float(comp_m.group(1))
+        else:
+            if re.search(r"很复杂|非常复杂|特别复杂", query):
+                comp_coef = 1.15
+            elif re.search(r"较复杂|复杂", query):
+                comp_coef = 1.0
+
+        total_coef = round(ind_coef * comp_coef, 4)
+
+        if mode == "single":
+            # 明确指定了某一项 → 只计算这一项
+            result = calc_keyan(amount_yi, svc,
+                                industry_coef=ind_coef, industry_name=ind_name,
+                                complexity_coef=comp_coef)
+        elif mode == "pair":
+            # 只说了"可研报告"或"项目建议书"→ 出编制+评估两项
+            if pair_type == "可研":
+                pair_svc = ["编制可研报告", "评估可研报告"]
+            else:
+                pair_svc = ["编制项目建议书", "评估项目建议书"]
+            pair_results = {}
+            for svc_name in pair_svc:
+                r = calc_keyan(amount_yi, svc_name,
+                               industry_coef=ind_coef, industry_name=ind_name,
+                               complexity_coef=comp_coef)
+                pair_results[svc_name] = r
+
+            result = pair_results[svc]
+            # 修正步骤2：反映实际提问范围
+            pair_label = "编制/评估可研报告" if pair_type == "可研" else "编制/评估项目建议书"
+            result["计算步骤"][1] = {"步骤": "确定服务类型", "公式": "", "结果": pair_label}
+
+            lines = []
+            for svc_name in pair_svc:
+                r = pair_results[svc_name]
+                fee = r["结果(万元)"]
+                base = r["基准价(万元)"]
+                lines.append(f"- **{svc_name}**：基准价 {base:.4f} 万 × 总系数 {total_coef} = **{fee:.4f} 万元**")
+
+            result["全部服务类型结果"] = {
+                svc_name: {
+                    "结果(万元)": pair_results[svc_name]["结果(万元)"],
+                    "基准价(万元)": pair_results[svc_name]["基准价(万元)"],
+                }
+                for svc_name in pair_svc
+            }
+            result["说明"] = (
+                f"估算投资额 {amount_yi:.4f} 亿元（{amount_yi * 10000:.0f} 万元），"
+                f"行业「{ind_name}」系数 {ind_coef}，"
+                f"复杂程度系数 {comp_coef}，"
+                f"总调整系数 **{total_coef}**。\n\n"
+                f"{pair_type}相关服务类型结果：\n" +
+                "\n".join(lines)
+            )
+        else:
+            # "前期工作"未指定 → 计算全部四种
+            all_svc = ["编制项目建议书", "编制可研报告", "评估项目建议书", "评估可研报告"]
+            all_results = {}
+            for svc_name in all_svc:
+                r = calc_keyan(amount_yi, svc_name,
+                               industry_coef=ind_coef, industry_name=ind_name,
+                               complexity_coef=comp_coef)
+                all_results[svc_name] = r
+
+            result = all_results[svc]
+            # 修正步骤2：反映实际提问范围
+            result["计算步骤"][1] = {"步骤": "确定服务类型", "公式": "", "结果": "编制/评估项目建议书、编制/评估可研报告"}
+
+            lines = []
+            for svc_name in all_svc:
+                r = all_results[svc_name]
+                fee = r["结果(万元)"]
+                base = r["基准价(万元)"]
+                lines.append(f"- **{svc_name}**：基准价 {base:.4f} 万 × 总系数 {total_coef} = **{fee:.4f} 万元**")
+
+            result["全部服务类型结果"] = {
+                svc_name: {
+                    "结果(万元)": all_results[svc_name]["结果(万元)"],
+                    "基准价(万元)": all_results[svc_name]["基准价(万元)"],
+                }
+                for svc_name in all_svc
+            }
+            result["说明"] = (
+                f"估算投资额 {amount_yi:.4f} 亿元（{amount_yi * 10000:.0f} 万元），"
+                f"行业「{ind_name}」系数 {ind_coef}，"
+                f"复杂程度系数 {comp_coef}，"
+                f"总调整系数 **{total_coef}**。\n\n"
+                f"四种服务类型全部结果：\n" +
+                "\n".join(lines)
+            )
     elif fee_type == "施工图审查费":
         # 津价管[2011]46号 + 建市[2007]86号
         if re.search(r"住宅", query):
             ptype = "住宅"
         elif re.search(r"工业", query):
             ptype = "工业"
-        elif re.search(r"市政|道路|桥梁|隧道|给水|排水|燃气|热力|轨道交通|风景园林|环境卫生|污水处理|垃圾处理|供热", query):
+        elif re.search(r"市政|道路|桥梁|隧道|给水|排水|燃气|热力|轨道交通|风景园林"
+                       r"|环境卫生|污水处理|垃圾处理|供热|环卫|填埋|焚烧"
+                       r"|净水厂|处理厂|泵站|管网|BRT|快速公交|公交|公共交通"
+                       r"|供热面积|热源厂|热网|气源厂|垃圾发电", query):
             ptype = "市政"
         else:
             ptype = "公建"
@@ -1767,14 +2288,66 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             ref["has_amount"] = False
             return ref
     elif fee_type == "环境影响咨询费":
-        result = {
-            "费种": "环境影响咨询费",
-            "依据": "《关于规范环境影响咨询收费有关问题的通知》（计价格[2002]125号）",
-            "计算公式": "按估算投资额分档定额（上下浮动 20%），费率表见原文件附件一~三",
-            "参数": {"估算投资额(万元)": amount},
-            "结果(万元)": None,
-            "说明": "125号文精确费率表在原PDF附件中，当前Markdown文件未完整提取。请参考原文件。",
+        # 计价格[2002]125号 — 分档定额线性内插
+        # 确定用户指定/默认的服务类型
+        if re.search(r"报告表|报告书.*表", query):
+            svc = "编制报告表"
+        elif re.search(r"评估报告书|评估.*报告书", query):
+            svc = "评估报告书"
+        elif re.search(r"评估报告表|评估.*报告表", query):
+            svc = "评估报告表"
+        elif re.search(r"编制.*报告书|报告书", query):
+            svc = "编制报告书"
+        elif re.search(r"大纲", query):
+            svc = "评估报告书"
+        else:
+            svc = "编制报告书"  # 默认
+
+        # 行业调整系数 + 环境敏感程度系数
+        ind_name, ind_coef = _detect_huanping_industry(query)
+        if re.search(r"敏感|一级|二类|重要", query):
+            sens_coef = 1.2
+        elif re.search(r"一般|不敏感|三类", query):
+            sens_coef = 0.8
+        else:
+            sens_coef = 1.0
+
+        # 计算全部四种服务类型
+        all_svc = ["编制报告书", "编制报告表", "评估报告书", "评估报告表"]
+        all_results = {}
+        total_coef = round(ind_coef * sens_coef, 4)
+        for svc_name in all_svc:
+            r = calc_huanping(amount, svc_name, industry_coef=ind_coef,
+                              industry_name=ind_name, sensitivity_coef=sens_coef)
+            all_results[svc_name] = r
+
+        # 主结果为检测到的服务类型
+        result = all_results[svc]
+
+        # 构建四项结果汇总
+        lines = []
+        for svc_name in all_svc:
+            r = all_results[svc_name]
+            mid = r["结果中值(万元)"]
+            lo_hi = r["结果(万元)"]
+            lines.append(f"- **{svc_name}**：{lo_hi} 万元（中值 **{mid} 万元**）")
+
+        # 追加详细说明
+        invest_yi = amount / 10000.0
+        result["全部服务类型结果"] = {
+            svc_name: {"结果(万元)": all_results[svc_name]["结果(万元)"],
+                       "结果中值(万元)": all_results[svc_name]["结果中值(万元)"],
+                       "基准价(万元)": all_results[svc_name]["基准价(万元)"]}
+            for svc_name in all_svc
         }
+        result["说明"] = (
+            f"估算投资额 {invest_yi:.4f} 亿元（{amount:.0f}万元），"
+            f"行业「{ind_name}」系数 {ind_coef}，"
+            f"环境{'敏感' if sens_coef==1.2 else '一般' if sens_coef==0.8 else '未指定'}系数 {sens_coef}，"
+            f"总调整系数 **{total_coef}**。\n\n"
+            f"四种服务类型全部结果（协商浮动 ±20% 后）：\n" +
+            "\n".join(lines)
+        )
     else:
         return None
 
