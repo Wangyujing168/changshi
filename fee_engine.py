@@ -413,6 +413,7 @@ _FEE_PATTERNS: list[tuple[str, str]] = [
     ("劳动安全卫生评审费", r"劳动安全卫生评审|安全卫生评审费|安全评审费|劳安评审"),
     ("场地准备费及临时设施费", r"场地准备费|临时设施费|场地准备及临时设施|场地.*准备.*费"),
     ("工程保险费", r"工程保险[费费]|工程一切险|工程险|工程.*保险"),
+    ("预备费", r"预备费|基本预备费|工程预备费|预备.*费率"),
 ]
 
 
@@ -427,6 +428,39 @@ def _detect_fee_type(query: str) -> str | None:
 def _detect_all_fee_types(query: str) -> list[str]:
     """检测查询中涉及的所有二类费（支持"监理费和设计费分别为多少"这类多费种提问）。"""
     return [fee_type for fee_type, pattern in _FEE_PATTERNS if re.search(pattern, query)]
+
+
+# ============================================================
+# 多费种迭代计算模式
+# ============================================================
+
+_MODES: list[tuple[str, str]] = [
+    ("cascade", r"全部费用|所有费用|各项费用|费用汇总|联算|一并计算|各项二类费"),
+    ("iteration", r"迭代.*(?:计算|总投资|总概算)|反复.*计算|循环.*收敛|总投资.*收敛|工程总概算.*计算"),
+    ("comparison", r"方案对比|方案比选|敏感性分析|多方案|比选"),
+]
+
+
+def _detect_multi_fee_mode(query: str) -> str | None:
+    """检测查询是否为多费种模式（在单费种检测之前调用）。"""
+    for mode, pattern in _MODES:
+        if re.search(pattern, query):
+            return mode
+    return None
+
+
+def _extract_numeric_value(result: dict) -> float:
+    """从 calc_* 结果字典中提取可求和的数值（统一转为万元）。"""
+    val = result.get("结果(万元)")
+    if val is not None and isinstance(val, (int, float)):
+        return float(val)
+    mid = result.get("结果中值(万元)")
+    if mid is not None:
+        return float(mid)
+    yuan = result.get("结果(元)")
+    if yuan is not None:
+        return round(float(yuan) / 10000.0, 4)
+    return 0.0
 
 
 # ============================================================
@@ -1421,6 +1455,44 @@ def calc_gongcheng_baoxian(total_wan: float) -> dict:
 
 
 # ============================================================
+# 预备费 — 基本预备费
+# ============================================================
+
+def calc_yubei(part1_wan: float, erlei_wan: float, rate: float = 5.0) -> dict:
+    """
+    基本预备费 =（一类费（工程费用）+ 二类费（工程建设其他费））× 预备费率
+
+    默认费率 5%。
+    """
+    base = part1_wan + erlei_wan
+    fee = round(base * rate / 100.0, 4)
+
+    return {
+        "费种": "预备费（基本预备费）",
+        "依据": "《市政工程设计概算编制办法》",
+        "计算公式": f"（一类费 + 二类费）× {rate}%",
+        "参数": {
+            "一类费(工程费用)(万元)": part1_wan,
+            "二类费(工程建设其他费)(万元)": erlei_wan,
+            "预备费率(%)": rate,
+            "计算基数(万元)": round(base, 4),
+        },
+        "结果(万元)": fee,
+        "计算步骤": [
+            {"步骤": "计算基数", "公式": "一类费（工程费用）+ 二类费（工程建设其他费）",
+             "结果": f"{part1_wan} + {erlei_wan} = {round(base, 4)} 万元"},
+            {"步骤": "计算预备费", "公式": f"基数 × {rate}%",
+             "结果": f"{round(base, 4)} × {rate}% = {fee} 万元"},
+        ],
+        "说明": (
+            f"一类费（工程费用）{part1_wan:.4f} 万 + 二类费（工程建设其他费）{erlei_wan:.4f} 万 "
+            f"= {round(base, 4):.4f} 万，预备费率 {rate}%，"
+            f"预备费为 **{fee:.4f} 万元**。"
+        ),
+    }
+
+
+# ============================================================
 # 环境影响咨询费 — 计价格[2002]125号
 # ============================================================
 
@@ -1939,6 +2011,14 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
     返回 None 表示不是二类费问题。
     """
     if fee_type is None:
+        # 先检查多费种模式（在单费种检测之前）
+        multi_mode = _detect_multi_fee_mode(query)
+        if multi_mode == "cascade":
+            return calc_cascade(query)
+        elif multi_mode == "iteration":
+            return calc_iteration(query)
+        elif multi_mode == "comparison":
+            return calc_comparison(query)
         fee_type = _detect_fee_type(query)
     if not fee_type:
         # 未命中明确的费种关键词，但可能隐含在上下文中
@@ -2319,6 +2399,40 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             result = calc_gongcheng_baoxian(amount)
         else:
             ref = _get_fee_reference("工程保险费")
+            ref["fee_type"] = fee_type
+            ref["has_amount"] = False
+            return ref
+    elif fee_type == "预备费":
+        # 预备费 = （第一部分工程费 + 工程建设其他费）× 费率
+        # 尝试从查询中提取费率，默认 5%
+        yb_rate = 5.0
+        yb_rate_match = re.search(r"预备费.*?(\d+\.?\d*)\s*%|预备费率\s*(\d+\.?\d*)", query)
+        if yb_rate_match:
+            yb_rate = float(yb_rate_match.group(1) or yb_rate_match.group(2))
+        jianan_b, shebei_b = _extract_jianli_components(query)
+        part1 = (jianan_b or 0) + (shebei_b or 0)
+        if part1 == 0 and amount is not None:
+            part1 = amount
+        if part1 > 0:
+            # 需要先算二类费才能算预备费 — 走联算流程
+            cascade_r = calc_cascade(query)
+            if cascade_r:
+                erlei_total = cascade_r["结果汇总"]["二类费合计(万元)"]
+                # 从 cascade 结果中减去额外费用，得到纯二类费
+                extra_sum = sum(e["金额(万元)"] for e in cascade_r.get("额外费用", []))
+                erlei_pure = erlei_total - extra_sum
+                yb_r = calc_yubei(part1, erlei_pure, yb_rate)
+                yb_r["fee_type"] = fee_type
+                yb_r["has_amount"] = True
+                yb_r["二类费合计(万元)"] = erlei_pure
+                return yb_r
+            else:
+                ref = _get_fee_reference("预备费")
+                ref["fee_type"] = fee_type
+                ref["has_amount"] = False
+                return ref
+        else:
+            ref = _get_fee_reference("预备费")
             ref["fee_type"] = fee_type
             ref["has_amount"] = False
             return ref
@@ -2728,6 +2842,513 @@ def format_for_llm(result: dict) -> str:
     )
 
     return "\n".join(lines)
+
+
+# ============================================================
+# 迭代计算核心引擎 + 三种模式
+# ============================================================
+
+# 不可自动计算的费种（需额外参数）
+_SKIP_FEES: dict[str, str] = {
+    "招标代理费": "需要中标金额，无法根据建安+设备自动计算",
+    "水土保持费": "需要土建投资额，无法根据建安+设备自动计算",
+}
+
+# 费种依赖层级
+_TIER_MAP: dict[str, int] = {
+    "监理费": 0, "工程设计费": 0, "勘察费": 0,
+    "劳动安全卫生评审费": 0, "场地准备费及临时设施费": 0, "工程保险费": 0,
+    "交易服务费": 1, "施工图审查费": 1,
+    "建设管理费": 2, "可行性研究费": 2, "环境影响咨询费": 2,
+    "预备费": 3,
+}
+
+
+def _calc_all_fees(
+    jianan: float,
+    shebei: float,
+    project_type: str = "通用",
+    query: str = "",
+    total_investment_override: float | None = None,
+    param_overrides: dict | None = None,
+) -> dict:
+    """
+    核心级联引擎：计算所有可自动计算的二类费，按依赖层级 T0→T1→T2。
+    """
+    if param_overrides is None:
+        param_overrides = {}
+
+    total_part1 = jianan + shebei
+    numerical: dict[str, float] = {}
+    raw_results: dict[str, dict] = {}
+
+    # ============ Tier 0：仅需 建安+设备 ============
+
+    # 监理费
+    prof = _extract_jianli_professional_coef(query)
+    comp = _extract_jianli_complexity_coef(query)
+    elev = _extract_jianli_elevation_coef(query)
+    jianli_r = calc_jianli(jianan=jianan, shebei=shebei,
+                           professional_coef=prof, complexity_coef=comp,
+                           elevation_coef=elev)
+    raw_results["监理费"] = jianli_r
+    numerical["监理费(万元)"] = _extract_numeric_value(jianli_r)
+
+    # 设计费
+    sheji_prof = _extract_sheji_professional_coef(query)
+    sheji_comp = _extract_sheji_complexity_coef(query)
+    ss_addi = re.findall(r"附加.*?系数.*?(\d+\.?\d*)", query)
+    ss_addi_list = [float(m) for m in ss_addi] if ss_addi else None
+    sheji_r = calc_sheji(total_part1, professional_coef=sheji_prof,
+                         complexity_coef=sheji_comp, additional_coefs=ss_addi_list)
+    raw_results["工程设计费"] = sheji_r
+    numerical["工程设计费(万元)"] = _extract_numeric_value(sheji_r)
+
+    # 勘察费
+    kancha_rate = param_overrides.get("勘察费费率")
+    if kancha_rate is None:
+        # 从查询中检测用户指定的勘察费费率
+        kc_rate_match = re.search(r"勘察费.*?(\d+\.?\d*)\s*%", query)
+        if kc_rate_match:
+            kancha_rate = float(kc_rate_match.group(1))
+    if kancha_rate is not None:
+        fee = round(total_part1 * kancha_rate / 100.0, 4)
+        kancha_r = {
+            "费种": "工程勘察费（用户指定费率）",
+            "依据": "用户指定勘察费费率",
+            "计算公式": f"第一部分工程费 × {kancha_rate}%",
+            "结果中值(万元)": fee,
+        }
+        raw_results["勘察费"] = kancha_r
+        numerical["勘察费(万元)"] = fee
+    else:
+        kancha_r = calc_kancha_rough(jianan, shebei, project_type)
+        raw_results["勘察费"] = kancha_r
+        numerical["勘察费(万元)"] = _extract_numeric_value(kancha_r)
+
+    # 劳动安全卫生评审费
+    laoan_r = calc_laodong_anquan(total_part1)
+    raw_results["劳动安全卫生评审费"] = laoan_r
+    numerical["劳动安全卫生评审费(万元)"] = _extract_numeric_value(laoan_r)
+
+    # 场地准备费
+    changdi_r = calc_changdi_zhunbei(total_part1)
+    raw_results["场地准备费及临时设施费"] = changdi_r
+    numerical["场地准备费及临时设施费(万元)"] = _extract_numeric_value(changdi_r)
+
+    # 工程保险费
+    baoxian_r = calc_gongcheng_baoxian(total_part1)
+    raw_results["工程保险费"] = baoxian_r
+    numerical["工程保险费(万元)"] = _extract_numeric_value(baoxian_r)
+
+    t0_total = sum(numerical.values())
+
+    # ============ Tier 1：需要 T0 结果 ============
+
+    # 交易服务费（需要 监理费 + 设计费）
+    jiaoyi_r = calc_jiaoyi_fuwu(
+        jianan=jianan, shebei=shebei,
+        jianli_fee=numerical["监理费(万元)"],
+        sheji_fee=numerical["工程设计费(万元)"],
+    )
+    raw_results["交易服务费"] = jiaoyi_r
+    numerical["交易服务费(万元)"] = _extract_numeric_value(jiaoyi_r)
+
+    # 施工图审查费（需要 设计费 + 勘察费）
+    _shencha_query = query
+    if re.search(r"住宅", _shencha_query):
+        shencha_ptype = "住宅"
+    elif re.search(r"工业", _shencha_query):
+        shencha_ptype = "工业"
+    elif re.search(r"市政|道路|桥梁|隧道|给水|排水|燃气|热力|轨道交通|风景园林"
+                   r"|环境卫生|污水处理|垃圾|供热|环卫|填埋|焚烧"
+                   r"|净水厂|处理厂|泵站|管网|BRT|快速公交|公交|公共交通", _shencha_query):
+        shencha_ptype = "市政"
+    else:
+        shencha_ptype = "公建"
+
+    if shencha_ptype != "住宅":
+        sheji_kancha_sum = numerical["工程设计费(万元)"] + numerical["勘察费(万元)"]
+        size = _detect_project_size_86(_shencha_query, shencha_ptype)
+        shencha_r = calc_shigong_shencha(
+            amount=total_part1,
+            project_type=shencha_ptype,
+            size=size,
+            sheji_fee=round(sheji_kancha_sum, 4),
+            sheji_fee_only=numerical["工程设计费(万元)"],
+            kancha_fee_mid=numerical["勘察费(万元)"],
+        )
+        raw_results["施工图审查费"] = shencha_r
+        numerical["施工图审查费(万元)"] = _extract_numeric_value(shencha_r)
+
+    t1_total = sum(
+        v for k, v in numerical.items()
+        if k.replace("(万元)", "") in ["交易服务费", "施工图审查费"]
+    )
+
+    # ============ 总投资 ============
+    initial_total = total_part1 + t0_total + t1_total
+    total_investment = (
+        total_investment_override
+        if total_investment_override is not None
+        else initial_total
+    )
+
+    # ============ Tier 2：需要总投资 ============
+
+    # 建设管理费
+    gl_r = calc_jianshe_guanli(total_investment)
+    raw_results["建设管理费"] = gl_r
+    numerical["建设管理费(万元)"] = _extract_numeric_value(gl_r)
+
+    # 可行性研究费
+    keyan_ind, keyan_coef = _detect_keyan_industry(query)
+    amount_yi = total_investment / 10000.0
+    # 取可研报告中值
+    keyan_r_all = calc_keyan(amount_yi, service_type="编制可研报告",
+                             industry_coef=keyan_coef, industry_name=keyan_ind)
+    raw_results["可行性研究费"] = keyan_r_all
+    numerical["可行性研究费(万元)"] = _extract_numeric_value(keyan_r_all)
+
+    # 环境影响咨询费
+    huanping_ind, huanping_coef = _detect_huanping_industry(query)
+    huanping_r_all = calc_huanping(total_investment, service_type="编制报告书",
+                                   industry_coef=huanping_coef, industry_name=huanping_ind)
+    raw_results["环境影响咨询费"] = huanping_r_all
+    numerical["环境影响咨询费(万元)"] = _extract_numeric_value(huanping_r_all)
+
+    t2_total = (
+        numerical["建设管理费(万元)"]
+        + numerical["可行性研究费(万元)"]
+        + numerical["环境影响咨询费(万元)"]
+    )
+
+    fee_total = t0_total + t1_total + t2_total
+
+    # ============ 预备费 (Tier 3)：基于（一类费 + 二类费） ============
+    # 预备费率：用户指定 > param_overrides > 默认 5%
+    yubei_rate = param_overrides.get("预备费率")
+    if yubei_rate is None:
+        # 从查询中检测用户指定的预备费率
+        yb_rate_match = re.search(r"预备费.*?(\d+\.?\d*)\s*%|预备费率.*?(\d+\.?\d*)", query)
+        if yb_rate_match:
+            yubei_rate = float(yb_rate_match.group(1) or yb_rate_match.group(2))
+    if yubei_rate is None:
+        yubei_rate = 5.0  # 默认 5%
+    yubei_fee = round((total_part1 + fee_total) * yubei_rate / 100.0, 4)
+    yubei_rate_source = "用户指定" if (param_overrides.get("预备费率") or re.search(r"预备费.*?(\d+\.?\d*)\s*%|预备费率.*?(\d+\.?\d*)", query)) else "默认"
+    yubei_r = {
+        "费种": "预备费（基本预备费）",
+        "依据": "一类费（工程费用）+ 二类费（工程建设其他费）",
+        "计算公式": f"（{total_part1} + {round(fee_total, 4)}）× {yubei_rate}%（{yubei_rate_source}）",
+        "结果(万元)": yubei_fee,
+        "预备费率(%)": yubei_rate,
+        "预备费率来源": yubei_rate_source,
+    }
+    raw_results["预备费"] = yubei_r
+    numerical["预备费(万元)"] = yubei_fee
+
+    t3_total = yubei_fee
+
+    # 项目总投资 = 一类费 + 二类费 + 预备费
+    project_total = total_part1 + fee_total + yubei_fee
+    # 静态总投资（不含预备费）
+    static_investment = total_part1 + fee_total
+
+    return {
+        "建安工程费(万元)": jianan,
+        "设备购置费(万元)": shebei,
+        "第一部分工程费(万元)": total_part1,
+        "项目类型": project_type,
+        "_数值": numerical,
+        "原始结果": raw_results,
+        "T0小计(万元)": round(t0_total, 4),
+        "T1小计(万元)": round(t1_total, 4),
+        "T2小计(万元)": round(t2_total, 4),
+        "预备费小计(万元)": round(t3_total, 4),
+        "总投资(万元)": round(static_investment, 4),
+        "项目总投资(万元)": round(project_total, 4),
+        "二类费合计(万元)": round(fee_total, 4),
+        "_层级": dict(_TIER_MAP),
+        "_跳过的费种": dict(_SKIP_FEES),
+    }
+
+
+def _build_fee_summary(result: dict) -> list[dict]:
+    """把 _calc_all_fees 结果转为摘要行列表。"""
+    numerical = result["_数值"]
+    tiers = result["_层级"]
+    rows = []
+    for fee_name, tier in sorted(tiers.items(), key=lambda x: (x[1], x[0])):
+        val = numerical.get(f"{fee_name}(万元)")
+        if val is not None:
+            rows.append({"费种": fee_name, "金额(万元)": round(val, 4), "层级": tier})
+    return rows
+
+
+def _extract_extra_fees(query: str, known_fees: set | None = None) -> list[dict]:
+    """从查询中提取用户额外指定的费用（如"旧桥检测费15万"、"增加XX费YY万"）。"""
+    known = known_fees or set()
+    extra = []
+    # 匹配格式："增加/额外/另加/外加/另计 XX费 YY万"
+    pattern = r"(?:增加|额外|另加|外加|另计|新增|加)\s*(\S{2,8}?(?:费|检测|试验|评估|监测|加固|拆除|迁改|修复))\s*(\d+\.?\d*)\s*万"
+    for m in re.finditer(pattern, query):
+        name = m.group(1).strip()
+        amount = float(m.group(2))
+        # 去重：同一名称只取第一次出现的
+        if name not in known and not any(e["名称"] == name for e in extra):
+            extra.append({"名称": name, "金额(万元)": amount})
+            known.add(name)
+    return extra
+
+
+# ==================== 模式1：多费种联算 ====================
+
+def calc_cascade(query: str) -> dict | None:
+    """模式1：给定建安+设备费，一次性计算所有可自动计算的二类费。"""
+    jianan, shebei = _extract_jianli_components(query)
+    if jianan is None:
+        amount = _extract_amount(query)
+        if amount is not None:
+            jianan = amount
+            shebei = 0.0
+        else:
+            return None
+    shebei = shebei or 0.0
+
+    project_type = _detect_project_type(query)
+    engine_result = _calc_all_fees(jianan, shebei, project_type, query)
+
+    # 提取用户额外指定的费用
+    known_names = set(engine_result["_层级"].keys())
+    known_names.update(engine_result["_跳过的费种"].keys())
+    extra_fees = _extract_extra_fees(query, known_names)
+    extra_total = sum(e["金额(万元)"] for e in extra_fees)
+
+    fee_summary = _build_fee_summary(engine_result)
+
+    base_total = engine_result["二类费合计(万元)"]
+    base_invest = engine_result["总投资(万元)"]
+    project_total = engine_result["项目总投资(万元)"]
+    yubei_fee = engine_result.get("预备费小计(万元)", 0)
+
+    return {
+        "mode": "cascade",
+        "fee_type": "__cascade__",
+        "has_amount": True,
+        "输入参数": {
+            "建安工程费(万元)": jianan,
+            "设备购置费(万元)": shebei,
+            "第一部分工程费(万元)": jianan + shebei,
+            "项目类型": project_type,
+        },
+        "费种合计": fee_summary,
+        "结果汇总": {
+            "第一部分工程费(万元)": engine_result["第一部分工程费(万元)"],
+            "T0小计(万元)": engine_result["T0小计(万元)"],
+            "T1小计(万元)": engine_result["T1小计(万元)"],
+            "T2小计(万元)": engine_result["T2小计(万元)"],
+            "预备费(万元)": yubei_fee,
+            "额外费用小计(万元)": round(extra_total, 4),
+            "二类费合计(万元)": round(base_total + extra_total, 4),
+            "项目总投资(万元)": round(project_total + extra_total, 4),
+        },
+        "明细": engine_result["原始结果"],
+        "额外费用": extra_fees,
+        "跳过的费种": engine_result["_跳过的费种"],
+    }
+
+
+# ==================== 模式2：迭代收敛 ====================
+
+def _snapshot_fees(numerical: dict[str, float]) -> dict[str, float]:
+    """快照当前费用数值。"""
+    return dict(numerical)
+
+
+def calc_iteration(query: str) -> dict | None:
+    """模式2：迭代收敛计算建设管理费（处理循环依赖）。"""
+    jianan, shebei = _extract_jianli_components(query)
+    if jianan is None:
+        amount = _extract_amount(query)
+        if amount is not None:
+            jianan = amount
+            shebei = 0.0
+        else:
+            return None
+    shebei = shebei or 0.0
+
+    project_type = _detect_project_type(query)
+    threshold = 0.01  # 万元
+    max_iter = 20
+
+    # 第一轮：初始总投资
+    result = _calc_all_fees(jianan, shebei, project_type, query)
+    iteration_history = [{
+        "迭代次数": 0,
+        "总投资(万元)": result["总投资(万元)"],
+        "二类费合计(万元)": result["二类费合计(万元)"],
+        "变化(万元)": 0.0,
+        "各项费用": _snapshot_fees(result["_数值"]),
+    }]
+
+    for i in range(1, max_iter + 1):
+        prev_total = result["总投资(万元)"]
+        result = _calc_all_fees(
+            jianan, shebei, project_type, query,
+            total_investment_override=prev_total,
+        )
+        current_total = result["总投资(万元)"]
+        diff = round(current_total - prev_total, 6)
+
+        iteration_history.append({
+            "迭代次数": i,
+            "总投资(万元)": current_total,
+            "二类费合计(万元)": result["二类费合计(万元)"],
+            "变化(万元)": diff,
+            "各项费用": _snapshot_fees(result["_数值"]),
+        })
+
+        if abs(diff) < threshold:
+            break
+
+    # 提取用户额外指定的费用（不参与迭代，直接加到最终结果）
+    known_names = set(result["_层级"].keys())
+    known_names.update(result["_跳过的费种"].keys())
+    extra_fees = _extract_extra_fees(query, known_names)
+    extra_total = sum(e["金额(万元)"] for e in extra_fees)
+
+    final_history = iteration_history[-1]
+    # 预备费（基于收敛后的结果）
+    final_numerical = result["_数值"]
+    yubei_fee = final_numerical.get("预备费(万元)", 0)
+    static_total = final_history["总投资(万元)"]  # 不含预备费
+    final_fee_total = final_history["二类费合计(万元)"]
+    return {
+        "mode": "iteration",
+        "fee_type": "__iteration__",
+        "has_amount": True,
+        "输入参数": {
+            "建安工程费(万元)": jianan,
+            "设备购置费(万元)": shebei,
+            "项目类型": project_type,
+            "收敛阈值(万元)": threshold,
+        },
+        "迭代过程": iteration_history,
+        "迭代次数": len(iteration_history) - 1,
+        "已收敛": abs(final_history["变化(万元)"]) < threshold,
+        "收敛阈值(万元)": threshold,
+        "收敛结果": {
+            **final_history,
+            "预备费(万元)": yubei_fee,
+            "总投资(万元)": round(static_total + extra_total, 4),
+            "项目总投资(万元)": round(static_total + yubei_fee + extra_total, 4),
+            "二类费合计(万元)": round(final_fee_total + extra_total, 4),
+        },
+        "额外费用": extra_fees,
+        "明细": result["原始结果"],
+        "跳过的费种": result["_跳过的费种"],
+    }
+
+
+# ==================== 模式3：多方案比选 ====================
+
+def _detect_sweep_parameter(query: str) -> dict:
+    """从查询中检测扫描参数，默认扫描勘察费费率 0.8%~1.1%。"""
+    return {
+        "参数名称": "勘察费费率",
+        "值列表": [0.8, 0.9, 1.0, 1.1],
+        "参数描述": "勘察费费率",
+        "单位": "%",
+    }
+
+
+def calc_comparison(query: str) -> dict | None:
+    """模式3：多方案比选/敏感性分析。"""
+    jianan, shebei = _extract_jianli_components(query)
+    if jianan is None:
+        amount = _extract_amount(query)
+        if amount is not None:
+            jianan = amount
+            shebei = 0.0
+        else:
+            return None
+    shebei = shebei or 0.0
+
+    project_type = _detect_project_type(query)
+    sweep = _detect_sweep_parameter(query)
+
+    scenarios = []
+    all_fee_keys = set()
+    for pv in sweep["值列表"]:
+        result = _calc_all_fees(
+            jianan, shebei, project_type, query,
+            param_overrides={sweep["参数名称"]: pv},
+        )
+        fees = result["_数值"]
+        scenario = {
+            "方案名称": f"{sweep['参数描述']} {pv}{sweep['单位']}",
+            "参数值": pv,
+            "各项费用": fees,
+            "二类费合计(万元)": result["二类费合计(万元)"],
+            "总投资(万元)": result["总投资(万元)"],
+            "项目总投资(万元)": result["项目总投资(万元)"],
+        }
+        scenarios.append(scenario)
+        all_fee_keys.update(fees.keys())
+    all_fee_keys.add("二类费合计(万元)")
+    all_fee_keys.add("总投资(万元)")
+    all_fee_keys.add("项目总投资(万元)")
+
+    # 提取用户额外指定的费用（对所有方案一致）
+    engine_result0 = _calc_all_fees(jianan, shebei, project_type, query)
+    known_names = set(engine_result0["_层级"].keys())
+    known_names.update(engine_result0["_跳过的费种"].keys())
+    extra_fees = _extract_extra_fees(query, known_names)
+    extra_total = sum(e["金额(万元)"] for e in extra_fees)
+
+    # 将额外费用加到每个方案
+    for s in scenarios:
+        s["额外费用小计(万元)"] = round(extra_total, 4)
+        s["各项费用"]["额外费用小计(万元)"] = round(extra_total, 4)
+        s["二类费合计(万元)"] = round(s["二类费合计(万元)"] + extra_total, 4)
+        s["总投资(万元)"] = round(s["总投资(万元)"] + extra_total, 4)
+        s["项目总投资(万元)"] = round(s["项目总投资(万元)"] + extra_total, 4)
+
+    if extra_fees:
+        all_fee_keys.add("额外费用小计(万元)")
+
+    # 构建对比表行
+    comparison_rows = []
+    for fee_key in sorted(all_fee_keys):
+        row: dict = {"费用名称": fee_key}
+        for i, s in enumerate(scenarios):
+            if fee_key in s["各项费用"]:
+                row[f"方案{i+1}"] = round(s["各项费用"][fee_key], 4)
+            elif fee_key == "二类费合计(万元)":
+                row[f"方案{i+1}"] = s["二类费合计(万元)"]
+            elif fee_key == "总投资(万元)":
+                row[f"方案{i+1}"] = s["总投资(万元)"]
+            elif fee_key == "项目总投资(万元)":
+                row[f"方案{i+1}"] = s["项目总投资(万元)"]
+            else:
+                row[f"方案{i+1}"] = ""
+        comparison_rows.append(row)
+
+    return {
+        "mode": "comparison",
+        "fee_type": "__comparison__",
+        "has_amount": True,
+        "输入参数": {
+            "建安工程费(万元)": jianan,
+            "设备购置费(万元)": shebei,
+            "项目类型": project_type,
+        },
+        "扫描参数": sweep,
+        "方案列表": scenarios,
+        "对比表": comparison_rows,
+        "额外费用": extra_fees,
+    }
 
 
 def detect_and_calculate_all(query: str) -> list[dict]:

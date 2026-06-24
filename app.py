@@ -176,6 +176,239 @@ def _build_sheji_text(fee_result):
     return text
 
 
+# ===== 多费种迭代计算渲染函数 =====
+
+def _render_cascade_result(result):
+    """渲染模式1：多费种联算结果。"""
+    import pandas as pd
+
+    st.markdown("## 多费种联算结果（程序精确计算）")
+
+    params = result["输入参数"]
+    col1, col2, col3 = st.columns(3)
+    col1.metric("建安工程费", f"{params['建安工程费(万元)']} 万元")
+    col2.metric("设备购置费", f"{params['设备购置费(万元)']} 万元")
+    col3.metric("项目类型", params["项目类型"])
+
+    st.markdown(
+        "**依赖层级说明**：\n"
+        "- **T0**（仅依赖建安+设备）：监理费、设计费、勘察费、劳安评审费、场地准备费、工程保险费\n"
+        "- **T1**（依赖 T0 结果）：施工图审查费、交易服务费\n"
+        "- **T2**（依赖总投资）：建设管理费、可行性研究费、环境影响咨询费\n"
+        "- **预备费**：（第一部分工程费+二类费）× 5%"
+    )
+
+    rows = result["费种合计"]
+    tier_colors = {0: "#e8f5e9", 1: "#fff3e0", 2: "#e3f2fd", 3: "#fce4ec"}
+    tier_labels = {0: "Tier 0 — 第一部分工程费相关", 1: "Tier 1 — 勘察设计费相关", 2: "Tier 2 — 总投资相关", 3: "预备费"}
+
+    for tier in [0, 1, 2, 3]:
+        tier_rows = [r for r in rows if r["层级"] == tier]
+        if tier_rows:
+            st.markdown(f"#### {tier_labels[tier]}")
+            df = pd.DataFrame(tier_rows)
+            df = df[["费种", "金额(万元)"]]
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # 汇总
+    summary = result["结果汇总"]
+    st.markdown("---")
+    # 额外费用（用户指定）
+    extra_fees = result.get("额外费用", [])
+    if extra_fees:
+        st.markdown("#### 额外费用（用户指定）")
+        for e in extra_fees:
+            st.markdown(f"- **{e['名称']}**：{e['金额(万元)']} 万元")
+
+    st.markdown("### 费用汇总")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("第一部分工程费", f"{summary['第一部分工程费(万元)']:.4f} 万元")
+    col2.metric("二类费合计", f"{summary['二类费合计(万元)']:.4f} 万元")
+    yubei_val = summary.get("预备费(万元)", 0)
+    col3.metric("预备费", f"{yubei_val:.4f} 万元")
+    col4.metric("项目总投资", f"{summary['项目总投资(万元)']:.4f} 万元")
+
+    # 层级小计
+    extra_caption = ""
+    if extra_fees:
+        extra_total = summary.get("额外费用小计(万元)", 0)
+        extra_caption = f" ｜ 额外费用：{extra_total:.4f} 万元"
+    st.caption(
+        f"T0 小计：{summary['T0小计(万元)']:.4f} 万元 ｜ "
+        f"T1 小计：{summary['T1小计(万元)']:.4f} 万元 ｜ "
+        f"T2 小计：{summary['T2小计(万元)']:.4f} 万元"
+        f"{extra_caption}"
+    )
+
+    skipped = result.get("跳过的费种", {})
+    if skipped:
+        with st.expander("⚠️ 无法自动计算的费种"):
+            for name, reason in skipped.items():
+                st.warning(f"**{name}**：{reason}")
+
+    with st.expander("查看各费种详细计算步骤"):
+        for fee_name, detail in result["明细"].items():
+            if not fee_name.startswith("_"):
+                _render_engine_card(detail)
+
+    # 构建响应文本
+    lines = []
+    for r in rows:
+        lines.append(f"- **{r['费种']}**：{r['金额(万元)']:.4f} 万元")
+    if extra_fees:
+        for e in extra_fees:
+            lines.append(f"- **{e['名称']}**（用户指定）：{e['金额(万元)']} 万元")
+    yubei_text = ""
+    yb_val = summary.get("预备费(万元)", 0)
+    if yb_val > 0:
+        yubei_text = f"\n**预备费（基本预备费）：{yb_val:.4f} 万元**（(一类费+二类费)×5%）"
+    return (
+        f"## 多费种联算结果\n\n"
+        f"计费基数：建安费 {params['建安工程费(万元)']} 万 + 设备费 {params['设备购置费(万元)']} 万 "
+        f"= **{params['第一部分工程费(万元)']} 万元**\n\n"
+        f"### 各项费用\n\n" + "\n".join(lines) + "\n\n"
+        f"**二类费合计：{summary['二类费合计(万元)']:.4f} 万元**"
+        f"{yubei_text}\n\n"
+        f"**项目总投资：{summary['项目总投资(万元)']:.4f} 万元**"
+    )
+
+
+def _render_iteration_result(result):
+    """渲染模式2：迭代收敛结果。"""
+    import pandas as pd
+
+    st.markdown("## 迭代计算（总投资收敛）")
+
+    params = result["输入参数"]
+    col1, col2 = st.columns(2)
+    col1.metric("建安工程费", f"{params['建安工程费(万元)']} 万元")
+    col2.metric("设备购置费", f"{params['设备购置费(万元)']} 万元")
+
+    st.info(
+        "**迭代原理**：建设管理费、可行性研究费、环境影响咨询费依赖总投资；"
+        "总投资又包含这些二类费本身。通过反复迭代使总投资收敛到稳定值。"
+    )
+
+    # 收敛过程表
+    history = result["迭代过程"]
+    steps_data = []
+    for h in history:
+        steps_data.append({
+            "迭代": h["迭代次数"],
+            "总投资(万元)": round(h["总投资(万元)"], 2),
+            "二类费合计(万元)": round(h["二类费合计(万元)"], 2),
+            "变化(万元)": round(h.get("变化(万元)", 0), 4),
+        })
+
+    st.markdown("### 收敛过程")
+    st.dataframe(pd.DataFrame(steps_data), use_container_width=True, hide_index=True)
+
+    final = result["收敛结果"]
+    converged = result["已收敛"]
+
+    # 额外费用提示
+    extra_fees = result.get("额外费用", [])
+    extra_note = ""
+    if extra_fees:
+        extra_total = sum(e["金额(万元)"] for e in extra_fees)
+        extra_names = "、".join(f"{e['名称']} {e['金额(万元)']}万" for e in extra_fees)
+        extra_note = f"\n\n含用户指定额外费用：{extra_names}（已计入合计）"
+
+    if converged:
+        yubei_val = final.get("预备费(万元)", 0)
+        proj_total = final.get("项目总投资(万元)", final["总投资(万元)"])
+        st.success(
+            f"✅ 经过 **{result['迭代次数']}** 次迭代已收敛 "
+            f"（阈值 {result['收敛阈值(万元)']} 万元）。\n\n"
+            f"静态总投资：**{final['总投资(万元)']:.2f} 万元**，"
+            f"二类费合计：**{final['二类费合计(万元)']:.2f} 万元**\n\n"
+            f"预备费：**{yubei_val:.4f} 万元**（(一类费+二类费)×5%），"
+            f"项目总投资：**{proj_total:.2f} 万元**"
+            f"{extra_note}"
+        )
+    else:
+        st.warning(
+            f"⚠️ 经过 {result['迭代次数']} 次迭代未完全收敛"
+        )
+
+    # 最终明细
+    st.markdown("### 收敛后各项费用")
+    fees = final["各项费用"]
+    for fee_key, val in sorted(fees.items()):
+        st.markdown(f"- **{fee_key}**：{val:.4f} 万元")
+    # 预备费单独显示
+    yubei_final_val = final.get("预备费(万元)")
+    if yubei_final_val is not None and yubei_final_val > 0:
+        st.markdown(f"- **预备费**：{yubei_final_val:.4f} 万元")
+    proj_final = final.get("项目总投资(万元)")
+    if proj_final is not None:
+        st.markdown(f"\n**项目总投资（含预备费）：{proj_final:.2f} 万元**")
+
+    with st.expander("查看每轮迭代详细数据"):
+        for h in history:
+            st.markdown(f"#### 第 {h['迭代次数']} 轮")
+            fees = h["各项费用"]
+            for fee_key, val in sorted(fees.items()):
+                st.markdown(f"- {fee_key}：{val:.4f} 万元")
+            st.caption(f"总投资：{h['总投资(万元)']:.2f} 万元 ｜ 变化：{h['变化(万元)']:.4f} 万元")
+
+    # 响应文本
+    yb_val = final.get("预备费(万元)", 0)
+    proj_total = final.get("项目总投资(万元)", final["总投资(万元)"])
+    yb_text = f"\n预备费：**{yb_val:.4f} 万元**（(一类费+二类费)×5%）" if yb_val > 0 else ""
+    return (
+        f"## 迭代计算结果\n\n"
+        f"经过 **{result['迭代次数']}** 次迭代，静态总投资收敛至 "
+        f"**{final['总投资(万元)']:.2f} 万元**，"
+        f"二类费合计 **{final['二类费合计(万元)']:.2f} 万元**。"
+        f"{yb_text}\n"
+        f"项目总投资（含预备费）：**{proj_total:.2f} 万元**。"
+    )
+
+
+def _render_comparison_result(result):
+    """渲染模式3：多方案比选结果。"""
+    import pandas as pd
+
+    st.markdown("## 多方案比选 / 敏感性分析")
+
+    sweep = result["扫描参数"]
+    st.info(
+        f"**扫描参数**：{sweep['参数描述']}，"
+        f"共 {len(sweep['值列表'])} 个方案："
+        f"{', '.join(str(v) + sweep.get('单位', '') for v in sweep['值列表'])}"
+    )
+
+    # 对比表
+    st.markdown("### 费用对比表（单位：万元）")
+    comparison_rows = result["对比表"]
+    df = pd.DataFrame(comparison_rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # 柱状图
+    st.markdown("### 二类费合计对比")
+    chart_data = {}
+    for s in result["方案列表"]:
+        chart_data[s["方案名称"]] = s["二类费合计(万元)"]
+    st.bar_chart(chart_data)
+
+    # 方案明细
+    with st.expander("查看每个方案的各项费用明细"):
+        for s in result["方案列表"]:
+            st.markdown(f"#### {s['方案名称']}")
+            fees = s["各项费用"]
+            for fee_key, val in sorted(fees.items()):
+                st.markdown(f"- **{fee_key}**：{val:.4f} 万元")
+            st.metric("二类费合计", f"{s['二类费合计(万元)']:.4f} 万元")
+            st.metric("总投资", f"{s['总投资(万元)']:.4f} 万元")
+
+    # 响应文本
+    return (
+        f"## 多方案比选结果\n\n"
+        f"扫描参数：{sweep['参数描述']}，共 {len(sweep['值列表'])} 个方案。"
+    )
+
+
 # ===== 侧边栏 =====
 with st.sidebar:
     st.title("🌿 绿化造价智能助手")
@@ -227,6 +460,18 @@ with st.sidebar:
     ]
     for i, ex in enumerate(examples_fee):
         if st.button(ex, use_container_width=True, key=f"fee_{i}"):
+            st.session_state.current_query = ex
+
+    st.divider()
+
+    st.markdown("### 多费种联算 / 迭代 / 比选")
+    examples_multi = [
+        "建安费131万，设备费160万，桥梁工程，帮我算全部费用",
+        "建安费8000万，工程总概算迭代计算",
+        "建安费5000万，设备费3000万，方案比选",
+    ]
+    for i, ex in enumerate(examples_multi):
+        if st.button(ex, use_container_width=True, key=f"multi_{i}"):
             st.session_state.current_query = ex
 
     st.divider()
@@ -338,166 +583,176 @@ if prompt:
             # fee_result = detect_and_calculate(prompt)  # 已在上方调用
 
             if fee_result and fee_result.get("has_amount"):
-                # === 引擎精确计算：全部费种直接展示，不经过 LLM ===
-                is_sheji = fee_result.get("fee_type") == "工程设计费"
+                # === 多费种迭代模式路由 ===
+                mode = fee_result.get("mode")
+                if mode == "cascade":
+                    response = _render_cascade_result(fee_result)
+                elif mode == "iteration":
+                    response = _render_iteration_result(fee_result)
+                elif mode == "comparison":
+                    response = _render_comparison_result(fee_result)
 
-                st.markdown("### 计算结果（程序精确计算）")
-                _render_engine_card(fee_result)
+                if mode is None:
+                    # === 引擎精确计算：单费种直接展示，不经过 LLM ===
+                    is_sheji = fee_result.get("fee_type") == "工程设计费"
 
-                if is_sheji:
-                    st.divider()
-                    _render_sheji_static(fee_result)
-                    response = _build_sheji_text(fee_result)
-                else:
-                    # 非设计费：也跳过 LLM，用静态确认
-                    st.divider()
-                    fee_name = fee_result.get("费种", "")
-                    result_val = fee_result.get("结果(万元)") or fee_result.get("结果(元)")
-                    unit = "万元" if "结果(万元)" in fee_result else "元"
-                    basis = fee_result.get("依据", "")
-                    desc = fee_result.get("说明", "")
-                    ft = fee_result.get("fee_type", "")
+                    st.markdown("### 计算结果（程序精确计算）")
+                    _render_engine_card(fee_result)
 
-                    # 施工图审查费（津价管[2011]46号 + 建市[2007]86号）
-                    is_shencha = ft == "施工图审查费"
-                    # 环评费（计价格[2002]125号 — 四项服务类型全部输出）
-                    is_huanping = ft == "环境影响咨询费"
-                    # 可行性研究费（计价格[1999]1283号 — 内插法详细步骤）
-                    is_keyan = ft == "可行性研究费"
-                    # 粗略估算类费种（《市政工程设计概算编制办法》）
-                    is_rough = ft in (
-                        "勘察费", "劳动安全卫生评审费",
-                        "场地准备费及临时设施费", "工程保险费",
-                    )
-                    if is_shencha or is_huanping or is_rough or is_keyan:
-                        # 构建完整 markdown 响应（跨 rerun 持久化）
-                        mid_val = fee_result.get("结果中值(万元)")
-                        mid_text = f"（中值约 **{mid_val} 万元**）" if mid_val else ""
+                    if is_sheji:
+                        st.divider()
+                        _render_sheji_static(fee_result)
+                        response = _build_sheji_text(fee_result)
+                    else:
+                        # 非设计费：也跳过 LLM，用静态确认
+                        st.divider()
+                        fee_name = fee_result.get("费种", "")
+                        result_val = fee_result.get("结果(万元)") or fee_result.get("结果(元)")
+                        unit = "万元" if "结果(万元)" in fee_result else "元"
+                        basis = fee_result.get("依据", "")
+                        desc = fee_result.get("说明", "")
+                        ft = fee_result.get("fee_type", "")
 
-                        # 构建计算过程
-                        steps = fee_result.get("计算步骤", [])
-                        steps_md = ""
-                        if steps:
-                            steps_md = "### 计算过程\n\n"
-                            for i, s in enumerate(steps, 1):
-                                step_name = s.get("步骤", "")
-                                formula = s.get("公式", "")
-                                result_step = s.get("结果", "")
-                                steps_md += f"**{i}. {step_name}**：{formula} → **{result_step}**\n\n"
+                        # 施工图审查费（津价管[2011]46号 + 建市[2007]86号）
+                        is_shencha = ft == "施工图审查费"
+                        # 环评费（计价格[2002]125号 — 四项服务类型全部输出）
+                        is_huanping = ft == "环境影响咨询费"
+                        # 可行性研究费（计价格[1999]1283号 — 内插法详细步骤）
+                        is_keyan = ft == "可行性研究费"
+                        # 粗略估算类费种（《市政工程设计概算编制办法》）
+                        is_rough = ft in (
+                            "勘察费", "劳动安全卫生评审费",
+                            "场地准备费及临时设施费", "工程保险费",
+                        )
+                        if is_shencha or is_huanping or is_rough or is_keyan:
+                            # 构建完整 markdown 响应（跨 rerun 持久化）
+                            mid_val = fee_result.get("结果中值(万元)")
+                            mid_text = f"（中值约 **{mid_val} 万元**）" if mid_val else ""
 
-                        # 构建费率明细表
-                        detail = fee_result.get("费率明细", [])
-                        detail_md = ""
-                        if detail:
-                            detail_md = "### 费率-费用对照表\n\n"
-                            detail_md += "| 费率 | 费用（万元） |\n"
-                            detail_md += "|------|-------------|\n"
-                            for d in detail:
-                                detail_md += f"| {d['费率']} | **{d['费用(万元)']}** |\n"
-                            detail_md += "\n"
+                            # 构建计算过程
+                            steps = fee_result.get("计算步骤", [])
+                            steps_md = ""
+                            if steps:
+                                steps_md = "### 计算过程\n\n"
+                                for i, s in enumerate(steps, 1):
+                                    step_name = s.get("步骤", "")
+                                    formula = s.get("公式", "")
+                                    result_step = s.get("结果", "")
+                                    steps_md += f"**{i}. {step_name}**：{formula} → **{result_step}**\n\n"
 
-                        if is_shencha:
-                            response = (
-                                f"## {fee_name}\n\n"
-                                f"**依据**：{basis}\n\n"
-                                f"{steps_md}"
-                                f"---\n\n"
-                                f"### 计算结果\n\n"
-                                f"审查费：**{result_val} {unit}**\n\n"
-                                f"{desc}"
-                            )
-                        elif is_huanping:
-                            # 四种服务类型结果表
-                            all_svc = fee_result.get("全部服务类型结果", {})
-                            svc_table = ""
-                            if all_svc:
-                                svc_table = "### 四种服务类型全部结果\n\n"
-                                svc_table += "| 服务类型 | 费用范围（万元） | 中值（万元） |\n"
-                                svc_table += "|----------|:--:|:--:|\n"
-                                for svc_name in ["编制报告书", "编制报告表", "评估报告书", "评估报告表"]:
-                                    svc_r = all_svc.get(svc_name, {})
-                                    svc_table += (
-                                        f"| **{svc_name}** "
-                                        f"| {svc_r.get('结果(万元)', '-')} "
-                                        f"| {svc_r.get('结果中值(万元)', '-')} |\n"
-                                    )
-                                svc_table += "\n"
-                            response = (
-                                f"## {fee_name}\n\n"
-                                f"**依据**：{basis}\n\n"
-                                f"{steps_md}"
-                                f"---\n\n"
-                                f"{svc_table}"
-                                f"### 计算结果\n\n"
-                                f"{desc}"
-                            )
-                        elif is_keyan:
-                            # 服务类型结果表（2项或4项）
-                            all_svc = fee_result.get("全部服务类型结果", {})
-                            svc_table = ""
-                            if all_svc:
-                                n = len(all_svc)
-                                if n == 4:
-                                    title = "### 四种服务类型全部结果"
-                                elif n == 2:
-                                    first_key = list(all_svc.keys())[0]
-                                    if "可研" in first_key:
-                                        title = "### 可研报告相关服务类型结果"
-                                    else:
-                                        title = "### 项目建议书相关服务类型结果"
-                                else:
-                                    title = "### 服务类型结果"
-                                svc_table = f"{title}\n\n"
-                                svc_table += "| 服务类型 | 基准价（万元） | 最终费用（万元） |\n"
-                                svc_table += "|----------|:--:|:--:|\n"
-                                for svc_name in all_svc:
-                                    svc_r = all_svc[svc_name]
-                                    base = svc_r.get("基准价(万元)", "-")
-                                    fee = svc_r.get("结果(万元)", "-")
-                                    svc_table += f"| **{svc_name}** | {base} | {fee} |\n"
-                                svc_table += "\n"
-                            n_svc = len(all_svc) if all_svc else 0
-                            if n_svc > 0:
+                            # 构建费率明细表
+                            detail = fee_result.get("费率明细", [])
+                            detail_md = ""
+                            if detail:
+                                detail_md = "### 费率-费用对照表\n\n"
+                                detail_md += "| 费率 | 费用（万元） |\n"
+                                detail_md += "|------|-------------|\n"
+                                for d in detail:
+                                    detail_md += f"| {d['费率']} | **{d['费用(万元)']}** |\n"
+                                detail_md += "\n"
+
+                            if is_shencha:
                                 response = (
                                     f"## {fee_name}\n\n"
                                     f"**依据**：{basis}\n\n"
-                                    f"{svc_table}"
                                     f"{steps_md}"
                                     f"---\n\n"
                                     f"### 计算结果\n\n"
-                                    f"最终费用：**{result_val} {unit}**\n\n"
+                                    f"审查费：**{result_val} {unit}**\n\n"
                                     f"{desc}"
                                 )
+                            elif is_huanping:
+                                # 四种服务类型结果表
+                                all_svc = fee_result.get("全部服务类型结果", {})
+                                svc_table = ""
+                                if all_svc:
+                                    svc_table = "### 四种服务类型全部结果\n\n"
+                                    svc_table += "| 服务类型 | 费用范围（万元） | 中值（万元） |\n"
+                                    svc_table += "|----------|:--:|:--:|\n"
+                                    for svc_name in ["编制报告书", "编制报告表", "评估报告书", "评估报告表"]:
+                                        svc_r = all_svc.get(svc_name, {})
+                                        svc_table += (
+                                            f"| **{svc_name}** "
+                                            f"| {svc_r.get('结果(万元)', '-')} "
+                                            f"| {svc_r.get('结果中值(万元)', '-')} |\n"
+                                        )
+                                    svc_table += "\n"
+                                response = (
+                                    f"## {fee_name}\n\n"
+                                    f"**依据**：{basis}\n\n"
+                                    f"{steps_md}"
+                                    f"---\n\n"
+                                    f"{svc_table}"
+                                    f"### 计算结果\n\n"
+                                    f"{desc}"
+                                )
+                            elif is_keyan:
+                                # 服务类型结果表（2项或4项）
+                                all_svc = fee_result.get("全部服务类型结果", {})
+                                svc_table = ""
+                                if all_svc:
+                                    n = len(all_svc)
+                                    if n == 4:
+                                        title = "### 四种服务类型全部结果"
+                                    elif n == 2:
+                                        first_key = list(all_svc.keys())[0]
+                                        if "可研" in first_key:
+                                            title = "### 可研报告相关服务类型结果"
+                                        else:
+                                            title = "### 项目建议书相关服务类型结果"
+                                    else:
+                                        title = "### 服务类型结果"
+                                    svc_table = f"{title}\n\n"
+                                    svc_table += "| 服务类型 | 基准价（万元） | 最终费用（万元） |\n"
+                                    svc_table += "|----------|:--:|:--:|\n"
+                                    for svc_name in all_svc:
+                                        svc_r = all_svc[svc_name]
+                                        base = svc_r.get("基准价(万元)", "-")
+                                        fee = svc_r.get("结果(万元)", "-")
+                                        svc_table += f"| **{svc_name}** | {base} | {fee} |\n"
+                                    svc_table += "\n"
+                                n_svc = len(all_svc) if all_svc else 0
+                                if n_svc > 0:
+                                    response = (
+                                        f"## {fee_name}\n\n"
+                                        f"**依据**：{basis}\n\n"
+                                        f"{svc_table}"
+                                        f"{steps_md}"
+                                        f"---\n\n"
+                                        f"### 计算结果\n\n"
+                                        f"最终费用：**{result_val} {unit}**\n\n"
+                                        f"{desc}"
+                                    )
+                                else:
+                                    response = (
+                                        f"## {fee_name}\n\n"
+                                        f"**依据**：{basis}\n\n"
+                                        f"{steps_md}"
+                                        f"---\n\n"
+                                        f"### 计算结果\n\n"
+                                        f"最终费用：**{result_val} {unit}**\n\n"
+                                        f"{desc}"
+                                    )
                             else:
                                 response = (
                                     f"## {fee_name}\n\n"
                                     f"**依据**：{basis}\n\n"
                                     f"{steps_md}"
+                                    f"{detail_md}"
                                     f"---\n\n"
-                                    f"### 计算结果\n\n"
-                                    f"最终费用：**{result_val} {unit}**\n\n"
+                                    f"### 估算结果\n\n"
+                                    f"估算范围：**{result_val} {unit}** {mid_text}\n\n"
                                     f"{desc}"
                                 )
                         else:
-                            response = (
-                                f"## {fee_name}\n\n"
-                                f"**依据**：{basis}\n\n"
-                                f"{steps_md}"
-                                f"{detail_md}"
-                                f"---\n\n"
-                                f"### 估算结果\n\n"
-                                f"估算范围：**{result_val} {unit}** {mid_text}\n\n"
+                            st.success(
+                                f"以上为程序依据 **{basis}** 精确计算结果。\n\n"
+                                f"计算结果：**{result_val} {unit}**\n\n"
                                 f"{desc}"
                             )
-                    else:
-                        st.success(
-                            f"以上为程序依据 **{basis}** 精确计算结果。\n\n"
-                            f"计算结果：**{result_val} {unit}**\n\n"
-                            f"{desc}"
-                        )
-                        response = (
-                            f"根据{basis}，{fee_name}计算结果为 **{result_val} {unit}**。"
-                        )
+                            response = (
+                                f"根据{basis}，{fee_name}计算结果为 **{result_val} {unit}**。"
+                            )
 
             elif fee_result and not fee_result.get("has_amount"):
                 # === 无金额参考模式 ===
