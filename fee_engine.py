@@ -405,9 +405,9 @@ _FEE_PATTERNS: list[tuple[str, str]] = [
     ("交易服务费", r"交易服务费|工程建设交易|津发改.*979"),
     ("监理费", r"监理.*(?:费|收费|服务费)|施工监理.*收费|发改价格.*670"),
     ("工程设计费", r"工程(?:勘察)?设计费?[^用]|基本设计收费|勘察设计收费|设计收费基价|设计费.*(?:计费|计算|收费|多少|怎么|如何|专业|调整|系数|表|区分|分类|有哪些|是什么|怎么区分|复杂|Ⅰ|Ⅱ|Ⅲ|I级|II级|III级|\d)|设计费\s*[？?]|设计费\s*$|计价格.*10号"),
+    ("施工图审查费", r"施工图(?:设计文件)?审查|图审[费费]|津价管.*46"),
     ("勘察费", r"勘察费|工程勘察(?!设计)|岩土.*勘察.*费|水文地质.*勘察.*费|勘察.*(?:多少|计算|怎么|如何|收费|取费|标准|定额)"),
     ("可行性研究费", r"可行性研究|可研|项目建议书|前期工作咨询|计价格.*1283"),
-    ("施工图审查费", r"施工图审查|图审[费费]|津价管.*46"),
     ("水土保持费", r"水土保持.*(?:费|方案编制|监测|验收|咨询)|保监.*22"),
     ("环境影响咨询费", r"环境影响(?:咨询|评价).*[费费]|环评[费费]|计价格.*125"),
     ("劳动安全卫生评审费", r"劳动安全卫生评审|安全卫生评审费|安全评审费|劳安评审"),
@@ -898,12 +898,16 @@ def calc_shigong_shencha(
     project_type: str = "公建",
     size: str = "中型",
     sheji_fee: float | None = None,
+    sheji_fee_only: float | None = None,
+    kancha_fee_mid: float | None = None,
+    kancha_rate_desc: str = "区间中值",
 ) -> dict:
     """
     施工图审查费（津价管[2011]46号 + 建市[2007]86号）。
 
     住宅类：按建筑面积 × 单价（元/m²）
-    公建/工业/市政类：按勘察设计费（计价格[2002]10号计算）× 费率(%)
+    公建/工业/市政类：按勘察设计费（设计费+勘察费）× 费率(%)
+      其中设计费按计价格[2002]10号计算，勘察费按《市政工程设计概算编制办法》百分比法粗略估算
     项目大中小划分：建市[2007]86号《工程设计资质标准》
     """
     size_desc = {"大型": "大型", "中型": "中型", "小型": "小型"}.get(size, size)
@@ -934,15 +938,26 @@ def calc_shigong_shencha(
 
     if sheji_fee is not None:
         fee = round(sheji_fee * rate_pct / 100.0, 4)
-        desc = f"{project_type} {size_desc} 项目，设计费 {sheji_fee:.4f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
-        params = {"勘察设计费(万元)": sheji_fee, "项目类型": project_type, "项目规模": size_desc, "费率(%)": rate_pct}
-        steps = [
-            {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": f"{project_type}类"},
-            {"步骤": "判定项目规模", "公式": "建市[2007]86号各行业大中小项目划分标准", "结果": f"{size_desc}项目"},
-            {"步骤": "计算勘察设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee:.4f} 万元"},
-            {"步骤": "查找审查费率", "公式": f"津价管[2011]46号：{project_type}类{size_desc} {rate_pct}%", "结果": f"{rate_pct}%"},
-            {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {rate_pct}%", "结果": f"{fee:.4f} 万元"},
-        ]
+        desc = f"{project_type} {size_desc} 项目，勘察设计费（设计费+勘察费）{sheji_fee:.4f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
+        params = {"勘察设计费(万元)": sheji_fee, "= 设计费+勘察费": "", "项目类型": project_type, "项目规模": size_desc, "费率(%)": rate_pct}
+        if sheji_fee_only is not None and kancha_fee_mid is not None:
+            steps = [
+                {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": f"{project_type}类"},
+                {"步骤": "判定项目规模", "公式": "建市[2007]86号各行业大中小项目划分标准", "结果": f"{size_desc}项目"},
+                {"步骤": "计算设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee_only:.4f} 万元"},
+                {"步骤": "计算勘察费", "公式": f"《市政工程设计概算编制办法》百分比法（{kancha_rate_desc}）", "结果": f"{kancha_fee_mid:.4f} 万元"},
+                {"步骤": "计算勘察设计费基数", "公式": f"设计费 + 勘察费 = {sheji_fee_only:.4f} + {kancha_fee_mid:.4f}", "结果": f"{sheji_fee:.4f} 万元"},
+                {"步骤": "查找审查费率", "公式": f"津价管[2011]46号：{project_type}类{size_desc} {rate_pct}%", "结果": f"{rate_pct}%"},
+                {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {rate_pct}%", "结果": f"{fee:.4f} 万元"},
+            ]
+        else:
+            steps = [
+                {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": f"{project_type}类"},
+                {"步骤": "判定项目规模", "公式": "建市[2007]86号各行业大中小项目划分标准", "结果": f"{size_desc}项目"},
+                {"步骤": "计算勘察设计费", "公式": "设计费（计价格[2002]10号）+ 勘察费（概算编制办法百分比法）", "结果": f"{sheji_fee:.4f} 万元"},
+                {"步骤": "查找审查费率", "公式": f"津价管[2011]46号：{project_type}类{size_desc} {rate_pct}%", "结果": f"{rate_pct}%"},
+                {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {rate_pct}%", "结果": f"{fee:.4f} 万元"},
+            ]
     else:
         fee = round(amount * rate_pct / 100.0, 4)
         desc = f"{project_type} {size_desc} 项目，计费基数 {amount:.0f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
@@ -958,8 +973,9 @@ def calc_shigong_shencha(
         "费种": f"施工图审查费（{project_type}{size_desc}）",
         "依据": "《市发展改革委关于施工图审查收费标准的通知》（津价管[2011]46号）\n"
                 "项目规模划分依据：《工程设计资质标准》（建市[2007]86号）\n"
-                "勘察设计费计算依据：《工程勘察设计收费管理规定》（计价格[2002]10号）",
-        "计算公式": f"审查费 = 勘察设计费 × {rate_pct}%（勘察设计费按计价格[2002]10号计算）",
+                "设计费计算依据：《工程勘察设计收费管理规定》（计价格[2002]10号）\n"
+                "勘察费估算依据：《市政工程设计概算编制办法》（中国计划出版社）",
+        "计算公式": f"审查费 = 勘察设计费（设计费+勘察费）× {rate_pct}%",
         "参数": params,
         "结果(万元)": fee,
         "说明": desc + "\n幕墙/深基坑单项工程按 1.6‰ 计取（最低 1000 元）",
@@ -1821,9 +1837,9 @@ def _get_fee_reference(fee_type: str) -> dict:
             "费率表": [
                 ("类别", "大型", "中型", "小型"),
                 ("住宅（元/m²）", "1.9", "1.7", "1.3"),
-                ("公建（%设计费）", "3.2%", "2.9%", "2.4%"),
-                ("工业（%设计费）", "3.2%", "3.0%", "2.8%"),
-                ("市政（%设计费）", "4.8%", "4.0%", "3.2%"),
+                ("公建（%勘察设计费）", "3.2%", "2.9%", "2.4%"),
+                ("工业（%勘察设计费）", "3.2%", "3.0%", "2.8%"),
+                ("市政（%勘察设计费）", "4.8%", "4.0%", "3.2%"),
             ],
             "计算说明": "幕墙/深基坑等单项工程按 1.6‰ 计取，最低 1000 元",
         },
@@ -2198,6 +2214,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
         # 建市[2007]86号 自动判定项目规模
         size = _detect_project_size_86(query, ptype)
         # 非住宅类：以勘察设计费为基数（津价管[2011]46号 第二~四条）
+        # 勘察设计费 = 设计费 + 勘察费
         sheji_fee = None
         if ptype != "住宅":
             # 提取计费额（建安+设备），调用 calc_sheji 计算设计费作为审查费基数
@@ -2211,7 +2228,22 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             ss_addi = re.findall(r"附加.*?系数.*?(\d+\.?\d*)", query)
             ss_addi_list = [float(m) for m in ss_addi] if ss_addi else None
             sheji_result = calc_sheji(ss_jifei, ss_prof, ss_comp, additional_coefs=ss_addi_list)
-            sheji_fee = sheji_result["结果(万元)"]
+            sheji_fee_only = sheji_result["结果(万元)"]
+            # 勘察费计算：优先使用用户指定比例，否则取区间中值粗略估算
+            kc_rate_match = re.search(r"勘察费.*?(\d+\.?\d*)\s*%", query)
+            kancha_user_rate = float(kc_rate_match.group(1)) if kc_rate_match else None
+            kancha_user_rate_pct = kancha_user_rate  # 保存用于步骤展示
+            if kancha_user_rate is not None:
+                # 用户指定了勘察费比例
+                kancha_fee_mid = round(ss_jifei * kancha_user_rate / 100.0, 4)
+                kancha_rate_desc = f"{kancha_user_rate}%（用户指定）"
+            else:
+                # 默认：粗略估算取中值
+                kc_ptype = _detect_project_type(query)
+                kancha_result = calc_kancha_rough(ss_jifei, 0, project_type=kc_ptype)
+                kancha_fee_mid = kancha_result["结果中值(万元)"]
+                kancha_rate_desc = f"区间中值"
+            sheji_fee = round(sheji_fee_only + kancha_fee_mid, 4)
         else:
             # 住宅类：提取建筑面积
             m_m2 = re.search(r"(?:建筑面积|面积)\s*[:：]?\s*(\d+\.?\d*)\s*万?\s*(?:m2|㎡|平米|平方米)?", query)
@@ -2221,7 +2253,10 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                     amount = val * 10000
                 else:
                     amount = val
-        result = calc_shigong_shencha(amount, ptype, size, sheji_fee=sheji_fee)
+        result = calc_shigong_shencha(amount, ptype, size, sheji_fee=sheji_fee,
+                                       sheji_fee_only=sheji_fee_only if ptype != "住宅" else None,
+                                       kancha_fee_mid=kancha_fee_mid if ptype != "住宅" else None,
+                                       kancha_rate_desc=kancha_rate_desc if ptype != "住宅" else "区间中值")
     elif fee_type == "水土保持费":
         amount_yi = _extract_amount_yi(query)
         if amount_yi is None:
