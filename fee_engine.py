@@ -144,6 +144,88 @@ SHEJI_PROFESSIONAL_COEFS: list[tuple[str, float]] = [
     ("林业", 0.8),
 ]
 
+# ============================================================
+# 交互式系数选择 — 选项表（用于前端下拉菜单）
+# ============================================================
+
+# 监理费 专业调整系数选项（发改价格[2007]670号 附表三）
+JIANLI_PROFESSIONAL_OPTIONS: list[tuple[str, float]] = [
+    ("建筑、市政、公路、城市道路等（默认）", 1.0),
+    ("园林绿化", 0.8),
+    ("矿山采选", 0.9),
+    ("农业、林业", 0.9),
+    ("水运、地铁、桥梁、隧道、索道", 1.1),
+    ("核能、核电、水电、水库", 1.2),
+]
+
+# 监理费 复杂程度系数选项（发改价格[2007]670号 1.0.9条）
+JIANLI_COMPLEXITY_OPTIONS: list[tuple[str, float]] = [
+    ("II级 / 较复杂（默认）", 1.0),
+    ("I级 / 简单", 0.85),
+    ("III级 / 复杂", 1.15),
+]
+
+# 监理费 高程调整系数选项（发改价格[2007]670号 1.0.9条）
+JIANLI_ELEVATION_OPTIONS: list[tuple[str, float]] = [
+    ("≤2000m（默认）", 1.0),
+    ("2001~3000m", 1.1),
+    ("3001~4000m", 1.2),
+    (">4000m", 1.3),
+]
+
+# 设计费 专业调整系数选项（计价格[2002]10号 附表二）
+SHEJI_PROFESSIONAL_OPTIONS: list[tuple[str, float]] = [
+    ("建筑、市政、电信（默认）", 1.0),
+    ("公路、城市道路", 0.9),
+    ("水运、地铁、桥梁、隧道", 1.1),
+    ("索道", 1.3),
+    ("机场场道", 0.8),
+    ("机场空管、助航灯光、轻轨", 1.0),
+    ("人防、园林、绿化、广电", 1.1),
+    ("邮政工艺", 0.8),
+    ("石油、化工、石化、化纤、医药", 1.2),
+    ("核化工", 1.6),
+    ("核能工程", 1.6),
+    ("核电常规岛、水电、水库、送变电", 1.2),
+    ("火电", 1.0),
+    ("风力发电、水利工程", 0.8),
+    ("选煤、煤炭工程", 1.3),
+    ("采煤、铀矿", 1.2),
+    ("矿山、采选、黑色、黄金、化学矿、非金属", 1.1),
+    ("冶炼、热加工、压力加工", 1.2),
+    ("船舶水工", 1.1),
+    ("核加工", 1.3),
+    ("冷加工", 1.0),
+    ("农业", 0.9),
+    ("林业", 0.8),
+]
+
+# 设计费 复杂程度系数选项（计价格[2002]10号 1.0.9.2）
+SHEJI_COMPLEXITY_OPTIONS: list[tuple[str, float]] = [
+    ("II级 / 较复杂（默认）", 1.0),
+    ("I级 / 一般", 0.85),
+    ("III级 / 复杂", 1.15),
+]
+
+# 环评费 行业调整系数选项（计价格[2002]125号 附件二 表1）
+HUANPING_INDUSTRY_OPTIONS: list[tuple[str, float]] = [
+    ("市政（默认）", 1.0),
+    ("建筑", 0.6),
+    ("交通、铁道、民航、管线、建材、烟草、兵器", 1.0),
+    ("林业、畜牧、渔业、农业", 1.0),
+    ("石化、石油、天然气、水利、水电、旅游", 1.1),
+    ("化工、冶金、有色、黄金、煤炭、矿产、纺织、化纤、轻工、医药", 1.2),
+    ("邮电、广播电视、航空、机械、船舶、航天、电子、勘探、社会服务、火电", 0.8),
+    ("粮食、信息产业、仓储", 0.6),
+]
+
+# 环评费 环境敏感程度系数选项（计价格[2002]125号 附件二 表2）
+HUANPING_SENSITIVITY_OPTIONS: list[tuple[str, float]] = [
+    ("未指定（默认）", 1.0),
+    ("一般", 0.8),
+    ("敏感", 1.2),
+]
+
 # 计价格[1999]1283 号 建设项目前期工作咨询收费标准（可行性研究费）
 # 格式：{服务类型: [(投资下限_亿, 投资上限_亿, 费用下限_万, 费用上限_万)]}
 # 注：<0.3亿项目由各省自行制定标准，此处按地方补充标准分段
@@ -2000,6 +2082,169 @@ def _get_fee_reference(fee_type: str) -> dict:
         "费率表": [],
     })
 
+def _build_coef_metadata(fee_type: str, result: dict, query: str) -> dict:
+    """为交互式系数选择构建元数据：各系数选项表 + 当前值 + 重算所需参数。"""
+    params = result.get("参数", {})
+
+    def _find_label(value: float, options: list[tuple[str, float]]) -> str:
+        """在选项表中找到匹配的标签，找不到则返回自定义标签。"""
+        for label, val in options:
+            if abs(val - value) < 0.005:
+                return label
+        return f"自定义 ({value})"
+
+    if fee_type == "监理费":
+        prof = params.get("专业调整系数", 1.0)
+        comp = params.get("复杂程度系数", 1.0)
+        elev = params.get("高程调整系数", 1.0)
+        amount_wan = params.get("计费额(万元)")
+        jianan, shebei = _extract_jianli_components(query)
+
+        return {
+            "fee_label": "施工监理服务费",
+            "calc_func": "calc_jianli",
+            "coefs": [
+                {
+                    "key": "专业调整系数",
+                    "param_name": "professional_coef",
+                    "current": prof,
+                    "current_label": _find_label(prof, JIANLI_PROFESSIONAL_OPTIONS),
+                    "options": JIANLI_PROFESSIONAL_OPTIONS,
+                    "description": "发改价格[2007]670号 附表三",
+                },
+                {
+                    "key": "复杂程度系数",
+                    "param_name": "complexity_coef",
+                    "current": comp,
+                    "current_label": _find_label(comp, JIANLI_COMPLEXITY_OPTIONS),
+                    "options": JIANLI_COMPLEXITY_OPTIONS,
+                    "description": "发改价格[2007]670号 1.0.9条",
+                },
+                {
+                    "key": "高程调整系数",
+                    "param_name": "elevation_coef",
+                    "current": elev,
+                    "current_label": _find_label(elev, JIANLI_ELEVATION_OPTIONS),
+                    "options": JIANLI_ELEVATION_OPTIONS,
+                    "description": "发改价格[2007]670号 1.0.9条",
+                },
+            ],
+            "base_params": {
+                "amount_wan": amount_wan,
+                "jianan": jianan,
+                "shebei": shebei,
+            },
+        }
+
+    elif fee_type == "工程设计费":
+        prof = params.get("专业调整系数", 1.0)
+        comp = params.get("复杂程度系数", 1.0)
+        addi = params.get("附加调整系数", 1.0)
+        amount_wan = params.get("计费额(万元)")
+
+        # 附加项的元数据
+        basic_design = result.get("基本设计收费(万元)", 0)
+        other_items = result.get("其他设计收费明细", [])
+        other_labels = [it["项目"] for it in other_items]
+
+        # 检查是否有附加系数明细（多个附加系数）
+        addi_detail = params.get("附加系数明细", "")
+
+        return {
+            "fee_label": "工程设计费",
+            "calc_func": "calc_sheji",
+            "coefs": [
+                {
+                    "key": "专业调整系数",
+                    "param_name": "professional_coef",
+                    "current": prof,
+                    "current_label": _find_label(prof, SHEJI_PROFESSIONAL_OPTIONS),
+                    "options": SHEJI_PROFESSIONAL_OPTIONS,
+                    "description": "计价格[2002]10号 附表二",
+                },
+                {
+                    "key": "复杂程度系数",
+                    "param_name": "complexity_coef",
+                    "current": comp,
+                    "current_label": _find_label(comp, SHEJI_COMPLEXITY_OPTIONS),
+                    "options": SHEJI_COMPLEXITY_OPTIONS,
+                    "description": "计价格[2002]10号 1.0.9.2",
+                },
+                {
+                    "key": "附加调整系数",
+                    "param_name": "additional_coef",
+                    "current": addi,
+                    "current_label": f"{addi}" + (f"（{addi_detail}）" if addi_detail else ""),
+                    "options": [],  # 无预设选项，全靠自定义
+                    "description": "计价格[2002]10号 1.0.9.3（多个系数合并 = 相加 − 个数 + 1）",
+                },
+            ],
+            "base_params": {
+                "amount_wan": amount_wan,
+                "other_labels": other_labels,
+            },
+        }
+
+    elif fee_type == "环境影响咨询费":
+        ind_coef = params.get("行业", "")
+        sens_coef_raw = params.get("环境敏感程度", "")
+        # 从参数字符串中提取数值
+        ind_coef_val = 1.0
+        m = re.search(r"系数\s*([\d.]+)", str(ind_coef))
+        if m:
+            ind_coef_val = float(m.group(1))
+        sens_coef_val = 1.0
+        m2 = re.search(r"系数\s*([\d.]+)", str(sens_coef_raw))
+        if m2:
+            sens_coef_val = float(m2.group(1))
+
+        # 获取 service_type
+        svc = "编制报告书"
+        for label in ["编制报告书", "编制报告表", "评估报告书", "评估报告表"]:
+            if label in result.get("费种", ""):
+                svc = label
+                break
+        # 也检测查询
+        if re.search(r"报告表|报告书.*表", query):
+            svc = "编制报告表"
+        elif re.search(r"评估报告书|评估.*报告书", query):
+            svc = "评估报告书"
+        elif re.search(r"评估报告表|评估.*报告表", query):
+            svc = "评估报告表"
+
+        amount_wan = params.get("估算投资额(万元)", 0)
+
+        return {
+            "fee_label": "环境影响咨询费",
+            "calc_func": "calc_huanping",
+            "coefs": [
+                {
+                    "key": "行业调整系数",
+                    "param_name": "industry_coef",
+                    "current": ind_coef_val,
+                    "current_label": _find_label(ind_coef_val, HUANPING_INDUSTRY_OPTIONS),
+                    "options": HUANPING_INDUSTRY_OPTIONS,
+                    "description": "计价格[2002]125号 附件二 表1",
+                },
+                {
+                    "key": "环境敏感程度系数",
+                    "param_name": "sensitivity_coef",
+                    "current": sens_coef_val,
+                    "current_label": _find_label(sens_coef_val, HUANPING_SENSITIVITY_OPTIONS),
+                    "options": HUANPING_SENSITIVITY_OPTIONS,
+                    "description": "计价格[2002]125号 附件二 表2",
+                },
+            ],
+            "base_params": {
+                "amount_wan": amount_wan,
+                "service_type": svc,
+            },
+        }
+
+    else:
+        return {"fee_label": "", "calc_func": "", "coefs": [], "base_params": {}}
+
+
 def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | None:
     """
     检测查询是否涉及二类费，如果是则直接计算。
@@ -2502,6 +2747,13 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
 
     result["fee_type"] = fee_type
     result["has_amount"] = True
+    # 标记支持交互式费率选择的费种（前端会渲染费率下拉菜单）
+    if fee_type in ("勘察费", "劳动安全卫生评审费", "场地准备费及临时设施费", "工程保险费"):
+        result["is_rate_selectable"] = True
+    # 标记支持交互式系数选择的费种（前端会渲染系数下拉菜单）
+    if fee_type in ("监理费", "工程设计费", "环境影响咨询费"):
+        result["is_coef_selectable"] = True
+        result["coef_metadata"] = _build_coef_metadata(fee_type, result, query)
     return result
 
 

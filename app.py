@@ -4,7 +4,7 @@
 import re
 import streamlit as st
 from rag_engine import get_engine
-from fee_engine import detect_and_calculate
+from fee_engine import detect_and_calculate, calc_jianli, calc_sheji, calc_huanping
 
 # ===== 页面设置 =====
 st.set_page_config(
@@ -529,6 +529,315 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# ===== 交互式费率选择（持久化在聊天区外） =====
+if "pending_rate_select" in st.session_state:
+    ctx = st.session_state.pending_rate_select
+    fee_result = ctx["fee_result"]
+    fee_name = fee_result.get("费种", "")
+    ft = fee_result.get("fee_type", "")
+    basis = fee_result.get("依据", "")
+    desc = fee_result.get("说明", "")
+    detail = fee_result.get("费率明细", [])
+    steps = fee_result.get("计算步骤", [])
+    params = fee_result.get("参数", {})
+
+    rate_opts = [d['费率'] for d in detail]
+    fee_map = {d['费率']: d['费用(万元)'] for d in detail}
+    mid_idx = len(detail) // 2
+
+    st.divider()
+
+    # ── 卡片容器 ──
+    with st.container(border=True):
+        # 标题行
+        col_title, col_badge = st.columns([3, 1])
+        with col_title:
+            st.markdown(f"## 🎯 {fee_name}")
+        with col_badge:
+            st.info(f"共 {len(detail)} 档费率")
+
+        st.caption(f"📜 **依据**：{basis}")
+
+        # 计算过程折叠
+        if steps:
+            with st.expander("📐 计算过程", expanded=False):
+                for i, s in enumerate(steps, 1):
+                    st.markdown(
+                        f"**{i}. {s.get('步骤', '')}**  \n"
+                        f"> {s.get('公式', '')}  \n"
+                        f"> → **{s.get('结果', '')}**"
+                    )
+
+        st.markdown("---")
+        st.markdown("### 📊 选择适用费率")
+
+        # 费率卡片式选择（radio + 可视化费用卡片）
+        selected_rate = st.radio(
+            "费率（间隔 0.1%）",
+            rate_opts,
+            index=mid_idx,
+            horizontal=True,
+            key=f"persist_rate_{ft}",
+            label_visibility="collapsed",
+        )
+
+        # 选中的费率高亮卡片
+        selected_fee = fee_map[selected_rate]
+        st.markdown(
+            f"""<div style="
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                border-radius: 12px;
+                padding: 20px 28px;
+                margin: 12px 0;
+                color: white;
+            ">
+                <div style="font-size: 0.85rem; opacity: 0.85; margin-bottom: 4px;">✅ 当前选择</div>
+                <div style="display: flex; align-items: baseline; gap: 16px;">
+                    <span style="font-size: 1.1rem;">费率</span>
+                    <span style="font-size: 2.0rem; font-weight: 700;">{selected_rate}</span>
+                    <span style="font-size: 1.1rem; opacity: 0.7;">→ 费用</span>
+                    <span style="font-size: 2.0rem; font-weight: 700;">{selected_fee} 万</span>
+                </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("---")
+
+        # 操作按钮行
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+        with col_btn1:
+            if st.button("✅ 确认选择", type="primary", use_container_width=True, key=f"confirm_rate_{ft}"):
+                response = (
+                    f"## {fee_name}\n\n"
+                    f"**依据**：{basis}\n\n"
+                    f"**选定费率**：{selected_rate}\n\n"
+                    f"**费用**：{selected_fee} 万元\n\n"
+                    f"{desc}"
+                )
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                del st.session_state.pending_rate_select
+                st.rerun()
+        with col_btn2:
+            if st.button("🗑 取消", use_container_width=True, key=f"cancel_rate_{ft}"):
+                del st.session_state.pending_rate_select
+                st.rerun()
+        with col_btn3:
+            pass  # 占位
+
+        # 底部说明
+        with st.expander("ℹ️ 费率说明"):
+            st.info(desc)
+
+# ===== 诊断面板 =====
+if "_diag" in st.session_state:
+    st.sidebar.info(f"🔍 {st.session_state._diag}")
+
+# ===== 交互式系数选择（持久化，在聊天区外渲染） =====
+if "pending_coef_select" in st.session_state:
+    ctx = st.session_state.pending_coef_select
+    meta = ctx["coef_metadata"]
+    fee_result = ctx["fee_result"]
+    coefs = meta.get("coefs", [])
+    base_params = meta.get("base_params", {})
+    calc_func = meta.get("calc_func", "")
+    fee_name = fee_result.get("费种", "")
+    ft = fee_result.get("fee_type", "")
+    basis = fee_result.get("依据", "")
+
+    st.divider()
+
+    with st.container(border=True):
+        # 标题行
+        col_title, col_badge = st.columns([3, 1])
+        with col_title:
+            st.markdown(f"## 🎛️ {fee_name} — 系数调整")
+        with col_badge:
+            st.info(f"{len(coefs)} 个系数")
+
+        st.caption(f"📜 **依据**：{basis}")
+
+        # ── 各系数下拉选择器 ──
+        selected_coefs: dict = {}
+        for i, coef_def in enumerate(coefs):
+            key = coef_def["key"]
+            param_name = coef_def["param_name"]
+            current_val = float(coef_def["current"])
+            current_label = coef_def.get("current_label", str(current_val))
+            options: list = coef_def.get("options", [])
+            desc = coef_def.get("description", "")
+
+            st.markdown(f"### {key}")
+            st.caption(f"{desc}")
+
+            # 构建选项标签（含值）
+            option_labels = [f"{label}（{val}）" for label, val in options]
+            option_values = [val for _, val in options]
+
+            # 找到当前值对应的索引
+            try:
+                current_idx = option_values.index(current_val)
+            except ValueError:
+                current_idx = len(option_values)  # 指向"自定义"
+
+            # 添加"自定义"选项
+            option_labels.append("✏️ 自定义…")
+            option_values.append(-1.0)  # -1 = 自定义标记
+
+            selected_idx = st.selectbox(
+                f"选择{key}",
+                range(len(option_labels)),
+                index=min(current_idx, len(option_labels) - 1),
+                format_func=lambda idx, labels=option_labels: labels[idx],
+                key=f"coef_sel_{ft}_{param_name}",
+                label_visibility="collapsed",
+            )
+
+            chosen_val = option_values[selected_idx]
+
+            if chosen_val == -1.0:
+                # 自定义：显示数字输入
+                custom_val = st.number_input(
+                    f"自定义{key}的值",
+                    min_value=0.10,
+                    max_value=5.00,
+                    value=current_val if current_val > 0.1 else 1.0,
+                    step=0.05,
+                    format="%.2f",
+                    key=f"coef_cust_{ft}_{param_name}",
+                )
+                selected_coefs[param_name] = float(custom_val)
+                selected_coefs[f"{param_name}_label"] = f"自定义（{custom_val:.2f}）"
+            else:
+                selected_coefs[param_name] = float(chosen_val)
+                # 提取纯标签（去掉末尾的系数值括号）
+                raw_label = option_labels[selected_idx]
+                if "（" in raw_label:
+                    raw_label = raw_label.rsplit("（", 1)[0]
+                selected_coefs[f"{param_name}_label"] = raw_label
+
+        st.markdown("---")
+
+        # ── 根据所选系数实时重算 ──
+        recalc_fee = None
+        recalc_desc = ""
+        recalc_error = ""
+        try:
+            if calc_func == "calc_jianli":
+                prof = selected_coefs.get("professional_coef", 1.0)
+                comp = selected_coefs.get("complexity_coef", 1.0)
+                elev = selected_coefs.get("elevation_coef", 1.0)
+                jianan = base_params.get("jianan")
+                shebei = base_params.get("shebei")
+                amount_wan = base_params.get("amount_wan")
+
+                if jianan is not None and shebei is not None:
+                    recalc = calc_jianli(
+                        jianan=jianan, shebei=shebei,
+                        professional_coef=prof, complexity_coef=comp,
+                        elevation_coef=elev,
+                    )
+                elif amount_wan is not None:
+                    recalc = calc_jianli(
+                        amount_wan=amount_wan,
+                        professional_coef=prof, complexity_coef=comp,
+                        elevation_coef=elev,
+                    )
+                else:
+                    recalc = None
+                    recalc_error = "无法确定计费额"
+
+                recalc_fee = recalc["结果(万元)"] if recalc else None
+                recalc_desc = recalc.get("说明", "") if recalc else ""
+
+            elif calc_func == "calc_sheji":
+                prof = selected_coefs.get("professional_coef", 1.0)
+                comp = selected_coefs.get("complexity_coef", 1.0)
+                addi = selected_coefs.get("additional_coef", 1.0)
+                amount_wan = base_params.get("amount_wan")
+
+                if amount_wan is not None:
+                    addi_list = [addi] if abs(addi - 1.0) > 0.005 else None
+                    recalc = calc_sheji(amount_wan, prof, comp, additional_coefs=addi_list)
+                else:
+                    recalc = None
+                    recalc_error = "无法确定计费额"
+
+                recalc_fee = recalc["结果(万元)"] if recalc else None
+                recalc_desc = recalc.get("说明", "") if recalc else ""
+
+            elif calc_func == "calc_huanping":
+                ind = selected_coefs.get("industry_coef", 1.0)
+                sens = selected_coefs.get("sensitivity_coef", 1.0)
+                amount_wan = base_params.get("amount_wan", 0)
+                svc = base_params.get("service_type", "编制报告书")
+                ind_name = selected_coefs.get("industry_coef_label", "市政（默认）")
+
+                recalc = calc_huanping(
+                    amount_wan, svc,
+                    industry_coef=ind, industry_name=ind_name,
+                    sensitivity_coef=sens,
+                )
+                recalc_fee = recalc.get("结果中值(万元)")
+                recalc_desc = recalc.get("说明", "")
+            else:
+                recalc_error = f"未知计算类型：{calc_func}"
+        except Exception as e:
+            recalc_error = f"计算出错：{e}"
+            import traceback
+            recalc_error += f"\n```\n{traceback.format_exc()}\n```"
+
+        # ── 结果卡片 ──
+        if recalc_fee is not None:
+            st.markdown(
+                f"""<div style="
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    border-radius: 12px;
+                    padding: 20px 28px;
+                    margin: 12px 0;
+                    color: white;
+                ">
+                    <div style="font-size: 0.85rem; opacity: 0.85; margin-bottom: 4px;">✅ 调整后费用</div>
+                    <div style="display: flex; align-items: baseline; gap: 16px;">
+                        <span style="font-size: 2.0rem; font-weight: 700;">{recalc_fee} 万元</span>
+                    </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+            if recalc_desc:
+                with st.expander("📐 查看计算过程", expanded=False):
+                    st.markdown(recalc_desc)
+        elif recalc_error:
+            st.error(recalc_error)
+
+        st.markdown("---")
+
+        # ── 操作按钮 ──
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+        with col_btn1:
+            if st.button("✅ 确认选择", type="primary", use_container_width=True, key=f"confirm_coef_{ft}"):
+                if recalc_fee is None:
+                    st.warning("请先选择有效的系数值")
+                    st.stop()
+                coef_summary = "、".join(
+                    f"{cd['key']}={selected_coefs.get(cd['param_name'], cd['current'])}"
+                    for cd in coefs
+                )
+                response = (
+                    f"## {fee_name}\n\n"
+                    f"**依据**：{basis}\n\n"
+                    f"**调整后系数**：{coef_summary}\n\n"
+                    f"**费用**：{recalc_fee} 万元\n\n"
+                    f"---\n{recalc_desc}"
+                )
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                del st.session_state.pending_coef_select
+                st.rerun()
+        with col_btn2:
+            if st.button("🗑 取消", use_container_width=True, key=f"cancel_coef_{ft}"):
+                del st.session_state.pending_coef_select
+                st.rerun()
+
 # ===== 输入框 =====
 st.divider()
 st.markdown("### 输入你的问题")
@@ -540,6 +849,9 @@ else:
     prompt = st.chat_input("请输入你的造价问题，例如：白皮松高度3.5米多少钱？")
 
 if prompt:
+    # 新提问时清除旧的待处理选择
+    st.session_state.pop("pending_rate_select", None)
+    st.session_state.pop("pending_coef_select", None)
     # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -595,11 +907,48 @@ if prompt:
                 if mode is None:
                     # === 引擎精确计算：单费种直接展示，不经过 LLM ===
                     is_sheji = fee_result.get("fee_type") == "工程设计费"
+                    is_rate_selectable = fee_result.get("is_rate_selectable", False)
+                    is_coef_selectable = fee_result.get("is_coef_selectable", False)
+                    # 持久化诊断信息
+                    st.session_state._diag = f"mode=None, ft={fee_result.get('fee_type')}, is_sheji={is_sheji}, is_rate={is_rate_selectable}, is_coef={is_coef_selectable}"
+                    st.info(f"🔍 {st.session_state._diag}")
 
-                    st.markdown("### 计算结果（程序精确计算）")
-                    _render_engine_card(fee_result)
+                    if is_rate_selectable:
+                        # === 交互式费率选择：存入 session state，在聊天区外渲染 ===
+                        st.session_state.pending_rate_select = {
+                            "fee_result": fee_result,
+                            "query": prompt,
+                        }
+                        fee_name = fee_result.get("费种", "")
+                        n_rates = len(fee_result.get("费率明细", []))
+                        response = (
+                            f"## {fee_name}\n\n"
+                            f"> ℹ️ 该费种支持交互式费率选择\n\n"
+                            f"请滚动到页面下方 **🎯 费率选择** 区域，"
+                            f"从 {n_rates} 档费率中选择适用费率后点击确认。"
+                        )
+                    elif is_coef_selectable:
+                        # === 交互式系数选择：存入 session state，在聊天区外渲染 ===
+                        st.session_state.pending_coef_select = {
+                            "coef_metadata": fee_result.get("coef_metadata", {}),
+                            "fee_result": fee_result,
+                            "query": prompt,
+                        }
+                        fee_name = fee_result.get("费种", "")
+                        n_coefs = len(fee_result.get("coef_metadata", {}).get("coefs", []))
+                        response = (
+                            f"## {fee_name}\n\n"
+                            f"> ℹ️ 该费种支持交互式系数调整\n\n"
+                            f"请滚动到页面下方 **🎛️ 系数调整** 区域，"
+                            f"调整 {n_coefs} 个系数后点击确认。"
+                        )
+                    else:
+                        st.markdown("### 计算结果（程序精确计算）")
+                        _render_engine_card(fee_result)
 
-                    if is_sheji:
+                    if is_rate_selectable or is_coef_selectable:
+                        pass  # 已在上面处理完成
+                    elif is_sheji:
                         st.divider()
                         _render_sheji_static(fee_result)
                         response = _build_sheji_text(fee_result)
@@ -734,14 +1083,42 @@ if prompt:
                                         f"{desc}"
                                     )
                             else:
+                                # === 粗略估算类费种 — 交互式费率选择 ===
+                                detail = fee_result.get("费率明细", [])
+                                if detail:
+                                    rate_opts = [d['费率'] for d in detail]
+                                    fee_map = {d['费率']: d['费用(万元)'] for d in detail}
+                                    mid_idx = len(detail) // 2
+
+                                    st.markdown("### 请选择适用费率（间隔 0.1%）")
+                                    selected_rate = st.selectbox(
+                                        "费率",
+                                        rate_opts,
+                                        index=mid_idx,
+                                        key=f"rate_select_{ft}",
+                                        label_visibility="collapsed",
+                                    )
+                                    selected_fee = fee_map[selected_rate]
+                                    st.success(
+                                        f"选定费率 **{selected_rate}** → "
+                                        f"**{fee_name}**：**{selected_fee} 万元**"
+                                    )
+
+                                    with st.expander("查看完整费率对照表"):
+                                        st.markdown(detail_md)
+                                else:
+                                    selected_rate = "中值"
+                                    selected_fee = mid_val
+
                                 response = (
                                     f"## {fee_name}\n\n"
                                     f"**依据**：{basis}\n\n"
                                     f"{steps_md}"
                                     f"{detail_md}"
                                     f"---\n\n"
-                                    f"### 估算结果\n\n"
-                                    f"估算范围：**{result_val} {unit}** {mid_text}\n\n"
+                                    f"### 计算结果\n\n"
+                                    f"选定费率：**{selected_rate}**\n\n"
+                                    f"费用：**{selected_fee} 万元**\n\n"
                                     f"{desc}"
                                 )
                         else:
