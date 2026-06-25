@@ -629,10 +629,6 @@ if "pending_rate_select" in st.session_state:
         with st.expander("ℹ️ 费率说明"):
             st.info(desc)
 
-# ===== 诊断面板 =====
-if "_diag" in st.session_state:
-    st.sidebar.info(f"🔍 {st.session_state._diag}")
-
 # ===== 交互式系数选择（持久化，在聊天区外渲染） =====
 if "pending_coef_select" in st.session_state:
     ctx = st.session_state.pending_coef_select
@@ -909,9 +905,6 @@ if prompt:
                     is_sheji = fee_result.get("fee_type") == "工程设计费"
                     is_rate_selectable = fee_result.get("is_rate_selectable", False)
                     is_coef_selectable = fee_result.get("is_coef_selectable", False)
-                    # 持久化诊断信息
-                    st.session_state._diag = f"mode=None, ft={fee_result.get('fee_type')}, is_sheji={is_sheji}, is_rate={is_rate_selectable}, is_coef={is_coef_selectable}"
-                    st.info(f"🔍 {st.session_state._diag}")
 
                     if is_rate_selectable:
                         # === 交互式费率选择：存入 session state，在聊天区外渲染 ===
