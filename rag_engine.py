@@ -30,6 +30,8 @@ def _expand_spec_range(query: str) -> dict[str, list[str]]:
     规则：胸径/地径 X cm → 区间 (X-1).0-(X-1).9
     例如："胸径12cm" → ranges: ["11.0-11.9", "11-11.9"], singles: ["11.0", "11"]
 
+    高度/冠幅：直接提取数值作为 singles，用于匹配 H=、G 等规格文本。
+
     返回两个列表：
     - ranges:  范围格式，匹配全文（name+spec+text）
     - singles: 单数字格式，仅匹配 name+spec（防止在系数等无关数字上假阳性）
@@ -37,7 +39,7 @@ def _expand_spec_range(query: str) -> dict[str, list[str]]:
     ranges = []
     singles = []
 
-    # 匹配 "胸径12cm"、"地径7" 等模式（高度不适用此公式，直接原文匹配）
+    # 匹配 "胸径12cm"、"地径7" 等模式
     for m in re.finditer(r'(胸径|地径)\s*(\d+\.?\d*)\s*(cm|m)?', query):
         try:
             num = float(m.group(2))
@@ -51,7 +53,78 @@ def _expand_spec_range(query: str) -> dict[str, list[str]]:
         singles.append(f"{lower:.1f}")                      # 11.0
         singles.append(f"{int(lower)}")                     # 11
 
+    # 高度/冠幅: 提取数值用于直接匹配规格文本
+    for m in re.finditer(r'(?:高度|冠幅|H[=]?|G[=]?)\s*(\d+\.?\d*)\s*(?:m|米)?', query):
+        try:
+            num = float(m.group(1))
+        except ValueError:
+            continue
+        # 生成多种文本形式用于匹配（如 H0.8-1 中的 "1", "0.8-1" 等）
+        if num == int(num):
+            singles.append(str(int(num)))
+        singles.append(f"{num:.1f}")
+        singles.append(f"{num:.2f}")
+
     return {"ranges": ranges, "singles": singles}
+
+
+def _extract_query_dimensions(query: str) -> dict[str, list[float]]:
+    """
+    从用户自然语言查询中提取维度参数。
+
+    返回: {"高度": [1.0], "冠幅": [0.8], "胸径": [12.0], "地径": [7.0]}
+    数值单位：高度/冠幅为米，胸径/地径为厘米。
+    """
+    dims: dict[str, list[float]] = {}
+
+    # 高度: "高度1m", "高度1米", "高度1.2", "H=1m", "H1m", "H=1"
+    for m in re.finditer(r'(?:高度|H[=]?)\s*(\d+\.?\d*)\s*(?:m|米)?', query):
+        dims.setdefault("高度", []).append(float(m.group(1)))
+
+    # 冠幅: "冠幅0.8m", "冠幅0.8米", "G=0.8m", "G0.8", "冠幅0.8"
+    for m in re.finditer(r'(?:冠幅|G[=]?)\s*(\d+\.?\d*)\s*(?:m|米)?', query):
+        dims.setdefault("冠幅", []).append(float(m.group(1)))
+
+    # 胸径: "胸径12cm", "胸径12厘米", "胸径12"
+    for m in re.finditer(r'胸径\s*(\d+\.?\d*)\s*(?:cm|厘米)?', query):
+        dims.setdefault("胸径", []).append(float(m.group(1)))
+
+    # 地径: "地径7cm", "地径7厘米", "地径7"
+    for m in re.finditer(r'地径\s*(\d+\.?\d*)\s*(?:cm|厘米)?', query):
+        dims.setdefault("地径", []).append(float(m.group(1)))
+
+    return dims
+
+
+def _check_dimension_match(query_dims: dict[str, list[float]], chunk_dims: dict) -> int:
+    """
+    检查用户查询中的维度是否命中数据记录的维度区间。
+
+    这是"给定一个维度参数，输出其他所有规格"的关键：
+    用户说"高度1m" → 检查 1.0 是否落在某条记录的高度区间内（如 H0.8-1）。
+    命中则给高分，使该记录排到检索结果前列，LLM 就能看到该记录的全部规格。
+
+    返回匹配分数（0=未命中）。
+    """
+    if not query_dims or not chunk_dims:
+        return 0
+
+    score = 0
+    for dim_type, query_values in query_dims.items():
+        if dim_type in chunk_dims:
+            for q_val in query_values:
+                for lo, hi, unit in chunk_dims[dim_type]:
+                    # 精确命中：用户值在记录的区间范围内
+                    if lo <= q_val <= hi:
+                        score += 12
+                        break
+                    # 接近命中：在 15% 容差范围内
+                    margin = (hi - lo) * 0.15 if hi > lo else max(0.1, lo * 0.1)
+                    if lo - margin <= q_val <= hi + margin:
+                        score += 5
+                        break
+
+    return score
 
 
 class CostRAGEngine:
@@ -91,10 +164,11 @@ class CostRAGEngine:
     def search(self, query: str, top_k: int = 10) -> list[dict]:
         """
         检索相关数据块。
-        采用关键词匹配 + 品种名模糊匹配 + 规格区间智能映射。
+        采用关键词匹配 + 品种名模糊匹配 + 规格区间智能映射 + 维度区间匹配。
         """
         scored = []
         expanded = _expand_spec_range(query)
+        query_dims = _extract_query_dimensions(query)  # 从查询中提取维度参数
 
         for chunk in self.chunks:
             score = 0
@@ -130,10 +204,16 @@ class CostRAGEngine:
             # 3b. 查询中的数字直接匹配原文（用于高度等不适用X-1公式的规格）
             query_nums = re.findall(r'(\d+\.?\d*)', query)
             for num in query_nums:
-                if len(num) >= 2 or '.' in num:
+                # 放宽限制：1位数字也允许匹配（如高度1m中的"1"）
+                if '.' in num or len(num) >= 1:
                     if num in name_spec_target:
                         score += 7
                         break
+
+            # 3c. 维度区间匹配 — "给定一个参数，输出所有其他规格"的核心
+            chunk_dims = chunk.get("dims", {})
+            dim_score = _check_dimension_match(query_dims, chunk_dims)
+            score += dim_score
 
             # 4. 类别关键词匹配
             cat_keywords = {
@@ -215,6 +295,9 @@ class CostRAGEngine:
             c["_source"] = "database"
             data_results.append(c)
 
+        # 按分数排序后截取 top db_slots（修复：之前未排序就截取，导致取的是文件顺序前N条）
+        data_results.sort(key=lambda x: x["_score"], reverse=True)
+
         kb_results = []
         for s, kc in kc_scored[:5]:  # 知识库最多 5 条
             kc = kc.copy()
@@ -260,8 +343,9 @@ class CostRAGEngine:
                 for item in items:
                     unit = item.get("unit", "元/株")
                     seedling_info = f"（其中苗木价格 {item.get('苗木价格', '')} 元）" if item.get('苗木价格') else ""
+                    spec_str = f"（{item['spec']}）" if item.get('spec') else ""
                     parts.append(
-                        f"- {item['name']}（{item['spec']}）："
+                        f"- {item['name']}{spec_str}："
                         f"综合指标 **{item['comprehensive']}{unit}** {seedling_info}"
                     )
         else:

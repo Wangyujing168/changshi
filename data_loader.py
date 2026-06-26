@@ -1,11 +1,133 @@
 """
 数据加载模块 - 解析绿化工程造价 CSV 数据
 """
+import re
 import pandas as pd
 from pathlib import Path
 
 # 数据目录（先读取你已有的 data 目录）
 DEFAULT_DATA_DIR = Path(r"c:\Users\wangy\.claude\projects\data\绿化指标")
+
+
+def _parse_embedded_dimensions(name: str) -> tuple[str, str, dict]:
+    """
+    从品种名中提取嵌入式规格信息。
+
+    球类格式: "金叶女贞球G0.8-1，H0.8-1" → 纯名="金叶女贞球", 规格="冠幅0.8-1m, 高度0.8-1m"
+    灌木格式: "木槿 地径5-5.9cm" → 纯名="木槿", 规格="地径5-5.9cm"
+              "贴梗海棠 G0.6-0.8 H1.0-1.2m" → 纯名="贴梗海棠", 规格="冠幅0.6-0.8m, 高度1.0-1.2m"
+
+    Returns:
+        (pure_name, spec_string, dimensions_dict)
+        dimensions_dict: {"冠幅": [(lo, hi, unit)], "高度": [...], "地径": [...]}
+    """
+    name = name.strip()
+    dims: dict[str, list[tuple[float, float, str]]] = {}
+
+    # === 组合模式（先匹配复合规格，避免被单一模式误匹配） ===
+
+    # Pattern 1: 品种...Gx-y，Hx-y(m) — 球类常见（中文逗号分隔）
+    m = re.match(
+        r'^(.+?)\s*G(\d+\.?\d*)\s*[-~—]\s*(\d+\.?\d*)\s*[，,]\s*H(\d+\.?\d*)\s*[-~—]\s*(\d+\.?\d*)\s*(m)?\s*$',
+        name
+    )
+    if m:
+        pure = m.group(1).strip()
+        g_lo, g_hi = float(m.group(2)), float(m.group(3))
+        h_lo, h_hi = float(m.group(4)), float(m.group(5))
+        unit = m.group(6) or "m"
+        spec = f"冠幅{g_lo}-{g_hi}{unit}, 高度{h_lo}-{h_hi}{unit}"
+        dims["冠幅"] = [(g_lo, g_hi, unit)]
+        dims["高度"] = [(h_lo, h_hi, unit)]
+        return pure, spec, dims
+
+    # Pattern 2: 品种... Gx-y Hx-y(m) — 灌木（空格分隔 G+H）
+    m = re.match(
+        r'^(.+?)\s+G(\d+\.?\d*)\s*[-~—]\s*(\d+\.?\d*)\s+H(\d+\.?\d*)\s*[-~—]\s*(\d+\.?\d*)\s*(m)?\s*$',
+        name
+    )
+    if m:
+        pure = m.group(1).strip()
+        g_lo, g_hi = float(m.group(2)), float(m.group(3))
+        h_lo, h_hi = float(m.group(4)), float(m.group(5))
+        unit = m.group(6) or "m"
+        spec = f"冠幅{g_lo}-{g_hi}{unit}, 高度{h_lo}-{h_hi}{unit}"
+        dims["冠幅"] = [(g_lo, g_hi, unit)]
+        dims["高度"] = [(h_lo, h_hi, unit)]
+        return pure, spec, dims
+
+    # === 单一模式 ===
+
+    # Pattern 3: 品种... 地径x-y(cm)
+    m = re.match(
+        r'^(.+?)\s+地径\s*(\d+\.?\d*)\s*[-~—]\s*(\d+\.?\d*)\s*(cm)?\s*$',
+        name
+    )
+    if m:
+        pure = m.group(1).strip()
+        d_lo, d_hi = float(m.group(2)), float(m.group(3))
+        unit = m.group(4) or "cm"
+        spec = f"地径{d_lo}-{d_hi}{unit}"
+        dims["地径"] = [(d_lo, d_hi, unit)]
+        return pure, spec, dims
+
+    # Pattern 4: 品种...Hx-y(m) — 高度范围
+    m = re.match(
+        r'^(.+?)\s*H[=]?\s*(\d+\.?\d*)\s*[-~—]\s*(\d+\.?\d*)\s*(m)?\s*$',
+        name
+    )
+    if m:
+        pure = m.group(1).strip()
+        h_lo, h_hi = float(m.group(2)), float(m.group(3))
+        unit = m.group(4) or "m"
+        spec = f"高度{h_lo}-{h_hi}{unit}"
+        dims["高度"] = [(h_lo, h_hi, unit)]
+        return pure, spec, dims
+
+    # Pattern 5: 品种...H=x(m) — 高度单值
+    m = re.match(
+        r'^(.+?)\s*H[=]?\s*(\d+\.?\d*)\s*(m)?\s*$',
+        name
+    )
+    if m:
+        pure = m.group(1).strip()
+        h_val = float(m.group(2))
+        unit = m.group(3) or "m"
+        spec = f"高度{h_val}{unit}"
+        dims["高度"] = [(h_val, h_val, unit)]
+        return pure, spec, dims
+
+    # Pattern 6: 品种...Gx-ym — 冠幅范围
+    m = re.match(
+        r'^(.+?)\s*G(\d+\.?\d*)\s*[-~—]\s*(\d+\.?\d*)\s*(m)?\s*$',
+        name
+    )
+    if m:
+        pure = m.group(1).strip()
+        g_lo, g_hi = float(m.group(2)), float(m.group(3))
+        unit = m.group(4) or "m"
+        spec = f"冠幅{g_lo}-{g_hi}{unit}"
+        dims["冠幅"] = [(g_lo, g_hi, unit)]
+        return pure, spec, dims
+
+    # Pattern 7: 品种...G xm — 冠幅单值（G前后可有空格，如"接骨木G 1.2m"、"红瑞木G1.2m"）
+    m = re.match(
+        r'^(.+?)\s*G\s*(\d+\.?\d*)\s*(m)?\s*$',
+        name
+    )
+    if m:
+        pure = m.group(1).strip()
+        g_val = float(m.group(2))
+        unit = m.group(3) or "m"
+        spec = f"冠幅{g_val}{unit}"
+        dims["冠幅"] = [(g_val, g_val, unit)]
+        return pure, spec, dims
+
+    # Pattern 8: 品种...Gxm — 冠幅单值（无空格，如"红瑞木G1-1.2m"会被#6匹配）
+    # 但"丛生紫薇 G0.8-1.0m"这种Gx-y带小数的也会被#6匹配，无需额外处理
+
+    # 无嵌入式规格
+    return name, "", {}
 
 
 def load_all_data(data_dir: Path = DEFAULT_DATA_DIR) -> dict:
@@ -99,10 +221,23 @@ def _parse_category_csv(filepath: Path, category: str, unit: str = "元/株") ->
                 remark = parts[6] if len(parts) > 6 else ""
 
                 if name and comprehensive is not None:
+                    # 解析品种名中嵌入的规格（如 G冠幅，H高度，地径）
+                    pure_name, embedded_spec, dims = _parse_embedded_dimensions(name)
+
+                    # 合并节标题规格 + 嵌入式规格
+                    if embedded_spec and current_spec:
+                        final_spec = f"{current_spec}, {embedded_spec}"
+                    elif embedded_spec:
+                        final_spec = embedded_spec
+                    else:
+                        final_spec = current_spec
+
                     records.append({
                         "类别": category,
-                        "品种": name,
-                        "规格": current_spec,
+                        "品种": pure_name,
+                        "品种_原始": name,
+                        "规格": final_spec,
+                        "维度": dims,
                         "栽植费用": planting_cost,
                         "苗木价格": seedling_price,
                         "主材取费系数": coefficient if coefficient else 1.0794,
@@ -154,6 +289,7 @@ def get_text_chunks(data: dict) -> list[dict]:
                 "category": category,
                 "name": r["品种"],
                 "spec": r["规格"],
+                "dims": r.get("维度", {}),
                 "comprehensive": r["综合指标"],
                 "苗木价格": r["苗木价格"],
                 "栽植费用": r["栽植费用"],

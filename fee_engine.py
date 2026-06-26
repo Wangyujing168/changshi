@@ -364,6 +364,254 @@ SHUIBAO_CONSULT: list[float] = [1.0, 1.5, 2.0, 2.5, 2.9, 3.2, 3.5, 3.8, 4.0, 4.8
 
 
 # ============================================================
+# 造价咨询费 — 津价房地[2008]136号
+# ============================================================
+
+# 差额定率分档累进，分档（万元）
+_COST_CONSULTING_BRACKETS: list[float] = [100, 500, 1000, 5000, 10000, float("inf")]
+
+# 费率表（单位：‰）
+_COST_CONSULTING_RATES: dict[str, dict] = {
+    # ── 编制类（基数 = 工程费用 = 建安+设备）──
+    "编制工程量清单": {
+        "rates": [3.4, 3.2, 3.0, 2.4, 2.0, 1.6],
+        "base_type": "工程费用",
+        "category": "编制",
+    },
+    "编制标底(含清单)": {
+        "rates": [3.6, 3.4, 3.1, 2.6, 2.0, 1.7],
+        "base_type": "工程费用",
+        "category": "编制",
+    },
+    "编制施工图预算": {
+        "rates": [3.6, 3.4, 3.1, 2.6, 2.0, 1.7],
+        "base_type": "工程费用",
+        "category": "编制",
+    },
+    "编制竣工结算": {
+        "rates": [3.6, 3.4, 3.1, 2.6, 2.0, 1.7],
+        "base_type": "工程费用",
+        "category": "编制",
+    },
+    "施工阶段全过程造价控制": {
+        "rates": [10.0, 9.0, 8.0, 7.5, 7.0, 6.0],
+        "base_type": "工程费用",
+        "category": "编制",
+    },
+    # ── 审核类 ──
+    "审核概算": {
+        "rates": [3.0, 2.5, 2.0, 1.5, 1.2, 1.0],
+        "base_type": "工程总投资",   # 唯一以总投资为基数的子项
+        "category": "审核",
+    },
+    "审核预算、标底": {
+        "rates": [3.5, 3.1, 2.2, 1.9, 1.2, 0.9],
+        "base_type": "工程费用",
+        "category": "审核",
+    },
+    "审核竣工结算": {
+        "rates": [3.5, 3.1, 2.2, 1.9, 1.2, 0.9],
+        "base_type": "工程费用",
+        "category": "审核",
+    },
+    # ── 其他（基数 = 建安工程费用）──
+    "编制项目投资估算": {
+        "rates": [0.8, 0.7, 0.6, 0.5, 0.3, 0.15],
+        "base_type": "建安工程费用",
+        "category": "编制",
+    },
+    "编制设计概算": {
+        "rates": [1.7, 1.5, 1.2, 0.85, 0.7, 0.4],
+        "base_type": "建安工程费用",
+        "category": "编制",
+    },
+}
+
+# 服务类型分组展示顺序
+_COST_CONSULTING_SERVICE_ORDER: list[str] = [
+    "编制工程量清单",
+    "编制标底(含清单)",
+    "编制施工图预算",
+    "编制竣工结算",
+    "施工阶段全过程造价控制",
+    "审核概算",
+    "审核预算、标底",
+    "审核竣工结算",
+    "编制项目投资估算",
+    "编制设计概算",
+]
+
+
+def calc_cost_consulting_multi(
+    selected_services: list[str],
+    base_amount_wan: float,
+    jianan_only: float | None = None,
+    total_investment: float | None = None,
+) -> dict:
+    """计算多个造价咨询服务子项的费用（每项独立计算，汇总求和）。
+
+    返回结构：
+        {"明细": [...], "合计(万元)": float, "参数": {...}}
+    """
+    details: list[dict] = []
+    total = 0.0
+    warnings: list[str] = []
+    for svc in selected_services:
+        try:
+            single = calc_cost_consulting(
+                base_amount_wan, svc,
+                total_investment=total_investment,
+                jianan_only=jianan_only,
+            )
+            fee = single["结果(万元)"]
+            total += fee
+            details.append({
+                "服务类型": svc,
+                "计费基数(万元)": single["参数"]["计费基数(万元)"],
+                "基数类型": single["参数"]["基数类型"],
+                "费用(万元)": fee,
+                "计算步骤": single["计算步骤"],
+            })
+        except ValueError as e:
+            warnings.append(f"⚠️ **{svc}**：{e}")
+    total = round(total, 4)
+    desc = f"共 {len(details)} 项服务，合计 **{total} 万元**"
+    if warnings:
+        desc += "\n\n" + "\n\n".join(warnings)
+    return {
+        "明细": details,
+        "合计(万元)": total,
+        "参数": {
+            "工程费用(万元)": round(base_amount_wan, 4),
+            "建安工程费用(万元)": round(jianan_only, 4) if jianan_only else None,
+            "工程总投资(万元)": round(total_investment, 4) if total_investment else None,
+            "选中服务": selected_services,
+            "警告": warnings,
+        },
+        "费种": "造价咨询费",
+        "依据": "《天津市建设工程造价咨询服务项目和价格标准》（津价房地[2008]136号）",
+        "说明": desc,
+    }
+
+
+def _detect_cost_consulting_type(query: str) -> str | None:
+    """从查询中检测造价咨询的具体服务类型。"""
+    # 按关键词长度从长到短匹配
+    type_patterns: list[tuple[str, str]] = [
+        ("施工阶段全过程造价控制", "施工阶段全过程造价控制"),
+        ("全过程造价控制", "施工阶段全过程造价控制"),
+        ("编制工程量清单", "编制工程量清单"),
+        ("工程量清单编制", "编制工程量清单"),
+        ("编制标底.*清单", "编制标底(含清单)"),
+        ("编制标底", "编制标底(含清单)"),
+        ("编制施工图预算", "编制施工图预算"),
+        ("施工图预算编制", "编制施工图预算"),
+        ("编制竣工结算", "编制竣工结算"),
+        ("竣工结算编制", "编制竣工结算"),
+        ("编制项目投资估算", "编制项目投资估算"),
+        ("投资估算编制", "编制项目投资估算"),
+        ("编制设计概算", "编制设计概算"),
+        ("设计概算编制", "编制设计概算"),
+        ("审核概算", "审核概算"),
+        ("概算审核", "审核概算"),
+        ("审核预算.*标底", "审核预算、标底"),
+        ("审核标底", "审核预算、标底"),
+        ("审核预算", "审核预算、标底"),
+        ("审核竣工结算", "审核竣工结算"),
+        ("竣工结算审核", "审核竣工结算"),
+        ("审核.*结算", "审核竣工结算"),
+        # 泛化匹配
+        ("编制.*清单", "编制工程量清单"),
+        ("清单.*编制", "编制工程量清单"),
+        ("编制.*预算", "编制施工图预算"),
+        ("编制.*结算", "编制竣工结算"),
+    ]
+    for pattern, svc_type in type_patterns:
+        if re.search(pattern, query):
+            return svc_type
+    return None
+
+
+def calc_cost_consulting(
+    base_amount_wan: float,
+    service_type: str,
+    total_investment: float | None = None,
+    jianan_only: float | None = None,
+) -> dict:
+    """
+    造价咨询费（津价房地[2008]136号）。
+
+    参数：
+        base_amount_wan: 工程费用（万元）= 建安+设备
+        service_type: 具体服务类型
+        total_investment: 工程总投资（万元），仅"审核概算"需要
+        jianan_only: 建安工程费（不含设备），仅"编制投资估算/设计概算"需要
+    """
+    config = _COST_CONSULTING_RATES.get(service_type)
+    if config is None:
+        raise ValueError(f"未知的造价咨询服务类型：{service_type}")
+
+    rates: list[float] = config["rates"]
+    base_type: str = config["base_type"]
+
+    # 确定计费基数
+    if base_type == "工程总投资":
+        if total_investment is None:
+            raise ValueError("审核概算需要工程总投资，但总投资未知。请提供总投资金额。")
+        amount = total_investment
+    elif base_type == "建安工程费用" and jianan_only is not None:
+        amount = jianan_only
+    elif base_type == "建安工程费用":
+        amount = base_amount_wan  # fallback
+    else:
+        amount = base_amount_wan  # 工程费用
+
+    # 差额分档累进
+    total_fee = 0.0
+    prev_limit = 0.0
+    steps: list[dict] = []
+
+    for i, limit in enumerate(_COST_CONSULTING_BRACKETS):
+        if amount <= prev_limit:
+            break
+        tier_amount = min(amount, limit) - prev_limit
+        if tier_amount <= 0:
+            prev_limit = limit
+            continue
+        rate = rates[i]
+        tier_fee = tier_amount * rate / 1000.0  # ‰ → 万元
+        total_fee += tier_fee
+        steps.append({
+            "区间": f"{prev_limit:.0f}~{limit:.0f}" if limit != float("inf") else f">{prev_limit:.0f}",
+            "金额(万元)": round(tier_amount, 2),
+            "费率(‰)": rate,
+            "费用(万元)": round(tier_fee, 4),
+        })
+        prev_limit = limit
+
+    total_fee = round(total_fee, 4)
+
+    return {
+        "费种": f"造价咨询费（{service_type}）",
+        "依据": "《天津市建设工程造价咨询服务项目和价格标准》（津价房地[2008]136号）",
+        "计算公式": "差额分档累进，基准价可上下浮动 ±20%",
+        "参数": {
+            "计费基数(万元)": round(amount, 4),
+            "基数类型": base_type,
+            "服务类型": service_type,
+            "浮动幅度": "±20%",
+        },
+        "计算步骤": steps,
+        "结果(万元)": total_fee,
+        "说明": (
+            f"计费基数 {amount:.0f} 万元（{base_type}），{service_type}，\n"
+            f"差额分档累进计算，造价咨询费基准价为 **{total_fee:.4f} 万元**"
+            f"（可在 ±20% 幅度内协商浮动）"
+        ),
+    }
+
+
+# ============================================================
 # 工具函数
 # ============================================================
 
@@ -444,6 +692,60 @@ def _linear_interpolate(
 # 查询解析
 # ============================================================
 
+def _extract_discount_coefficient(query: str) -> float:
+    """
+    从查询中提取打折系数。默认 1.0（不打折）。
+
+    支持表述：
+    - "打八折" / "打8折" → 0.8
+    - "打六五折" / "65折" → 0.65
+    - "折扣0.8" / "打折系数0.85" → 0.8 / 0.85
+    - "下浮20%" → 0.8
+    - "上浮10%" → 1.1
+    """
+    # 中文数字 → 阿拉伯数字映射（仅用于折扣表达，不修改原始 query）
+    _CN_NUM = {'一': '1', '二': '2', '三': '3', '四': '4', '五': '5',
+               '六': '6', '七': '7', '八': '8', '九': '9', '零': '0',
+               '两': '2'}
+    query_norm = query
+    for cn, digit in _CN_NUM.items():
+        query_norm = query_norm.replace(cn, digit)
+
+    # "打X折" / "打 X 折"
+    m = re.search(r'打\s*(\d+\.?\d*)\s*折', query_norm)
+    if m:
+        val = float(m.group(1))
+        if val >= 10:
+            return val / 100.0   # "打65折" → 0.65
+        return val / 10.0        # "打8折" → 0.8
+
+    # "X折"（独立出现，非"打折"的一部分，非"折扣"）
+    m = re.search(r'(?<!打)(?<!\d)\s*(\d+\.?\d*)\s*折(?!扣)', query_norm)
+    if m:
+        val = float(m.group(1))
+        if val >= 10:
+            return val / 100.0   # "65折" → 0.65
+        return val / 10.0 if val > 1 else val  # "8折" → 0.8
+
+    # "折扣X" / "打折系数X" / "打折系数: X"
+    m = re.search(r'(?:折扣|打折系数)\s*[:：]?\s*(\d+\.?\d*)', query)
+    if m:
+        val = float(m.group(1))
+        return val if val <= 1 else val / 100.0
+
+    # "下浮X%" → 1 - X/100
+    m = re.search(r'下浮\s*(\d+\.?\d*)\s*%', query)
+    if m:
+        return round(1.0 - float(m.group(1)) / 100.0, 4)
+
+    # "上浮X%" → 1 + X/100
+    m = re.search(r'上浮\s*(\d+\.?\d*)\s*%', query)
+    if m:
+        return round(1.0 + float(m.group(1)) / 100.0, 4)
+
+    return 1.0
+
+
 def _extract_amount(query: str) -> float | None:
     """
     从查询文本提取金额（统一转为"万元"）。
@@ -496,6 +798,7 @@ _FEE_PATTERNS: list[tuple[str, str]] = [
     ("场地准备费及临时设施费", r"场地准备费|临时设施费|场地准备及临时设施|场地.*准备.*费"),
     ("工程保险费", r"工程保险[费费]|工程一切险|工程险|工程.*保险"),
     ("预备费", r"预备费|基本预备费|工程预备费|预备.*费率"),
+    ("造价咨询费", r"造价咨询|造价.*(?:编制|审核|清单|标底|预算|结算|概算|全过程.*控制)|工程量清单.*[费费]|标底.*编制.*[费费]|津价房地.*136"),
 ]
 
 
@@ -589,6 +892,115 @@ def calc_zhaobiao_daili(amount_wan: float, service_type: str = "工程招标") -
             f"{service_type} 中标金额 {amount_wan:.0f} 万元，"
             f"招标代理服务费为 **{total:.4f} 万元**（可上下浮动 20%）"
         ),
+    }
+
+
+# 招标代理服务费 — 子类型与计费基数映射
+_ZHAOBIAO_SUB_TYPES: list[dict] = [
+    {"key": "货物招标", "base_label": "设备费", "base_source": "shebei"},
+    {"key": "工程招标", "base_label": "建安费", "base_source": "jianan"},
+    {"key": "服务招标（勘察）", "base_label": "勘察费", "base_source": "kancha"},
+    {"key": "服务招标（设计）", "base_label": "设计费", "base_source": "sheji"},
+    {"key": "服务招标（监理）", "base_label": "监理费", "base_source": "jianli"},
+]
+
+
+def calc_zhaobiao_daili_all(
+    jianan: float,
+    shebei: float = 0.0,
+    project_type: str = "建筑",
+    query: str = "",
+) -> dict:
+    """招标代理服务费 — 全部 5 类自动计算汇总。
+
+    计费基数规则：
+    - 货物招标 → 设备费
+    - 工程招标 → 建安费
+    - 服务招标（勘察）→ 勘察费
+    - 服务招标（设计）→ 设计费
+    - 服务招标（监理）→ 监理费
+    """
+    amount_wan = jianan + shebei
+
+    # 1. 先计算依赖费种（监理费、设计费、勘察费）
+    jianli_result = calc_jianli(amount_wan=amount_wan)
+    jianli_fee = jianli_result["结果(万元)"]
+
+    sheji_result = calc_sheji(amount_wan)
+    sheji_fee = sheji_result["结果(万元)"]
+
+    kancha_result = calc_kancha_rough(jianan, shebei, project_type)
+    kancha_fee = kancha_result["结果中值(万元)"]
+    if kancha_fee is None:
+        kancha_fee = kancha_result.get("结果(万元)", 0) or 0
+
+    # 2. 各子类型基数
+    bases = {
+        "货物招标": shebei,
+        "工程招标": jianan,
+        "服务招标（勘察）": kancha_fee,
+        "服务招标（设计）": sheji_fee,
+        "服务招标（监理）": jianli_fee,
+    }
+
+    # 3. 逐项计算
+    details: list[dict] = []
+    total = 0.0
+    for sub in _ZHAOBIAO_SUB_TYPES:
+        key = sub["key"]
+        base = bases[key]
+        base_label = sub["base_label"]
+        if base <= 0:
+            details.append({
+                "类型": key,
+                "基数(万元)": 0,
+                "基数来源": base_label,
+                "费用(万元)": 0,
+                "说明": f"{base_label}为 0，无法计算",
+            })
+            continue
+
+        # 映射到计价格[2002]1980号的类型索引
+        if key == "货物招标":
+            svc = "货物招标"
+        elif key == "工程招标":
+            svc = "工程招标"
+        else:
+            svc = "服务招标"
+
+        single = calc_zhaobiao_daili(base, svc)
+        fee = single["结果(万元)"]
+        total += fee
+        details.append({
+            "类型": key,
+            "基数(万元)": round(base, 4),
+            "基数来源": base_label,
+            "费用(万元)": fee,
+            "计算步骤": single["计算步骤"],
+        })
+
+    total = round(total, 4)
+
+    # 构建说明
+    desc_parts = []
+    for d in details:
+        desc_parts.append(
+            f"- **{d['类型']}**：基数 {d['基数来源']} {d['基数(万元)']:.4f} 万 → {d['费用(万元)']:.4f} 万元"
+        )
+    desc = "### 费用明细\n\n" + "\n".join(desc_parts)
+    desc += f"\n\n### 💰 合计：**{total} 万元**"
+
+    return {
+        "明细": details,
+        "合计(万元)": total,
+        "依赖费种": {
+            "监理费(万元)": round(jianli_fee, 4),
+            "设计费(万元)": round(sheji_fee, 4),
+            "勘察费(万元)": round(kancha_fee, 4),
+        },
+        "费种": "招标代理服务费",
+        "依据": "《招标代理业务收费管理暂行办法》（计价格[2002]1980号）",
+        "说明": desc,
     }
 
 
@@ -2073,6 +2485,36 @@ def _get_fee_reference(fee_type: str) -> dict:
                 "例如：第一部分工程费用 1000 万元，保险费 ≈ 3~6 万元。"
             ),
         },
+        "造价咨询费": {
+            "费种": "造价咨询费（工程造价咨询服务费）",
+            "依据": "《天津市建设工程造价咨询服务项目和价格标准》（津价房地[2008]136号）",
+            "计费方式": "差额定率分档累进，基准价可上下浮动 ±20%。\n"
+                        "编制类/审核类（除审核概算外）基数 = 工程费用（建安+设备）；\n"
+                        "审核概算基数 = 工程总投资；\n"
+                        "编制投资估算/设计概算基数 = 建安工程费用。",
+            "参数说明": "工程费用（万元）+ 服务类型（编制工程量清单/编制标底/编制施工图预算/编制竣工结算/"
+                        "全过程造价控制/审核概算/审核预算标底/审核竣工结算/编制投资估算/编制设计概算）",
+            "费率表": [
+                ("服务类型", "≤100万", "≤500万", "≤1000万", "≤5000万", "≤10000万", ">10000万"),
+                ("编制工程量清单", "3.4‰", "3.2‰", "3.0‰", "2.4‰", "2.0‰", "1.6‰"),
+                ("编制标底(含清单)", "3.6‰", "3.4‰", "3.1‰", "2.6‰", "2.0‰", "1.7‰"),
+                ("编制施工图预算", "3.6‰", "3.4‰", "3.1‰", "2.6‰", "2.0‰", "1.7‰"),
+                ("编制竣工结算", "3.6‰", "3.4‰", "3.1‰", "2.6‰", "2.0‰", "1.7‰"),
+                ("全过程造价控制", "10‰", "9.0‰", "8.0‰", "7.5‰", "7.0‰", "6.0‰"),
+                ("审核概算", "3.0‰", "2.5‰", "2.0‰", "1.5‰", "1.2‰", "1.0‰"),
+                ("审核预算、标底", "3.5‰", "3.1‰", "2.2‰", "1.9‰", "1.2‰", "0.9‰"),
+                ("审核竣工结算", "3.5‰", "3.1‰", "2.2‰", "1.9‰", "1.2‰", "0.9‰"),
+                ("编制项目投资估算", "0.8‰", "0.7‰", "0.6‰", "0.5‰", "0.3‰", "0.15‰"),
+                ("编制设计概算", "1.7‰", "1.5‰", "1.2‰", "0.85‰", "0.7‰", "0.4‰"),
+            ],
+            "计算说明": (
+                "差额分档累进计费。例：编制施工图预算，工程费用 5000 万：\n"
+                "100×3.6‰ + 400×3.4‰ + 500×3.1‰ + 4000×2.6‰ = 0.36 + 1.36 + 1.55 + 10.40 = 13.67 万元\n\n"
+                "追加收费：审核中审减(增)额超过 ±5% 时，超过部分按 5% 计收。\n"
+                "钢筋及预埋件计算：11.00 元/吨。\n"
+                "工程造价争议鉴定：标的 ≤500万 按 4%，>500万 按 2%。"
+            ),
+        },
     }
     return refs.get(fee_type, {
         "费种": fee_type,
@@ -2318,13 +2760,29 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
     if fee_type == "建设管理费":
         result = calc_jianshe_guanli(amount)
     elif fee_type == "招标代理费":
-        if re.search(r"货物", query):
-            svc_type = "货物招标"
-        elif re.search(r"服务", query):
-            svc_type = "服务招标"
+        jianan_zb, shebei_zb = _extract_jianli_components(query)
+        if jianan_zb is not None:
+            # 有建安费 → 自动计算全部 5 类
+            project_type = _detect_project_type(query)
+            result = calc_zhaobiao_daili_all(
+                jianan=jianan_zb,
+                shebei=shebei_zb or 0,
+                project_type=project_type,
+                query=query,
+            )
+        elif amount is not None:
+            # 仅有金额未区分建安/设备 → 按旧逻辑单类计算
+            if re.search(r"货物", query):
+                svc_type = "货物招标"
+            elif re.search(r"服务", query):
+                svc_type = "服务招标"
+            else:
+                svc_type = "工程招标"
+            result = calc_zhaobiao_daili(amount, svc_type)
         else:
-            svc_type = "工程招标"
-        result = calc_zhaobiao_daili(amount, svc_type)
+            return None
+        # 标记支持多选面板
+        result["is_zhaobiao_multi"] = True
     elif fee_type == "交易服务费":
         jianan, shebei = _extract_jianli_components(query)
         if jianan is not None:
@@ -2742,11 +3200,57 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             f"四种服务类型全部结果（协商浮动 ±20% 后）：\n" +
             "\n".join(lines)
         )
+    elif fee_type == "造价咨询费":
+        # 津价房地[2008]136号 — 差额定率分档累进
+        svc_type = _detect_cost_consulting_type(query)
+        if svc_type is None:
+            svc_type = "编制施工图预算"  # 默认
+
+        jianan_zj, shebei_zj = _extract_jianli_components(query)
+        if jianan_zj is not None:
+            base_amount = jianan_zj + (shebei_zj or 0)
+        else:
+            base_amount = amount
+
+        # 提取总投资（优先从查询文本自动捕捉，其次通过级联计算）
+        total_invest = _extract_total_investment(query)
+        if total_invest is None and svc_type == "审核概算":
+            cascade_r = calc_cascade(query)
+            if cascade_r:
+                total_invest = cascade_r["结果汇总"]["项目总投资(万元)"]
+
+        try:
+            result = calc_cost_consulting(
+                base_amount, svc_type,
+                total_investment=total_invest,
+                jianan_only=jianan_zj,
+            )
+        except ValueError as e:
+            # 审核概算总投资未知时，返回提示
+            result = {
+                "费种": f"造价咨询费（{svc_type}）",
+                "依据": "《天津市建设工程造价咨询服务项目和价格标准》（津价房地[2008]136号）",
+                "参数": {
+                    "服务类型": svc_type,
+                    "工程费用(万元)": round(base_amount, 4),
+                },
+                "结果(万元)": None,
+                "计算步骤": [],
+                "说明": str(e),
+                "_error": str(e),
+            }
+        # 保存原始输入值，供前端多选面板使用
+        result["_jianan"] = jianan_zj
+        result["_shebei"] = shebei_zj
+        result["_total_invest"] = total_invest
+        result["_base_amount"] = base_amount
     else:
         return None
 
     result["fee_type"] = fee_type
     result["has_amount"] = True
+    # 打折系数（从查询中自动提取，默认 1.0 不打折；前端可覆盖）
+    result["_discount_coef"] = _extract_discount_coefficient(query)
     # 标记支持交互式费率选择的费种（前端会渲染费率下拉菜单）
     if fee_type in ("勘察费", "劳动安全卫生评审费", "场地准备费及临时设施费", "工程保险费"):
         result["is_rate_selectable"] = True
@@ -2930,6 +3434,29 @@ def _extract_amount_yi(query: str) -> float | None:
     """从查询中提取以'亿元'为单位的金额。"""
     m = re.search(r'(\d+\.?\d*)\s*亿', query)
     return float(m.group(1)) if m else None
+
+
+def _extract_total_investment(query: str) -> float | None:
+    """从查询中提取工程总投资（万元）。
+
+    匹配："总投资为1429.87万元"、"总投资1429.87万"、"工程总投资约1500万元" 等。
+    """
+    # 带明确标签的投资
+    m = re.search(r'(?:工程)?总投资\D*?(\d+\.?\d*)\s*万', query)
+    if m:
+        return float(m.group(1))
+
+    # "总概算" / "总造价" 等
+    m = re.search(r'(?:总概算|总造价|概算总投资)\D*?(\d+\.?\d*)\s*万', query)
+    if m:
+        return float(m.group(1))
+
+    # 亿元单位
+    m = re.search(r'(?:工程)?总投资\D*?(\d+\.?\d*)\s*亿', query)
+    if m:
+        return float(m.group(1)) * 10000
+
+    return None
 
 
 def _format_rate_table(rows: list[tuple]) -> str:
