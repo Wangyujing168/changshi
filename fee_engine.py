@@ -4155,19 +4155,55 @@ def _calc_all_fees(
         numerical["勘察费(万元)"] = _extract_numeric_value(kancha_r)
 
     # 劳动安全卫生评审费
-    laoan_r = calc_laodong_anquan(total_part1)
-    raw_results["劳动安全卫生评审费"] = laoan_r
-    numerical["劳动安全卫生评审费(万元)"] = _extract_numeric_value(laoan_r)
+    laoan_rate = param_overrides.get("劳动安全卫生评审费费率")
+    if laoan_rate is not None:
+        fee = round(total_part1 * laoan_rate / 100.0, 4)
+        laoan_r = {
+            "费种": "劳动安全卫生评审费（用户指定费率）",
+            "依据": "用户指定费率",
+            "计算公式": f"第一部分工程费 × {laoan_rate}%",
+            "结果中值(万元)": fee,
+        }
+        raw_results["劳动安全卫生评审费"] = laoan_r
+        numerical["劳动安全卫生评审费(万元)"] = fee
+    else:
+        laoan_r = calc_laodong_anquan(total_part1)
+        raw_results["劳动安全卫生评审费"] = laoan_r
+        numerical["劳动安全卫生评审费(万元)"] = _extract_numeric_value(laoan_r)
 
     # 场地准备费
-    changdi_r = calc_changdi_zhunbei(total_part1)
-    raw_results["场地准备费及临时设施费"] = changdi_r
-    numerical["场地准备费及临时设施费(万元)"] = _extract_numeric_value(changdi_r)
+    changdi_rate = param_overrides.get("场地准备费费率")
+    if changdi_rate is not None:
+        fee = round(total_part1 * changdi_rate / 100.0, 4)
+        changdi_r = {
+            "费种": "场地准备费及临时设施费（用户指定费率）",
+            "依据": "用户指定费率",
+            "计算公式": f"第一部分工程费 × {changdi_rate}%",
+            "结果中值(万元)": fee,
+        }
+        raw_results["场地准备费及临时设施费"] = changdi_r
+        numerical["场地准备费及临时设施费(万元)"] = fee
+    else:
+        changdi_r = calc_changdi_zhunbei(total_part1)
+        raw_results["场地准备费及临时设施费"] = changdi_r
+        numerical["场地准备费及临时设施费(万元)"] = _extract_numeric_value(changdi_r)
 
     # 工程保险费
-    baoxian_r = calc_gongcheng_baoxian(total_part1)
-    raw_results["工程保险费"] = baoxian_r
-    numerical["工程保险费(万元)"] = _extract_numeric_value(baoxian_r)
+    baoxian_rate = param_overrides.get("工程保险费费率")
+    if baoxian_rate is not None:
+        fee = round(total_part1 * baoxian_rate / 100.0, 4)
+        baoxian_r = {
+            "费种": "工程保险费（用户指定费率）",
+            "依据": "用户指定费率",
+            "计算公式": f"第一部分工程费 × {baoxian_rate}%",
+            "结果中值(万元)": fee,
+        }
+        raw_results["工程保险费"] = baoxian_r
+        numerical["工程保险费(万元)"] = fee
+    else:
+        baoxian_r = calc_gongcheng_baoxian(total_part1)
+        raw_results["工程保险费"] = baoxian_r
+        numerical["工程保险费(万元)"] = _extract_numeric_value(baoxian_r)
 
     t0_total = sum(numerical.values())
 
@@ -4361,13 +4397,17 @@ def _build_fee_selection_meta(
         label = _FEE_LABELS.get(fee_name, fee_name)
         deps = _TIER_DEPS.get(fee_name, [])
         has_coefs = fee_name in ("监理费", "工程设计费", "环境影响咨询费")
+        has_rates = fee_name in ("勘察费", "劳动安全卫生评审费",
+                                 "场地准备费及临时设施费", "工程保险费")
 
         entry: dict = {
             "name": fee_name,
             "label": label,
             "tier": tier,
             "has_coefs": has_coefs,
+            "has_rates": has_rates,
             "coef_config": None,
+            "rate_config": None,
             "depends_on": deps,
             "default_value_wan": round(default_val, 4),
         }
@@ -4375,6 +4415,11 @@ def _build_fee_selection_meta(
         # 为有系数的费种构建简化系数配置
         if has_coefs:
             entry["coef_config"] = _get_coef_config_simple(fee_name, query)
+
+        # 为有费率选择的费种构建费率选项
+        if has_rates:
+            entry["rate_config"] = _get_rate_config_simple(
+                fee_name, engine_result, query)
 
         definitions.append(entry)
 
@@ -4471,6 +4516,48 @@ def _get_coef_config_simple(fee_name: str, query: str) -> dict | None:
             ],
         }
     return None
+
+
+def _get_rate_config_simple(
+    fee_name: str,
+    engine_result: dict,
+    query: str,
+) -> dict | None:
+    """为费种选择面板构建费率选择元数据。
+
+    从 engine_result 的原始结果中提取费率明细，供 UI 渲染费率选择器。
+    """
+    raw_results = engine_result.get("原始结果", {})
+    fee_result = raw_results.get(fee_name)
+    if not fee_result:
+        return None
+
+    rate_detail = fee_result.get("费率明细", [])
+    if not rate_detail:
+        return None
+
+    # 费率选项：{"费率": "0.3%", "费用(万元)": 15.0}
+    rate_options = [{"rate": d["费率"], "fee_wan": d["费用(万元)"]} for d in rate_detail]
+
+    # 默认选中值（取中值对应的费率）
+    mid_idx = len(rate_detail) // 2
+    default_rate = rate_detail[mid_idx]["费率"]
+
+    # param_overrides 键名
+    param_key_map = {
+        "勘察费": "勘察费费率",
+        "劳动安全卫生评审费": "劳动安全卫生评审费费率",
+        "场地准备费及临时设施费": "场地准备费费率",
+        "工程保险费": "工程保险费费率",
+    }
+
+    return {
+        "param_key": param_key_map.get(fee_name, ""),
+        "rate_options": rate_options,
+        "default_rate": default_rate,
+        "basis": fee_result.get("依据", ""),
+        "desc": fee_result.get("说明", ""),
+    }
 
 
 def _extract_extra_fees(query: str, known_fees: set | None = None) -> list[dict]:

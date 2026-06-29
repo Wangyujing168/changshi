@@ -2029,6 +2029,90 @@ if "pending_fee_selection" in st.session_state:
 
             st.markdown("---")
 
+        # ── Rate Selection (per fee, expandable) ──
+        has_rate_fees = [
+            fd for fd in ctx["fee_defs"]
+            if fd.get("has_rates") and fd["name"] in new_selected
+        ]
+        if has_rate_fees:
+            st.markdown("### 📊 费率选择")
+            st.caption("展开可选择对应费种的适用费率，实时影响预览结果。")
+
+            rate_overrides = ctx.get("rate_overrides", {})
+
+            for fd in has_rate_fees:
+                fee_name = fd["name"]
+                config = fd.get("rate_config")
+                if not config:
+                    continue
+
+                rate_options = config["rate_options"]  # [{"rate": "0.3%", "fee_wan": 15.0}, ...]
+                default_rate = config["default_rate"]
+                param_key = config["param_key"]
+
+                # 当前选中的费率
+                current_rate = rate_overrides.get(fee_name, default_rate)
+
+                # 构建费率标签列表
+                rate_labels = [f"{ro['rate']} → {ro['fee_wan']:.4f} 万元" for ro in rate_options]
+                rate_values = [ro["rate"] for ro in rate_options]
+
+                # 找到当前选中费率的索引
+                try:
+                    rate_idx = rate_values.index(current_rate)
+                except ValueError:
+                    rate_idx = len(rate_values) // 2  # 默认中值
+
+                with st.expander(
+                    f"{fd['label']} — 费率选择",
+                    expanded=False,
+                ):
+                    st.caption(f"📜 依据：{config.get('basis', '')}")
+                    st.caption(
+                        f"计费基数：{ctx['total_part1']:.0f} 万元"
+                    )
+
+                    selected_rate = st.radio(
+                        "选择费率",
+                        rate_values,
+                        index=rate_idx,
+                        format_func=lambda r, opts=rate_options: next(
+                            (f"{o['rate']}  →  {o['fee_wan']:.4f} 万元"
+                             for o in opts if o['rate'] == r), r),
+                        key=f"cascade_rate_{fee_name}",
+                        horizontal=False,
+                        label_visibility="collapsed",
+                    )
+
+                    rate_overrides[fee_name] = selected_rate
+
+                    # 显示选中费率的卡片
+                    selected_fee = next(
+                        (ro["fee_wan"] for ro in rate_options if ro["rate"] == selected_rate),
+                        0,
+                    )
+                    st.markdown(
+                        f"""<div style="
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                            border-radius: 12px;
+                            padding: 16px 24px;
+                            margin: 8px 0;
+                            color: white;
+                        ">
+                            <span style="font-size: 0.85rem; opacity: 0.85;">✅ {fee_name}</span><br>
+                            <span style="font-size: 1.1rem;">费率</span>
+                            <span style="font-size: 1.8rem; font-weight: 700;">{selected_rate}</span>
+                            <span style="font-size: 1.1rem; opacity: 0.7;">→ 费用</span>
+                            <span style="font-size: 1.8rem; font-weight: 700;">{selected_fee:.4f} 万</span>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+            ctx["rate_overrides"] = rate_overrides
+            st.session_state.pending_fee_selection["rate_overrides"] = rate_overrides
+
+            st.markdown("---")
+
         # ── Custom Fee Input ──
         st.markdown("### ➕ 自定义费用")
         st.caption("添加需要在汇总中额外计算的费用（如检测费、评估费、拆迁费等）。")
@@ -2079,14 +2163,27 @@ if "pending_fee_selection" in st.session_state:
             all_fee_names = set(fd["name"] for fd in ctx["fee_defs"])
             skip_fees = all_fee_names - new_selected
 
-            # 构建 param_overrides（系数覆盖）
+            # 构建 param_overrides（系数覆盖 + 费率覆盖）
             param_overrides = {}
             # 将系数覆盖转换为 param_overrides 格式
             for fee_name, overrides in ctx["coef_overrides"].items():
                 for k, v in overrides.items():
                     param_overrides[f"{fee_name}.{k}"] = v
+            # 费率覆盖：fee_name → param_key
+            rate_param_map = {
+                "勘察费": "勘察费费率",
+                "劳动安全卫生评审费": "劳动安全卫生评审费费率",
+                "场地准备费及临时设施费": "场地准备费费率",
+                "工程保险费": "工程保险费费率",
+            }
+            for fee_name, rate_val in ctx.get("rate_overrides", {}).items():
+                pk = rate_param_map.get(fee_name)
+                if pk:
+                    # 费率格式如 "0.5%"，提取数字
+                    rate_num = float(rate_val.replace("%", ""))
+                    param_overrides[pk] = rate_num
 
-            # 调用引擎计算（仅选中费种 + 系数覆盖）
+            # 调用引擎计算（仅选中费种 + 系数覆盖 + 费率覆盖）
             preview_raw = _calc_all_fees(
                 jianan=ctx["jianan"],
                 shebei=ctx["shebei"],
@@ -2094,6 +2191,7 @@ if "pending_fee_selection" in st.session_state:
                 query=ctx["query"],
                 skip_fees=skip_fees if skip_fees else None,
                 coef_overrides=ctx.get("coef_overrides") or None,
+                param_overrides=param_overrides or None,
             )
 
             numerical = preview_raw["_数值"]
@@ -2115,18 +2213,20 @@ if "pending_fee_selection" in st.session_state:
                     fn = fd["name"]
                     val = numerical.get(f"{fn}(万元)")
                     if val is not None:
-                        # 显示系数标注
-                        coef_note = ""
+                        # 显示系数/费率标注
+                        note_parts = []
                         if fn in ctx["coef_overrides"]:
                             coefs = ctx["coef_overrides"][fn]
-                            coef_parts = []
                             for k, v in coefs.items():
                                 if abs(v - 1.0) > 0.005:
-                                    coef_parts.append(f"{k}={v}")
-                            if coef_parts:
-                                coef_note = f" <small style='color:#888;'>({'，'.join(coef_parts)})</small>"
+                                    note_parts.append(f"{k}={v}")
+                        if fn in ctx.get("rate_overrides", {}):
+                            note_parts.append(f"费率={ctx['rate_overrides'][fn]}")
+                        note_str = ""
+                        if note_parts:
+                            note_str = f" <small style='color:#888;'>({'，'.join(note_parts)})</small>"
                         st.markdown(
-                            f"- {fd['label']}：**{val:.4f}** 万元{coef_note}",
+                            f"- {fd['label']}：**{val:.4f}** 万元{note_str}",
                             unsafe_allow_html=True,
                         )
 
@@ -2403,6 +2503,7 @@ if prompt:
                             "fee_defs": fee_defs,
                             "selected_fees": selected_fees,
                             "coef_overrides": coef_overrides,
+                            "rate_overrides": {},
                             "custom_fees": [],
                             "discount_coef": 1.0,
                             "preview": None,
