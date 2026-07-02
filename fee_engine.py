@@ -299,6 +299,9 @@ SHIGONG_SHENCHA_RATES: dict[str, dict[str, float]] = {
     "工业": {"大型": 3.2, "中型": 3.0, "小型": 2.8},
     "市政": {"大型": 4.8, "中型": 4.0, "小型": 3.2},
 }
+# 河北省施工图审查费（冀价行费[2018]57号 / 冀建质[2017]1号）
+# 除有特殊规定外，按（勘察费+设计费）× 6.5%
+HEBEI_SHENCHA_RATE = 6.5
 # 幕墙/深基坑等单项：1.6‰，最低 1000 元
 
 # 建市[2007]86号 工程设计资质标准 — 各行业大中小项目划分标准
@@ -1474,6 +1477,11 @@ def calc_keyan(
     }
 
 
+def _is_hebei_project(query: str) -> bool:
+    """检测是否为河北省项目。"""
+    return bool(re.search(r"河北", query))
+
+
 def calc_shigong_shencha(
     amount: float,
     project_type: str = "公建",
@@ -1482,9 +1490,14 @@ def calc_shigong_shencha(
     sheji_fee_only: float | None = None,
     kancha_fee_mid: float | None = None,
     kancha_rate_desc: str = "区间中值",
+    query: str = "",
 ) -> dict:
     """
-    施工图审查费（津价管[2011]46号 + 建市[2007]86号）。
+    施工图审查费。
+
+    默认依据：津价管[2011]46号 + 建市[2007]86号
+    河北省项目：冀价行费[2018]57号 / 冀建质[2017]1号
+      —（勘察费+设计费）× 6.5%
 
     住宅类：按建筑面积 × 单价（元/m²）
     公建/工业/市政类：按勘察设计费（设计费+勘察费）× 费率(%)
@@ -1513,7 +1526,52 @@ def calc_shigong_shencha(
             ],
         }
 
-    # 公建/工业/市政：以勘察设计费为基数
+    # 河北省项目：除有特殊规定外，（勘察费+设计费）× 6.5%
+    if query and _is_hebei_project(query):
+        hebei_rate = HEBEI_SHENCHA_RATE
+        if sheji_fee is not None:
+            fee = round(sheji_fee * hebei_rate / 100.0, 4)
+            desc = f"河北省项目，勘察设计费（设计费+勘察费）{sheji_fee:.4f} 万元 × {hebei_rate}%，审查费 **{fee:.4f} 万元**"
+            params = {"勘察设计费(万元)": sheji_fee, "= 设计费+勘察费": "", "费率(%)": hebei_rate, "适用地区": "河北省"}
+            if sheji_fee_only is not None and kancha_fee_mid is not None:
+                steps = [
+                    {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
+                    {"步骤": "计算设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee_only:.4f} 万元"},
+                    {"步骤": "计算勘察费", "公式": f"《市政工程设计概算编制办法》百分比法（{kancha_rate_desc}）", "结果": f"{kancha_fee_mid:.4f} 万元"},
+                    {"步骤": "计算勘察设计费基数", "公式": f"设计费 + 勘察费 = {sheji_fee_only:.4f} + {kancha_fee_mid:.4f}", "结果": f"{sheji_fee:.4f} 万元"},
+                    {"步骤": "应用河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
+                    {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {hebei_rate}%", "结果": f"{fee:.4f} 万元"},
+                ]
+            else:
+                steps = [
+                    {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
+                    {"步骤": "计算勘察设计费", "公式": "设计费（计价格[2002]10号）+ 勘察费（概算编制办法百分比法）", "结果": f"{sheji_fee:.4f} 万元"},
+                    {"步骤": "应用河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
+                    {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {hebei_rate}%", "结果": f"{fee:.4f} 万元"},
+                ]
+        else:
+            fee = round(amount * hebei_rate / 100.0, 4)
+            desc = f"河北省项目，计费基数 {amount:.0f} 万元 × {hebei_rate}%，审查费 **{fee:.4f} 万元**"
+            params = {"计费基数(万元)": amount, "费率(%)": hebei_rate, "适用地区": "河北省"}
+            steps = [
+                {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
+                {"步骤": "查找河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
+                {"步骤": "计算审查费", "公式": f"{amount:.0f} 万元 × {hebei_rate}%", "结果": f"{fee:.4f} 万元"},
+            ]
+        return {
+            "费种": f"施工图审查费（河北省）",
+            "依据": "河北省物价局、河北省住房和城乡建设厅《关于规范施工图审查收费有关问题的通知》"
+                    "（冀价行费[2018]57号）\n"
+                    "河北省住房和城乡建设厅《关于进一步规范施工图审查工作的通知》"
+                    "（冀建质[2017]1号）",
+            "计算公式": f"审查费 = (勘察费+设计费) × {hebei_rate}%",
+            "参数": params,
+            "结果(万元)": fee,
+            "说明": desc,
+            "计算步骤": steps,
+        }
+
+    # 默认：津价管[2011]46 号 公建/工业/市政
     rates = SHIGONG_SHENCHA_RATES.get(project_type, SHIGONG_SHENCHA_RATES["公建"])
     rate_pct = rates.get(size, 3.0)
 
@@ -3058,6 +3116,7 @@ def resolve_dependent_calc(
             sheji_fee_only=sheji_fee_only,
             kancha_fee_mid=kancha_fee_mid,
             kancha_rate_desc=kancha_rate_desc,
+            query=base_params.get("query", ""),
         )
         result["_dependent_details"] = dep_results
         result["_dependent_configs"] = configs
@@ -3426,7 +3485,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                     amount = val * 10000
                 else:
                     amount = val
-            result = calc_shigong_shencha(amount, ptype, size)
+            result = calc_shigong_shencha(amount, ptype, size, query=query)
     elif fee_type == "水土保持费":
         amount_yi = _extract_amount_yi(query)
         if amount_yi is None:
@@ -4066,6 +4125,7 @@ _FEE_LABELS: dict[str, str] = {
     "可行性研究费": "可行性研究费",
     "环境影响咨询费": "环境影响咨询费",
     "预备费": "预备费（基本预备费）",
+    "招标代理费": "招标代理服务费",
 }
 
 
@@ -4207,6 +4267,41 @@ def _calc_all_fees(
 
     t0_total = sum(numerical.values())
 
+    # ── 招标代理费（依赖 T0：监理费 + 设计费 + 勘察费）──
+    # 该费种在 _SKIP_FEES 中，但当选中的依赖费种都有时，可以在联算中自动计算
+    if skip_fees is None or "招标代理费" not in skip_fees:
+        jl_fee_zb = numerical.get("监理费(万元)", 0)
+        sj_fee_zb = numerical.get("工程设计费(万元)", 0)
+        kc_fee_zb = numerical.get("勘察费(万元)", 0)
+        if jl_fee_zb > 0 and sj_fee_zb > 0 and kc_fee_zb > 0:
+            # 使用已经计算的依赖费种值（含用户系数调整），构建 dependent_configs
+            _zb_dep_configs = {
+                "监理费": {
+                    "professional_coef": (coef_overrides or {}).get("监理费", {}).get("professional_coef", 1.0),
+                    "complexity_coef": (coef_overrides or {}).get("监理费", {}).get("complexity_coef", 1.0),
+                    "elevation_coef": (coef_overrides or {}).get("监理费", {}).get("elevation_coef", 1.0),
+                },
+                "工程设计费": {
+                    "professional_coef": (coef_overrides or {}).get("工程设计费", {}).get("professional_coef", 1.0),
+                    "complexity_coef": (coef_overrides or {}).get("工程设计费", {}).get("complexity_coef", 1.0),
+                    "additional_coef": (coef_overrides or {}).get("工程设计费", {}).get("additional_coef", 1.0),
+                },
+                "勘察费": {
+                    "rate": param_overrides.get("勘察费费率"),
+                    "project_type": project_type,
+                },
+            }
+            try:
+                zhaobiao_r = calc_zhaobiao_daili_all(
+                    jianan=jianan, shebei=shebei,
+                    project_type=project_type, query=query,
+                    dependent_configs=_zb_dep_configs,
+                )
+                raw_results["招标代理费"] = zhaobiao_r
+                numerical["招标代理费(万元)"] = zhaobiao_r.get("合计(万元)", 0)
+            except Exception:
+                pass  # 计算失败则跳过
+
     # ============ Tier 1：需要 T0 结果 ============
 
     # 交易服务费（需要 监理费 + 设计费）
@@ -4241,13 +4336,14 @@ def _calc_all_fees(
             sheji_fee=round(sheji_kancha_sum, 4),
             sheji_fee_only=numerical["工程设计费(万元)"],
             kancha_fee_mid=numerical["勘察费(万元)"],
+            query=_shencha_query,
         )
         raw_results["施工图审查费"] = shencha_r
         numerical["施工图审查费(万元)"] = _extract_numeric_value(shencha_r)
 
     t1_total = sum(
         v for k, v in numerical.items()
-        if k.replace("(万元)", "") in ["交易服务费", "施工图审查费"]
+        if k.replace("(万元)", "") in ["交易服务费", "施工图审查费", "招标代理费"]
     )
 
     # ============ 总投资 ============
@@ -4339,7 +4435,7 @@ def _calc_all_fees(
                 skipped[fn] = "用户未选择"
         # 重新计算汇总值
         t0_keys = [k for k, v in _TIER_MAP.items() if v == 0]
-        t1_keys = [k for k, v in _TIER_MAP.items() if v == 1]
+        t1_keys = [k for k, v in _TIER_MAP.items() if v == 1] + ["招标代理费"]
         t2_keys = [k for k, v in _TIER_MAP.items() if v == 2]
         t0_total = sum(numerical.get(f"{k}(万元)", 0) for k in t0_keys)
         t1_total = sum(numerical.get(f"{k}(万元)", 0) for k in t1_keys)
@@ -4392,6 +4488,7 @@ def _build_fee_selection_meta(
     numerical = engine_result["_数值"]
     definitions: list[dict] = []
 
+    # 先添加 TIER_MAP 中的费种
     for fee_name, tier in sorted(_TIER_MAP.items(), key=lambda x: (x[1], x[0])):
         default_val = numerical.get(f"{fee_name}(万元)", 0)
         label = _FEE_LABELS.get(fee_name, fee_name)
@@ -4399,6 +4496,7 @@ def _build_fee_selection_meta(
         has_coefs = fee_name in ("监理费", "工程设计费", "环境影响咨询费")
         has_rates = fee_name in ("勘察费", "劳动安全卫生评审费",
                                  "场地准备费及临时设施费", "工程保险费")
+        has_services = fee_name == "环境影响咨询费"
 
         entry: dict = {
             "name": fee_name,
@@ -4406,8 +4504,10 @@ def _build_fee_selection_meta(
             "tier": tier,
             "has_coefs": has_coefs,
             "has_rates": has_rates,
+            "has_services": has_services,
             "coef_config": None,
             "rate_config": None,
+            "service_config": None,
             "depends_on": deps,
             "default_value_wan": round(default_val, 4),
         }
@@ -4421,7 +4521,37 @@ def _build_fee_selection_meta(
             entry["rate_config"] = _get_rate_config_simple(
                 fee_name, engine_result, query)
 
+        # 为环评费构建服务类型选项
+        if has_services:
+            entry["service_config"] = {
+                "services": [
+                    {"name": "编制报告书", "label": "编制环境影响报告书（含大纲）"},
+                    {"name": "编制报告表", "label": "编制环境影响报告表"},
+                    {"name": "评估报告书", "label": "评估环境影响报告书（含大纲）"},
+                    {"name": "评估报告表", "label": "评估环境影响报告表"},
+                ],
+                "default_selected": ["编制报告书"],  # 默认只选报告书
+            }
+
         definitions.append(entry)
+
+    # 追加 _SKIP_FEES 中可通过依赖费种计算的费种
+    # 招标代理费：依赖监理费+设计费+勘察费（Tier 0 已计算），可自动联算
+    zhaobiao_val = numerical.get("招标代理费(万元)", 0)
+    definitions.append({
+        "name": "招标代理费",
+        "label": _FEE_LABELS.get("招标代理费", "招标代理服务费"),
+        "tier": 1,  # 放在 Tier 1（与交易服务费同级，依赖 Tier 0）
+        "has_coefs": False,
+        "has_rates": False,
+        "has_services": False,
+        "coef_config": None,
+        "rate_config": None,
+        "service_config": None,
+        "depends_on": ["监理费", "工程设计费", "勘察费"],
+        "default_value_wan": round(zhaobiao_val, 4) if zhaobiao_val else 0,
+        "is_from_skip": True,  # 标记为来自 _SKIP_FEES
+    })
 
     return definitions
 

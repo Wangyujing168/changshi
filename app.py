@@ -2027,6 +2027,65 @@ if "pending_fee_selection" in st.session_state:
                     ctx["coef_overrides"][fee_name] = overrides
                     st.session_state.pending_fee_selection["coef_overrides"] = ctx["coef_overrides"]
 
+                    # ── Service type checkboxes for 环评费 ──
+                    if fd.get("has_services") and fd.get("service_config"):
+                        st.markdown("---")
+                        st.markdown("#### 📋 选择服务类型")
+                        st.caption("勾选需要计算的环境影响咨询服务类型。")
+
+                        service_config = fd["service_config"]
+                        all_svcs = service_config["services"]
+                        prev_selected_svcs = ctx.get("service_selections", {}).get(fee_name, service_config.get("default_selected", ["编制报告书"]))
+
+                        selected_svcs: list[str] = []
+                        svc_col1, svc_col2 = st.columns(2)
+                        for i, svc_info in enumerate(all_svcs):
+                            svc_name = svc_info["name"]
+                            svc_label = svc_info["label"]
+                            checked = svc_name in prev_selected_svcs
+                            col = svc_col1 if i < 2 else svc_col2
+                            with col:
+                                if st.checkbox(
+                                    svc_label,
+                                    value=checked,
+                                    key=f"cascade_hpsvc_{fee_name}_{svc_name}",
+                                ):
+                                    selected_svcs.append(svc_name)
+
+                        if not selected_svcs:
+                            st.warning("⚠️ 请至少选择一项服务类型")
+                        else:
+                            # 实时预览（调用 calc_huanping_multi）
+                            from fee_engine import HUANPING_INDUSTRY_OPTIONS, HUANPING_SENSITIVITY_OPTIONS
+                            hp_coefs = ctx["coef_overrides"].get(fee_name, {})
+                            hp_ind_coef = hp_coefs.get("industry_coef", 1.0)
+                            hp_sens_coef = hp_coefs.get("sensitivity_coef", 1.0)
+                            try:
+                                from fee_engine import calc_huanping_multi
+                                hp_preview = calc_huanping_multi(
+                                    ctx["total_part1"],
+                                    selected_svcs,
+                                    industry_coef=hp_ind_coef,
+                                    sensitivity_coef=hp_sens_coef,
+                                )
+                                hp_total = hp_preview.get("合计(万元)", 0)
+                                hp_details = hp_preview.get("明细", [])
+                                st.markdown("**预览**：")
+                                for d in hp_details:
+                                    st.markdown(
+                                        f"- {d['服务类型']}：**{d['结果(万元)']}** "
+                                        f"（中值 **{d['结果中值(万元)']}** 万元）"
+                                    )
+                                st.caption(f"环评费合计：**{hp_total:.4f}** 万元")
+                            except Exception:
+                                pass
+
+                        # 持久化服务选择
+                        if "service_selections" not in ctx:
+                            ctx["service_selections"] = {}
+                        ctx["service_selections"][fee_name] = selected_svcs
+                        st.session_state.pending_fee_selection["service_selections"] = ctx["service_selections"]
+
             st.markdown("---")
 
         # ── Rate Selection (per fee, expandable) ──
@@ -2196,6 +2255,47 @@ if "pending_fee_selection" in st.session_state:
 
             numerical = preview_raw["_数值"]
 
+            # ── 环评费多服务类型覆盖 ──
+            if "环境影响咨询费" in new_selected:
+                hp_svcs = ctx.get("service_selections", {}).get("环境影响咨询费", [])
+                if hp_svcs and hp_svcs != ["编制报告书"]:
+                    # 用户选择了非默认的服务类型组合，用 calc_huanping_multi 覆盖
+                    from fee_engine import calc_huanping_multi
+                    hp_coefs = ctx.get("coef_overrides", {}).get("环境影响咨询费", {})
+                    hp_ind_coef = hp_coefs.get("industry_coef", 1.0)
+                    hp_sens_coef = hp_coefs.get("sensitivity_coef", 1.0)
+                    try:
+                        hp_multi = calc_huanping_multi(
+                            ctx["total_part1"],
+                            hp_svcs,
+                            industry_coef=hp_ind_coef,
+                            sensitivity_coef=hp_sens_coef,
+                        )
+                        hp_total = hp_multi.get("合计(万元)", 0)
+                        old_hp = numerical.get("环境影响咨询费(万元)", 0)
+                        numerical["环境影响咨询费(万元)"] = hp_total
+                        # 更新原始结果
+                        preview_raw["原始结果"]["环境影响咨询费"] = hp_multi
+                        # 重新计算 T2 小计
+                        t2_keys = [k for k in ("建设管理费", "可行性研究费", "环境影响咨询费")
+                                   if f"{k}(万元)" in numerical]
+                        new_t2 = sum(numerical.get(f"{k}(万元)", 0) for k in t2_keys)
+                        preview_raw["T2小计(万元)"] = round(new_t2, 4)
+                        # 重新计算二类费合计
+                        fee_total_raw = (
+                            preview_raw.get("T0小计(万元)", 0)
+                            + preview_raw.get("T1小计(万元)", 0)
+                            + new_t2
+                        )
+                        preview_raw["二类费合计(万元)"] = round(fee_total_raw, 4)
+                        # 重新计算总投资
+                        preview_raw["总投资(万元)"] = round(
+                            ctx["total_part1"] + fee_total_raw, 4)
+                        preview_raw["项目总投资(万元)"] = round(
+                            ctx["total_part1"] + fee_total_raw + preview_raw.get("预备费小计(万元)", 0), 4)
+                    except Exception:
+                        pass  # 失败时保留原始值
+
             # 按层级显示
             for tier in [0, 1, 2]:
                 tier_fees = [
@@ -2222,6 +2322,10 @@ if "pending_fee_selection" in st.session_state:
                                     note_parts.append(f"{k}={v}")
                         if fn in ctx.get("rate_overrides", {}):
                             note_parts.append(f"费率={ctx['rate_overrides'][fn]}")
+                        if fn in ctx.get("service_selections", {}):
+                            svcs = ctx["service_selections"][fn]
+                            if svcs and svcs != ["编制报告书"]:
+                                note_parts.append(f"{len(svcs)}项服务")
                         note_str = ""
                         if note_parts:
                             note_str = f" <small style='color:#888;'>({'，'.join(note_parts)})</small>"
@@ -2342,14 +2446,20 @@ if "pending_fee_selection" in st.session_state:
                         val = numerical.get(f"{fn}(万元)")
                         if val is not None:
                             coef_note = ""
+                            note_parts = []
                             if fn in ctx["coef_overrides"]:
                                 coefs = ctx["coef_overrides"][fn]
-                                parts = []
                                 for k, v in coefs.items():
                                     if abs(v - 1.0) > 0.005:
-                                        parts.append(f"{k}={v}")
-                                if parts:
-                                    coef_note = f"（{'，'.join(parts)}）"
+                                        note_parts.append(f"{k}={v}")
+                            if fn in ctx.get("rate_overrides", {}):
+                                note_parts.append(f"费率={ctx['rate_overrides'][fn]}")
+                            if fn in ctx.get("service_selections", {}):
+                                svcs = ctx["service_selections"][fn]
+                                if svcs and svcs != ["编制报告书"]:
+                                    note_parts.append(f"{'、'.join(svcs)}")
+                            if note_parts:
+                                coef_note = f"（{'，'.join(note_parts)}）"
                             tier_lines.append(f"- **{fd['label']}**{coef_note}：{val:.4f} 万元")
 
                 # 自定义费用
@@ -2504,6 +2614,9 @@ if prompt:
                             "selected_fees": selected_fees,
                             "coef_overrides": coef_overrides,
                             "rate_overrides": {},
+                            "service_selections": {
+                                "环境影响咨询费": ["编制报告书"],
+                            },
                             "custom_fees": [],
                             "discount_coef": 1.0,
                             "preview": None,
