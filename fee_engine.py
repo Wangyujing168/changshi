@@ -444,6 +444,348 @@ _COST_CONSULTING_SERVICE_ORDER: list[str] = [
     "编制设计概算",
 ]
 
+# ============================================================
+# 造价咨询费 — 冀建市研[2017]2号（河北省）
+# ============================================================
+
+# 河北省差额定率分档，分档（万元）
+_HEBEI_COST_CONSULTING_BRACKETS: list[float] = [200, 500, 2000, 10000, float("inf")]
+
+# 河北省费率表（单位：‰）
+# 备注：工程建设设备费用不计入取费基数（建安费为基数，部分类型用总投资/概算额）
+_HEBEI_COST_CONSULTING_RATES: dict[str, dict] = {
+    # ── 编制类（基数 = 建安工程造价）──
+    "预算编制": {
+        "rates": [4.0, 3.5, 3.0, 2.5, 2.0],
+        "base_type": "建安工程造价",
+        "base_from": "jianan",
+        "category": "编制",
+    },
+    "结算编制": {
+        "rates": [4.5, 4.0, 3.5, 3.0, 2.5],
+        "base_type": "建安工程造价",
+        "base_from": "jianan",
+        "category": "编制",
+    },
+    "概算编制": {
+        "rates": [3.0, 2.5, 2.0, 1.8, 1.6],
+        "base_type": "设计概算额",
+        "base_from": "jianan",
+        "category": "编制",
+    },
+    "工程量清单编制(审核)": {
+        "rates": [5.0, 4.0, 3.0, 2.2, 1.8],
+        "base_type": "建安工程造价",
+        "base_from": "jianan",
+        "category": "编制",
+        "note": "按建安工程费取费",
+    },
+    "招标控制价编制(审核)": {
+        "rates": [2.0, 1.8, 1.6, 1.4, 1.2],
+        "base_type": "建安工程造价",
+        "base_from": "jianan",
+        "category": "编制",
+    },
+    "投资估算": {
+        "rates": [0.8, 0.7, 0.6, 0.5, 0.3],
+        "base_type": "投资估算额",
+        "base_from": "jianan",
+        "category": "编制",
+    },
+    "竣工决算编制": {
+        "rates": [2.0, 1.5, 1.2, 1.0, 0.8],
+        "base_type": "建设项目总投资",
+        "base_from": "total_investment",
+        "category": "编制",
+    },
+    # ── 审核类 ──
+    "预算审核": {
+        "rates": [3.2, 2.8, 2.4, 2.0, 1.6],
+        "base_type": "建安工程造价",
+        "base_from": "jianan",
+        "category": "审核",
+    },
+    "结算审核": {
+        "rates": [5.0, 4.5, 4.0, 3.5, 3.0],
+        "base_type": "建安工程造价",
+        "base_from": "jianan",
+        "category": "审核",
+    },
+    "概算审核": {
+        "rates": [2.0, 1.8, 1.5, 1.2, 1.0],
+        "base_type": "设计概算额",
+        "base_from": "jianan",
+        "category": "审核",
+    },
+    # ── 其他 ──
+    "投标报价分析(清标)": {
+        "rates": [0.6, 0.5, 0.4, 0.3, 0.2],
+        "base_type": "最高投标限价",
+        "base_from": "jianan",
+        "category": "其他",
+    },
+    # 施工阶段造价咨询：仅前3档有费率，>2000万按驻场人月费协商
+    "施工阶段造价咨询": {
+        "rates": [8.0, 6.0, 4.0],
+        "base_type": "建安工程造价",
+        "base_from": "jianan",
+        "category": "全过程",
+        "note": "计费=(1)基本收费+(2)效益收费。超过2000万元时，驻场人员10000~20000元/月；效益收费=(核减+核增)×5%",
+    },
+    "全过程造价咨询": {
+        "rates": [13.0, 10.0, 8.0],
+        "base_type": "建安工程造价",
+        "base_from": "jianan",
+        "category": "全过程",
+        "note": "计费=(1)基本收费+(2)效益收费。超过2000万元时，驻场人员10000~20000元/月；效益收费=(核减+核增)×5%",
+    },
+    "工程造价鉴定": {
+        "rates": [12.0, 10.0, 8.0, 6.0, 5.0],
+        "base_type": "鉴定标的额",
+        "base_from": "total_investment",
+        "category": "其他",
+    },
+}
+
+# 河北省造价咨询服务类型展示顺序
+_HEBEI_COST_CONSULTING_SERVICE_ORDER: list[str] = [
+    "投资估算",
+    "概算编制",
+    "概算审核",
+    "预算编制",
+    "预算审核",
+    "工程量清单编制(审核)",
+    "招标控制价编制(审核)",
+    "投标报价分析(清标)",
+    "结算编制",
+    "结算审核",
+    "竣工决算编制",
+    "施工阶段造价咨询",
+    "全过程造价咨询",
+    "工程造价鉴定",
+]
+
+# 河北省专业工程调整系数（冀建市研[2017]2号 附件2）
+_HEBEI_PROFESSIONAL_COEFFICIENTS: dict[str, float] = {
+    "房屋建筑工程": 0.8,
+    "水利电力工程": 0.9,
+    "交通建设工程": 0.7,
+    "公路工程": 0.8,
+    "铁路工程": 0.8,
+    "市政工程": 0.8,
+    "园林绿化工程": 0.7,
+    "港口工程": 0.8,
+    "矿山工程": 1.1,
+    "园林景观工程": 1.1,
+    "装饰装修工程": 1.2,
+    "古建筑工程": 1.2,
+    "安装工程": 1.2,
+    "其他工程": 1.0,
+}
+
+# 河北省造价咨询费最低收费标准（元）
+_HEBEI_COST_CONSULTING_MIN_FEE = 3000.0
+
+
+def _detect_hebei_cost_consulting_type(query: str) -> str | None:
+    """从查询中检测河北省造价咨询的具体服务类型（冀建市研[2017]2号）。"""
+    type_patterns: list[tuple[str, str]] = [
+        ("施工阶段造价咨询", "施工阶段造价咨询"),
+        ("全过程造价咨询", "全过程造价咨询"),
+        ("全过程.*控制", "全过程造价咨询"),
+        ("工程量清单.*编制.*审核|工程量清单.*审核", "工程量清单编制(审核)"),
+        ("工程量清单编制", "工程量清单编制(审核)"),
+        ("工程量清单.*编制", "工程量清单编制(审核)"),
+        ("招标控制价.*编制.*审核|招标控制价.*审核", "招标控制价编制(审核)"),
+        ("招标控制价编制", "招标控制价编制(审核)"),
+        ("招标控制价", "招标控制价编制(审核)"),
+        ("投标报价分析|清标", "投标报价分析(清标)"),
+        ("投资估算", "投资估算"),
+        ("概算编[制审]|编制.*概算", "概算编制"),
+        ("概算审核", "概算审核"),
+        ("概算", "概算编制"),
+        ("预算编[制审]|编制.*预算|施工图预算", "预算编制"),
+        ("预算审核", "预算审核"),
+        ("结算编[制审]|编制.*结算|竣工结算编", "结算编制"),
+        ("结算审核|竣工结算审", "结算审核"),
+        ("竣工决算编|编制.*决算", "竣工决算编制"),
+        ("竣工决算", "竣工决算编制"),
+        ("工程造价鉴定|造价鉴定|工程鉴定", "工程造价鉴定"),
+        ("造价咨询", "预算编制"),  # 泛化默认
+    ]
+    for pattern, svc_type in type_patterns:
+        if re.search(pattern, query):
+            return svc_type
+    return None
+
+
+def calc_cost_consulting_hebei(
+    jianan_wan: float,
+    service_type: str,
+    total_investment: float | None = None,
+    professional_coef: float = 1.0,
+    discount_coef: float = 1.0,
+) -> dict:
+    """
+    河北省造价咨询费（冀建市研[2017]2号）。
+
+    与津价房地[2008]136号的核心差异：
+      - 计费基数为建安费（不含设备费）
+      - 差额定率分档不同：200/500/2000/10000
+      - 专业工程调整系数（附件2）
+      - 最低收费 3000 元
+      - 下浮不超过 20%
+    """
+    config = _HEBEI_COST_CONSULTING_RATES.get(service_type)
+    if config is None:
+        raise ValueError(f"未知的河北省造价咨询服务类型：{service_type}")
+
+    rates: list[float] = config["rates"]
+    base_type: str = config["base_type"]
+    base_from: str = config["base_from"]
+    note: str = config.get("note", "")
+
+    # 确定计费基数
+    if base_from == "total_investment":
+        if total_investment is None:
+            amount = jianan_wan  # fallback
+        else:
+            amount = total_investment
+    else:
+        amount = jianan_wan  # 默认建安费
+
+    # 使用实际费率数量对应的分档（施工阶段/全过程只有3档）
+    num_tiers = len(rates)
+    brackets = _HEBEI_COST_CONSULTING_BRACKETS[:num_tiers]
+    # 最后一个分档需要设为 inf 以保证剩余金额全部计入
+    brackets[-1] = float("inf")
+
+    # 差额分档累进
+    total_fee = 0.0
+    prev_limit = 0.0
+    steps: list[dict] = []
+
+    for i, limit in enumerate(brackets):
+        if amount <= prev_limit:
+            break
+        tier_amount = min(amount, limit) - prev_limit
+        if tier_amount <= 0:
+            prev_limit = limit
+            continue
+        rate = rates[i]
+        tier_fee = tier_amount * rate / 1000.0  # ‰ → 万元
+        total_fee += tier_fee
+        step_qujian = f"{prev_limit:.0f}~{limit:.0f}" if limit != float("inf") else f">{prev_limit:.0f}"
+        steps.append({
+            "区间": step_qujian,
+            "金额(万元)": round(tier_amount, 2),
+            "费率(‰)": rate,
+            "费用(万元)": round(tier_fee, 4),
+        })
+        prev_limit = limit
+
+    # 应用专业调整系数
+    total_fee_before_prof = round(total_fee, 4)
+    total_fee = round(total_fee * professional_coef, 4)
+
+    # 最低收费检查（3000元 = 0.3万元）
+    min_fee_wan = _HEBEI_COST_CONSULTING_MIN_FEE / 10000.0
+    applied_min = total_fee < min_fee_wan
+    if applied_min:
+        total_fee = round(min_fee_wan, 4)
+
+    # 打折系数
+    total_fee = round(total_fee * discount_coef, 4)
+
+    # 构建说明
+    lines = [f"计费基数 {amount:.0f} 万元（{base_type}），{service_type}"]
+    if abs(professional_coef - 1.0) > 0.001:
+        lines.append(f"专业调整系数 {professional_coef}，调整前 {total_fee_before_prof:.4f} 万元")
+    if applied_min:
+        lines.append(f"计算费用不足最低收费标准 {_HEBEI_COST_CONSULTING_MIN_FEE:.0f} 元，按最低标准收取")
+    if abs(discount_coef - 1.0) > 0.001:
+        lines.append(f"打折系数 {discount_coef:.2f}")
+    if note:
+        lines.append(f"注：{note}")
+
+    return {
+        "费种": f"造价咨询费（{service_type}）",
+        "依据": "《河北省建设工程造价咨询服务收费管理暂行办法》（冀建市研[2017]2号）",
+        "计算公式": "差额分档累进，基准价可下浮 ≤20%",
+        "参数": {
+            "计费基数(万元)": round(amount, 4),
+            "基数类型": base_type,
+            "服务类型": service_type,
+            "专业调整系数": professional_coef,
+            "打折系数": discount_coef,
+            "最低收费(元)": _HEBEI_COST_CONSULTING_MIN_FEE,
+        },
+        "计算步骤": steps,
+        "结果(万元)": total_fee,
+        "说明": (
+            f"计费基数 {amount:.0f} 万元（{base_type}），{service_type}，\n"
+            f"差额分档累进计算，造价咨询费基准价为 **{total_fee:.4f} 万元**"
+            f"（可在下浮 ≤20% 幅度内协商浮动）"
+        ),
+    }
+
+
+def calc_cost_consulting_multi_hebei(
+    selected_services: list[str],
+    jianan_wan: float,
+    total_investment: float | None = None,
+    professional_coef: float = 1.0,
+    discount_coef: float = 1.0,
+) -> dict:
+    """计算多个河北省造价咨询服务子项的费用（每项独立计算，汇总求和）。"""
+    details: list[dict] = []
+    total = 0.0
+    warnings: list[str] = []
+    for svc in selected_services:
+        try:
+            single = calc_cost_consulting_hebei(
+                jianan_wan, svc,
+                total_investment=total_investment,
+                professional_coef=professional_coef,
+                discount_coef=1.0,  # 单个不折，最后统一折
+            )
+            fee = single["结果(万元)"]
+            total += fee
+            details.append({
+                "服务类型": svc,
+                "计费基数(万元)": single["参数"]["计费基数(万元)"],
+                "基数类型": single["参数"]["基数类型"],
+                "费用(万元)": fee,
+                "计算步骤": single["计算步骤"],
+            })
+        except ValueError as e:
+            warnings.append(f"⚠️ **{svc}**：{e}")
+    total_before_discount = round(total, 4)
+    total = round(total_before_discount * discount_coef, 4)
+    desc = f"共 {len(details)} 项服务，合计 **{total_before_discount} 万元**"
+    if abs(discount_coef - 1.0) > 0.001:
+        desc += f"，打折后 **{total} 万元**（系数 {discount_coef:.2f}）"
+    if abs(professional_coef - 1.0) > 0.001:
+        desc += f"\n\n专业调整系数：**{professional_coef}**"
+    if warnings:
+        desc += "\n\n" + "\n\n".join(warnings)
+    return {
+        "明细": details,
+        "合计(万元)": total,
+        "合计(打折前)(万元)": total_before_discount,
+        "参数": {
+            "建安工程造价(万元)": round(jianan_wan, 4),
+            "工程总投资(万元)": round(total_investment, 4) if total_investment else None,
+            "选中服务": selected_services,
+            "专业调整系数": professional_coef,
+            "打折系数": discount_coef,
+            "警告": warnings,
+        },
+        "费种": "造价咨询费",
+        "依据": "《河北省建设工程造价咨询服务收费管理暂行办法》（冀建市研[2017]2号）",
+        "说明": desc,
+    }
+
 
 def calc_cost_consulting_multi(
     selected_services: list[str],
@@ -3663,49 +4005,91 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                 "\n".join(lines)
             )
     elif fee_type == "造价咨询费":
-        # 津价房地[2008]136号 — 差额定率分档累进
-        svc_type = _detect_cost_consulting_type(query)
-        if svc_type is None:
-            svc_type = "编制施工图预算"  # 默认
+        # ── 河北省：冀建市研[2017]2号 ──
+        if query and _is_hebei_project(query):
+            svc_type = _detect_hebei_cost_consulting_type(query)
+            if svc_type is None:
+                svc_type = "预算编制"  # 默认
 
-        jianan_zj, shebei_zj = _extract_jianli_components(query)
-        if jianan_zj is not None:
-            base_amount = jianan_zj + (shebei_zj or 0)
+            jianan_zj, shebei_zj = _extract_jianli_components(query)
+            # 河北省基数 = 建安费（不含设备费）
+            jianan_only = jianan_zj if jianan_zj is not None else amount
+            base_amount = jianan_only  # Hebei uses 建安费 only
+
+            total_invest = _extract_total_investment(query)
+            if total_invest is None and svc_type in ("竣工决算编制", "工程造价鉴定"):
+                cascade_r = calc_cascade(query)
+                if cascade_r:
+                    total_invest = cascade_r["结果汇总"]["项目总投资(万元)"]
+
+            try:
+                result = calc_cost_consulting_hebei(
+                    jianan_only, svc_type,
+                    total_investment=total_invest,
+                )
+            except ValueError as e:
+                result = {
+                    "费种": f"造价咨询费（{svc_type}）",
+                    "依据": "《河北省建设工程造价咨询服务收费管理暂行办法》（冀建市研[2017]2号）",
+                    "参数": {
+                        "服务类型": svc_type,
+                        "建安工程造价(万元)": round(jianan_only, 4),
+                    },
+                    "结果(万元)": None,
+                    "计算步骤": [],
+                    "说明": str(e),
+                    "_error": str(e),
+                }
+            # 保存原始输入值，供前端多选面板使用
+            result["_jianan"] = jianan_zj
+            result["_shebei"] = shebei_zj
+            result["_total_invest"] = total_invest
+            result["_base_amount"] = base_amount
+            result["_is_hebei"] = True  # 标记河北项目，前端据此渲染
         else:
-            base_amount = amount
+            # ── 津价房地[2008]136号（天津市）──
+            svc_type = _detect_cost_consulting_type(query)
+            if svc_type is None:
+                svc_type = "编制施工图预算"  # 默认
 
-        # 提取总投资（优先从查询文本自动捕捉，其次通过级联计算）
-        total_invest = _extract_total_investment(query)
-        if total_invest is None and svc_type == "审核概算":
-            cascade_r = calc_cascade(query)
-            if cascade_r:
-                total_invest = cascade_r["结果汇总"]["项目总投资(万元)"]
+            jianan_zj, shebei_zj = _extract_jianli_components(query)
+            if jianan_zj is not None:
+                base_amount = jianan_zj + (shebei_zj or 0)
+            else:
+                base_amount = amount
 
-        try:
-            result = calc_cost_consulting(
-                base_amount, svc_type,
-                total_investment=total_invest,
-                jianan_only=jianan_zj,
-            )
-        except ValueError as e:
-            # 审核概算总投资未知时，返回提示
-            result = {
-                "费种": f"造价咨询费（{svc_type}）",
-                "依据": "《天津市建设工程造价咨询服务项目和价格标准》（津价房地[2008]136号）",
-                "参数": {
-                    "服务类型": svc_type,
-                    "工程费用(万元)": round(base_amount, 4),
-                },
-                "结果(万元)": None,
-                "计算步骤": [],
-                "说明": str(e),
-                "_error": str(e),
-            }
-        # 保存原始输入值，供前端多选面板使用
-        result["_jianan"] = jianan_zj
-        result["_shebei"] = shebei_zj
-        result["_total_invest"] = total_invest
-        result["_base_amount"] = base_amount
+            # 提取总投资（优先从查询文本自动捕捉，其次通过级联计算）
+            total_invest = _extract_total_investment(query)
+            if total_invest is None and svc_type == "审核概算":
+                cascade_r = calc_cascade(query)
+                if cascade_r:
+                    total_invest = cascade_r["结果汇总"]["项目总投资(万元)"]
+
+            try:
+                result = calc_cost_consulting(
+                    base_amount, svc_type,
+                    total_investment=total_invest,
+                    jianan_only=jianan_zj,
+                )
+            except ValueError as e:
+                # 审核概算总投资未知时，返回提示
+                result = {
+                    "费种": f"造价咨询费（{svc_type}）",
+                    "依据": "《天津市建设工程造价咨询服务项目和价格标准》（津价房地[2008]136号）",
+                    "参数": {
+                        "服务类型": svc_type,
+                        "工程费用(万元)": round(base_amount, 4),
+                    },
+                    "结果(万元)": None,
+                    "计算步骤": [],
+                    "说明": str(e),
+                    "_error": str(e),
+                }
+            # 保存原始输入值，供前端多选面板使用
+            result["_jianan"] = jianan_zj
+            result["_shebei"] = shebei_zj
+            result["_total_invest"] = total_invest
+            result["_base_amount"] = base_amount
     else:
         return None
 
