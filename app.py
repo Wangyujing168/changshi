@@ -2344,108 +2344,118 @@ if "pending_fee_selection" in st.session_state:
                     ctx["coef_overrides"][fee_name] = overrides
                     st.session_state.pending_fee_selection["coef_overrides"] = ctx["coef_overrides"]
 
-                    # ── Service type checkboxes ──
-                    if fd.get("has_services") and fd.get("service_config"):
-                        service_config = fd["service_config"]
-                        is_cost_consulting = (fee_name == "造价咨询费")
+            st.markdown("---")
 
-                        st.markdown("---")
-                        if is_cost_consulting:
-                            st.markdown("#### 📋 选择造价咨询服务子项")
-                            # 根据项目地域选择服务列表
-                            if _is_hebei_project(ctx["query"]):
-                                all_svcs = service_config.get("services_hebei", [])
-                                default_svcs = service_config.get("default_selected_hebei", ["预算编制"])
-                                svc_caption = "勾选需要计算的河北省造价咨询服务子项（冀建市研[2017]2号）。"
-                            else:
-                                all_svcs = service_config.get("services_tianjin", [])
-                                default_svcs = service_config.get("default_selected_tianjin", ["编制施工图预算"])
-                                svc_caption = "勾选需要计算的造价咨询服务子项（津价房地[2008]136号）。"
-                            st.caption(svc_caption)
+        # ── Service Selection (always visible, for ALL fees with has_services) ──
+        svc_fees = [
+            fd for fd in ctx["fee_defs"]
+            if fd.get("has_services") and fd["name"] in new_selected
+        ]
+        if svc_fees:
+            st.markdown("### 📋 服务类型选择")
+            for fd in svc_fees:
+                fee_name = fd["name"]
+                service_config = fd["service_config"]
+                if not service_config:
+                    continue
+                is_cost_consulting = (fee_name == "造价咨询费")
+                is_huanping = (fee_name == "环境影响咨询费")
+
+                if is_cost_consulting:
+                    st.markdown("#### 🌿 工程造价咨询服务子项")
+                    if _is_hebei_project(ctx["query"]):
+                        all_svcs = service_config.get("services_hebei", [])
+                        default_svcs = service_config.get("default_selected_hebei", ["预算编制"])
+                        st.caption("勾选需要计算的河北省造价咨询服务子项（冀建市研[2017]2号）。")
+                    else:
+                        all_svcs = service_config.get("services_tianjin", [])
+                        default_svcs = service_config.get("default_selected_tianjin", ["编制施工图预算"])
+                        st.caption("勾选需要计算的造价咨询服务子项（津价房地[2008]136号）。")
+                elif is_huanping:
+                    st.markdown("#### 🌍 环境影响咨询服务子项")
+                    all_svcs = service_config["services"]
+                    default_svcs = service_config.get("default_selected", ["编制报告书"])
+                    st.caption("勾选需要计算的环境影响咨询服务类型（计价格[2002]125号）。")
+                else:
+                    all_svcs = service_config.get("services", [])
+                    default_svcs = service_config.get("default_selected", [])
+                    st.caption("勾选需要计算的服务类型。")
+
+                prev_selected_svcs = ctx.get("service_selections", {}).get(fee_name, default_svcs)
+
+                selected_svcs: list[str] = []
+                svc_col1, svc_col2 = st.columns(2)
+                for i, svc_info in enumerate(all_svcs):
+                    svc_name = svc_info["name"]
+                    svc_label = svc_info["label"]
+                    checked = svc_name in prev_selected_svcs
+                    col = svc_col1 if i < 2 else svc_col2
+                    with col:
+                        if st.checkbox(
+                            svc_label,
+                            value=checked,
+                            key=f"cascade_svc_{fee_name}_{svc_name}",
+                        ):
+                            selected_svcs.append(svc_name)
+
+                if not selected_svcs:
+                    st.warning("⚠️ 请至少选择一项服务类型")
+                elif is_cost_consulting:
+                    try:
+                        if _is_hebei_project(ctx["query"]):
+                            from fee_engine import calc_cost_consulting_multi_hebei
+                            cc_preview = calc_cost_consulting_multi_hebei(
+                                selected_svcs,
+                                ctx["total_part1"],
+                                total_investment=None,
+                                professional_coef=1.0,
+                                discount_coef=1.0,
+                            )
                         else:
-                            st.markdown("#### 📋 选择服务类型")
-                            st.caption("勾选需要计算的环境影响咨询服务类型。")
-                            all_svcs = service_config["services"]
-                            default_svcs = service_config.get("default_selected", ["编制报告书"])
+                            from fee_engine import calc_cost_consulting_multi
+                            cc_preview = calc_cost_consulting_multi(
+                                selected_svcs,
+                                ctx["total_part1"],
+                                jianan_only=ctx["jianan"],
+                            )
+                        cc_total = cc_preview.get("合计(万元)", 0)
+                        cc_details = cc_preview.get("明细", [])
+                        st.markdown("**预览**：")
+                        for d in cc_details:
+                            st.markdown(
+                                f"- {d['服务类型']}：**{d['费用(万元)']}** 万元"
+                            )
+                        st.caption(f"造价咨询费合计：**{cc_total:.4f}** 万元")
+                    except Exception:
+                        pass
+                elif is_huanping:
+                    from fee_engine import calc_huanping_multi
+                    hp_coefs = ctx.get("coef_overrides", {}).get(fee_name, {})
+                    hp_ind_coef = hp_coefs.get("industry_coef", 1.0)
+                    hp_sens_coef = hp_coefs.get("sensitivity_coef", 1.0)
+                    try:
+                        hp_preview = calc_huanping_multi(
+                            ctx["total_part1"],
+                            selected_svcs,
+                            industry_coef=hp_ind_coef,
+                            sensitivity_coef=hp_sens_coef,
+                        )
+                        hp_total = hp_preview.get("合计(万元)", 0)
+                        hp_details = hp_preview.get("明细", [])
+                        st.markdown("**预览**：")
+                        for d in hp_details:
+                            st.markdown(
+                                f"- {d['服务类型']}：**{d['结果(万元)']}** "
+                                f"（中值 **{d['结果中值(万元)']}** 万元）"
+                            )
+                        st.caption(f"环评费合计：**{hp_total:.4f}** 万元")
+                    except Exception:
+                        pass
 
-                        prev_selected_svcs = ctx.get("service_selections", {}).get(fee_name, default_svcs)
-
-                        selected_svcs: list[str] = []
-                        svc_col1, svc_col2 = st.columns(2)
-                        for i, svc_info in enumerate(all_svcs):
-                            svc_name = svc_info["name"]
-                            svc_label = svc_info["label"]
-                            checked = svc_name in prev_selected_svcs
-                            col = svc_col1 if i < 2 else svc_col2
-                            with col:
-                                if st.checkbox(
-                                    svc_label,
-                                    value=checked,
-                                    key=f"cascade_svc_{fee_name}_{svc_name}",
-                                ):
-                                    selected_svcs.append(svc_name)
-
-                        if not selected_svcs:
-                            st.warning("⚠️ 请至少选择一项服务类型")
-                        elif is_cost_consulting:
-                            # 实时预览（造价咨询费）
-                            try:
-                                if _is_hebei_project(ctx["query"]):
-                                    from fee_engine import calc_cost_consulting_multi_hebei
-                                    cc_preview = calc_cost_consulting_multi_hebei(
-                                        selected_svcs,
-                                        ctx["total_part1"],  # 建安费
-                                        total_investment=ctx.get("_total_invest"),
-                                        professional_coef=1.0,
-                                        discount_coef=1.0,
-                                    )
-                                else:
-                                    from fee_engine import calc_cost_consulting_multi
-                                    cc_preview = calc_cost_consulting_multi(
-                                        selected_svcs,
-                                        ctx["total_part1"],
-                                        jianan_only=ctx["jianan"],
-                                    )
-                                cc_total = cc_preview.get("合计(万元)", 0)
-                                cc_details = cc_preview.get("明细", [])
-                                st.markdown("**预览**：")
-                                for d in cc_details:
-                                    st.markdown(
-                                        f"- {d['服务类型']}：**{d['费用(万元)']}** 万元"
-                                    )
-                                st.caption(f"造价咨询费合计：**{cc_total:.4f}** 万元")
-                            except Exception:
-                                pass
-                        else:
-                            # 实时预览（环评费）
-                            from fee_engine import calc_huanping_multi
-                            hp_coefs = ctx["coef_overrides"].get(fee_name, {})
-                            hp_ind_coef = hp_coefs.get("industry_coef", 1.0)
-                            hp_sens_coef = hp_coefs.get("sensitivity_coef", 1.0)
-                            try:
-                                hp_preview = calc_huanping_multi(
-                                    ctx["total_part1"],
-                                    selected_svcs,
-                                    industry_coef=hp_ind_coef,
-                                    sensitivity_coef=hp_sens_coef,
-                                )
-                                hp_total = hp_preview.get("合计(万元)", 0)
-                                hp_details = hp_preview.get("明细", [])
-                                st.markdown("**预览**：")
-                                for d in hp_details:
-                                    st.markdown(
-                                        f"- {d['服务类型']}：**{d['结果(万元)']}** "
-                                        f"（中值 **{d['结果中值(万元)']}** 万元）"
-                                    )
-                                st.caption(f"环评费合计：**{hp_total:.4f}** 万元")
-                            except Exception:
-                                pass
-
-                        # 持久化服务选择
-                        if "service_selections" not in ctx:
-                            ctx["service_selections"] = {}
-                        ctx["service_selections"][fee_name] = selected_svcs
-                        st.session_state.pending_fee_selection["service_selections"] = ctx["service_selections"]
+                if "service_selections" not in ctx:
+                    ctx["service_selections"] = {}
+                ctx["service_selections"][fee_name] = selected_svcs
+                st.session_state.pending_fee_selection["service_selections"] = ctx["service_selections"]
 
             st.markdown("---")
 
