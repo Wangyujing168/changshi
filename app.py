@@ -14,6 +14,67 @@ from fee_engine import (
     _FEE_LABELS,
 )
 
+# ===== 政策依据可点击链接 =====
+
+_POLICY_URLS: dict[str, str] = {
+    # 河北省
+    "冀建市研[2017]2号": "https://www.baidu.com/s?wd=冀建市研[2017]2号+工程造价咨询服务收费管理暂行办法",
+    "冀价行费[2018]57号": "https://www.baidu.com/s?wd=冀价行费[2018]57号+施工图审查费",
+    # 天津市
+    "津价房地[2008]136号": "https://www.baidu.com/s?wd=津价房地[2008]136号+建设工程造价咨询服务",
+    "津价管[2011]46号": "https://www.baidu.com/s?wd=津价管[2011]46号+施工图设计文件审查",
+    # 国家层面
+    "计价格[2002]10号": "https://www.baidu.com/s?wd=计价格[2002]10号+工程勘察设计收费管理规定",
+    "发改价格[2007]670号": "https://www.baidu.com/s?wd=发改价格[2007]670号+建设工程监理收费",
+    "计价格[2002]125号": "https://www.baidu.com/s?wd=计价格[2002]125号+环境影响咨询收费",
+    "计价格[1999]1283号": "https://www.baidu.com/s?wd=计价格[1999]1283号+可行性研究费",
+    "计价格[2002]1980号": "https://www.baidu.com/s?wd=计价格[2002]1980号+招标代理服务收费",
+    "建市[2007]86号": "https://www.baidu.com/s?wd=建市[2007]86号+工程设计资质标准",
+}
+
+
+def show_policy_badge(policy_id: str):
+    """Display a clickable policy badge in the Streamlit UI.
+
+    Renders a styled box with a link to search for the policy document.
+    Falls back to st.info() if the policy ID is unknown.
+    """
+    url = _POLICY_URLS.get(policy_id)
+    if url:
+        st.markdown(
+            f'<div style="background-color:#d4e6f1;padding:10px 14px;'
+            f'border-radius:4px;text-align:center;border:1px solid #aed6f1;">'
+            f'<a href="{url}" target="_blank" rel="noopener"'
+            f' style="color:#0d47a1;text-decoration:none;font-weight:bold;font-size:14px;">'
+            f'📋 {policy_id}</a></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info(policy_id)
+
+
+def _basis_with_links(basis_text: str) -> str:
+    """Insert clickable HTML links into a 依据 text for panel captions."""
+    result = basis_text
+    for pid, url in _POLICY_URLS.items():
+        if pid in result:
+            result = result.replace(
+                pid,
+                f'<a href="{url}" target="_blank" rel="noopener"'
+                f' style="text-decoration:none;color:#0d47a1;">{pid}</a>',
+            )
+    return result
+
+
+def _basis_md_links(basis_text: str) -> str:
+    """Insert clickable markdown links into a 依据 text for chat messages."""
+    result = basis_text
+    for pid, url in _POLICY_URLS.items():
+        if pid in result:
+            result = result.replace(pid, f"[{pid}]({url})")
+    return result
+
+
 # ===== 页面设置 =====
 st.set_page_config(
     page_title="造价智能助手",
@@ -92,7 +153,8 @@ def _render_engine_card(fee_result):
     with col2:
         st.metric(label=f"金额（{unit}）", value=f"{result_val}")
     with col3:
-        st.caption(f"依据：{fee_result.get('依据', '')}")
+        basis_text = _basis_with_links(fee_result.get('依据', ''))
+        st.markdown(f"<small>依据：{basis_text}</small>", unsafe_allow_html=True)
 
     with st.expander("查看计算明细", expanded=True):
         if params:
@@ -620,7 +682,7 @@ if "pending_rate_select" in st.session_state:
         with col_badge:
             st.info(f"共 {len(detail)} 档费率")
 
-        st.caption(f"📜 **依据**：{basis}")
+        st.markdown(f"<small>📜 **依据**：{_basis_with_links(basis)}</small>", unsafe_allow_html=True)
 
         # 计算过程折叠
         if steps:
@@ -685,7 +747,7 @@ if "pending_rate_select" in st.session_state:
                     )
                 response = (
                     f"## {fee_name}\n\n"
-                    f"**依据**：{basis}\n\n"
+                    f"**依据**：{_basis_md_links(basis)}\n\n"
                     f"**选定费率**：{selected_rate}\n\n"
                     f"**费用**：{selected_fee} 万元"
                     f"{discount_text}\n\n"
@@ -730,7 +792,7 @@ if "pending_coef_select" in st.session_state:
         with col_badge:
             st.info(f"{len(coefs)} 个系数")
 
-        st.caption(f"📜 **依据**：{basis}")
+        st.markdown(f"<small>📜 **依据**：{_basis_with_links(basis)}</small>", unsafe_allow_html=True)
 
         # ── 各系数下拉选择器 ──
         selected_coefs: dict = {}
@@ -917,7 +979,7 @@ if "pending_coef_select" in st.session_state:
                     final_fee = discounted_fee
                 response = (
                     f"## {fee_name}\n\n"
-                    f"**依据**：{basis}\n\n"
+                    f"**依据**：{_basis_md_links(basis)}\n\n"
                     f"**调整后系数**：{coef_summary}\n\n"
                     f"**费用**：{recalc_fee} 万元"
                     f"{discount_text}\n\n"
@@ -955,7 +1017,7 @@ if "pending_simple_fee" in st.session_state:
         with col_badge:
             st.info(f"基准：{base_fee_wan} 万元")
 
-        st.caption(f"📜 **依据**：{basis}")
+        st.markdown(f"<small>📜 **依据**：{_basis_with_links(basis)}</small>", unsafe_allow_html=True)
 
         # ── 计算步骤 ──
         steps = fee_result.get("计算步骤", [])
@@ -1054,7 +1116,7 @@ if "pending_simple_fee" in st.session_state:
 
         final_response = (
             f"## {fee_name}\n\n"
-            f"**依据**：{basis}\n\n"
+            f"**依据**：{_basis_md_links(basis)}\n\n"
             f"{steps_md}"
             f"---\n\n"
             f"### 计算结果\n\n"
@@ -1098,15 +1160,15 @@ if "pending_cost_consulting" in st.session_state:
             st.markdown("## 📋 造价咨询服务选择")
         with col_badge:
             if is_hebei:
-                st.info("冀建市研[2017]2号")
+                show_policy_badge("冀建市研[2017]2号")
             else:
-                st.info("津价房地[2008]136号")
+                show_policy_badge("津价房地[2008]136号")
 
         if is_hebei:
             # ─── 河北省模式 ───
-            st.caption(f"**建安工程造价**：{base_amount} 万元（设备费不计入取费基数）")
+            st.caption(f"**建安费**：{base_amount} 万元（设备费不计入取费基数）")
             if total_invest:
-                st.caption(f"**工程总投资**：{total_invest} 万元（用于竣工决算编制/造价鉴定）")
+                st.caption(f"**工程总投资**：{total_invest} 万元（用于投资估算/概算编制/概算审核/竣工决算编制/造价鉴定）")
             st.caption("请勾选需要的服务子项，每项独立按差额定率分档累进计算后求和。")
 
             # 专业工程调整系数
@@ -1131,19 +1193,26 @@ if "pending_cost_consulting" in st.session_state:
             st.markdown("---")
 
             # ── 分类展示服务子项（河北省）──
-            st.markdown("### 编制类（基数 = 建安工程造价）")
+            st.markdown("### 编制类")
             selected_services: list[str] = []
             bianzhi_hebei = [
-                "投资估算", "概算编制", "预算编制",
-                "工程量清单编制(审核)", "招标控制价编制(审核)",
-                "结算编制", "竣工决算编制",
+                "投资估算", "经济评价", "概算编制",
+                "预算编制", "工程量清单编制(审核)",
+                "招标控制价编制(审核)", "结算编制",
+                "竣工决算编制",
             ]
             cols = st.columns(3)
             for i, svc in enumerate(bianzhi_hebei):
                 with cols[i % 3]:
                     label = svc
-                    if svc == "竣工决算编制":
+                    if svc in ("投资估算", "经济评价"):
+                        label = f"{svc}（基数=投资估算造价）"
+                    elif svc == "概算编制":
+                        label = f"{svc}（基数=设计概算造价）"
+                    elif svc == "竣工决算编制":
                         label = f"{svc}（基数=总投资）"
+                    elif svc in ("预算编制", "工程量清单编制(审核)", "招标控制价编制(审核)", "结算编制"):
+                        label = f"{svc}（基数=建安费）"
                     if st.checkbox(label, value=(svc == "预算编制"), key=f"cc_hb_{svc}"):
                         selected_services.append(svc)
 
@@ -1152,7 +1221,12 @@ if "pending_cost_consulting" in st.session_state:
             cols2 = st.columns(3)
             for i, svc in enumerate(shenhe_hebei):
                 with cols2[i % 3]:
-                    if st.checkbox(svc, key=f"cc_hb_{svc}"):
+                    label = svc
+                    if svc == "概算审核":
+                        label = f"{svc}（基数=设计概算造价）"
+                    elif svc in ("预算审核", "结算审核"):
+                        label = f"{svc}（基数=建安费）"
+                    if st.checkbox(label, key=f"cc_hb_{svc}"):
                         selected_services.append(svc)
 
             st.markdown("### 全过程 / 其他")
@@ -1164,7 +1238,11 @@ if "pending_cost_consulting" in st.session_state:
             for i, svc in enumerate(quanguocheng_hebei):
                 with cols3[i % 3]:
                     label = svc
-                    if svc == "工程造价鉴定":
+                    if svc == "投标报价分析(清标)":
+                        label = f"{svc}（基数=最高投标限价）"
+                    elif svc in ("施工阶段造价咨询", "全过程造价咨询"):
+                        label = f"{svc}（基数=建安费）"
+                    elif svc == "工程造价鉴定":
                         label = f"{svc}（基数=鉴定标的额）"
                     if st.checkbox(label, key=f"cc_hb_{svc}"):
                         selected_services.append(svc)
@@ -1173,7 +1251,7 @@ if "pending_cost_consulting" in st.session_state:
 
             # ── 需要总投资的子项 ──
             calc_total_invest = total_invest
-            needs_total = [s for s in selected_services if s in ("竣工决算编制", "工程造价鉴定")]
+            needs_total = [s for s in selected_services if s in ("投资估算", "经济评价", "概算编制", "概算审核", "竣工决算编制", "工程造价鉴定")]
             if needs_total and total_invest is None:
                 st.warning(
                     f"⚠️ **{'、'.join(needs_total)}**需要**工程总投资/鉴定标的额**，"
@@ -1183,8 +1261,8 @@ if "pending_cost_consulting" in st.session_state:
                     "总投资 / 鉴定标的额（万元）",
                     min_value=0.0,
                     value=float(base_amount) if base_amount else 0.0,
-                    step=10.0,
-                    format="%.0f",
+                    step=1.0,
+                    format="%.2f",
                     key="cc_hebei_total_invest",
                     help="竣工决算编制以总投资为基数，工程造价鉴定以鉴定标的额为基数。",
                 )
@@ -1299,8 +1377,9 @@ if "pending_cost_consulting" in st.session_state:
 
                     final_response = (
                         f"## 造价咨询费（河北省）\n\n"
-                        f"**依据**：《河北省建设工程造价咨询服务收费管理暂行办法》（冀建市研[2017]2号）\n\n"
-                        f"**计费基数**：建安工程造价 {base_amount} 万元（不含设备费）\n"
+                        f"**依据**：{_basis_md_links('《河北省建设工程造价咨询服务收费管理暂行办法》（冀建市研[2017]2号）')}\n\n"
+                        f"**建安费**：{base_amount} 万元（不含设备费）\n"
+                        f"（投资估算/概算编制/概算审核/竣工决算编制以总投资为基数，详见明细）\n"
                         f"{prof_text}\n"
                         f"{detail_md}\n"
                         f"---\n\n"
@@ -1378,8 +1457,8 @@ if "pending_cost_consulting" in st.session_state:
                     "工程总投资（万元）",
                     min_value=0.0,
                     value=float(base_amount) if base_amount else 0.0,
-                    step=10.0,
-                    format="%.0f",
+                    step=1.0,
+                    format="%.2f",
                     key="cc_total_invest",
                     help="审核概算以工程总投资为计费基数，非工程费用。",
                 )
@@ -1489,7 +1568,7 @@ if "pending_cost_consulting" in st.session_state:
 
                     final_response = (
                         f"## 造价咨询费\n\n"
-                        f"**依据**：《天津市建设工程造价咨询服务项目和价格标准》（津价房地[2008]136号）\n\n"
+                        f"**依据**：{_basis_md_links('《天津市建设工程造价咨询服务项目和价格标准》（津价房地[2008]136号）')}\n\n"
                         f"**计费基数**：工程费用 {base_amount} 万元（建安 {jianan} 万 + 设备 {shebei or 0} 万）\n\n"
                         f"{detail_md}\n"
                         f"---\n\n"
@@ -1872,7 +1951,7 @@ if "pending_dependent_fee" in st.session_state:
 
                         final_response = (
                             f"## {fee_name}\n\n"
-                            f"**依据**：{basis}\n\n"
+                            f"**依据**：{_basis_md_links(basis)}\n\n"
                             f"### 依赖费种\n\n"
                             + "\n".join(dep_parts) +
                             f"\n\n---\n\n"
@@ -2069,7 +2148,7 @@ if "pending_huanping" in st.session_state:
 
                     final_response = (
                         f"## 环境影响咨询费\n\n"
-                        f"**依据**：《关于规范环境影响咨询收费有关问题的通知》"
+                        f"**依据**：{_basis_md_links('《关于规范环境影响咨询收费有关问题的通知》（计价格[2002]125号）')}"
                         f"（计价格[2002]125号）\n\n"
                         f"**参数**："
                         f"估算投资额 {amount_wan:.0f} 万元，"
@@ -2364,7 +2443,7 @@ if "pending_fee_selection" in st.session_state:
                     f"{fd['label']} — 费率选择",
                     expanded=False,
                 ):
-                    st.caption(f"📜 依据：{config.get('basis', '')}")
+                    st.markdown(f"<small>📜 依据：{_basis_with_links(config.get('basis', ''))}</small>", unsafe_allow_html=True)
                     st.caption(
                         f"计费基数：{ctx['total_part1']:.0f} 万元"
                     )
@@ -3152,7 +3231,7 @@ if prompt:
                                     )
                             response = (
                                 f"## 招标代理服务费\n\n"
-                                f"**依据**：《招标代理业务收费管理暂行办法》（计价格[2002]1980号）\n\n"
+                                f"**依据**：{_basis_md_links('《招标代理业务收费管理暂行办法》（计价格[2002]1980号）')}\n\n"
                                 f"### 依赖费种\n\n{dep_md}\n\n"
                                 f"### 费用明细\n\n{detail_md}\n"
                                 f"### 💰 合计：**{discounted_display} {discounted_unit}**{discount_text}\n\n"
@@ -3189,7 +3268,7 @@ if prompt:
                             if is_shencha:
                                 response = (
                                     f"## {fee_name}\n\n"
-                                    f"**依据**：{basis}\n\n"
+                                    f"**依据**：{_basis_md_links(basis)}\n\n"
                                     f"{steps_md}"
                                     f"---\n\n"
                                     f"### 计算结果\n\n"
@@ -3214,7 +3293,7 @@ if prompt:
                                     svc_table += "\n"
                                 response = (
                                     f"## {fee_name}\n\n"
-                                    f"**依据**：{basis}\n\n"
+                                    f"**依据**：{_basis_md_links(basis)}\n\n"
                                     f"{steps_md}"
                                     f"---\n\n"
                                     f"{svc_table}"
@@ -3251,7 +3330,7 @@ if prompt:
                                 if n_svc > 0:
                                     response = (
                                         f"## {fee_name}\n\n"
-                                        f"**依据**：{basis}\n\n"
+                                        f"**依据**：{_basis_md_links(basis)}\n\n"
                                         f"{svc_table}"
                                         f"{steps_md}"
                                         f"---\n\n"
@@ -3262,7 +3341,7 @@ if prompt:
                                 else:
                                     response = (
                                         f"## {fee_name}\n\n"
-                                        f"**依据**：{basis}\n\n"
+                                        f"**依据**：{_basis_md_links(basis)}\n\n"
                                         f"{steps_md}"
                                         f"---\n\n"
                                         f"### 计算结果\n\n"
@@ -3299,7 +3378,7 @@ if prompt:
 
                                 response = (
                                     f"## {fee_name}\n\n"
-                                    f"**依据**：{basis}\n\n"
+                                    f"**依据**：{_basis_md_links(basis)}\n\n"
                                     f"{steps_md}"
                                     f"{detail_md}"
                                     f"---\n\n"
@@ -3457,7 +3536,7 @@ if prompt:
 
                 with st.expander("查看计费依据"):
                     st.markdown(f"**{fee_result.get('费种', '')}**")
-                    st.caption(f"依据：{fee_result.get('依据', '')}")
+                    st.markdown(f"<small>依据：{_basis_with_links(fee_result.get('依据', ''))}</small>", unsafe_allow_html=True)
                     st.caption(f"计费方式：{fee_result.get('计费方式', '')}")
                     rate_table = fee_result.get("费率表", [])
                     if rate_table:

@@ -454,41 +454,46 @@ _HEBEI_COST_CONSULTING_BRACKETS: list[float] = [200, 500, 2000, 10000, float("in
 # 河北省费率表（单位：‰）
 # 备注：工程建设设备费用不计入取费基数（建安费为基数，部分类型用总投资/概算额）
 _HEBEI_COST_CONSULTING_RATES: dict[str, dict] = {
-    # ── 编制类（基数 = 建安工程造价）──
-    "预算编制": {
-        "rates": [4.0, 3.5, 3.0, 2.5, 2.0],
-        "base_type": "建安工程造价",
-        "base_from": "jianan",
+    # ── 编制类 ──
+    "投资估算": {
+        "rates": [0.8, 0.7, 0.6, 0.5, 0.3],
+        "base_type": "投资估算造价",
+        "base_from": "total_investment",
         "category": "编制",
     },
-    "结算编制": {
-        "rates": [4.5, 4.0, 3.5, 3.0, 2.5],
-        "base_type": "建安工程造价",
-        "base_from": "jianan",
+    "经济评价": {
+        "rates": [0.8, 0.7, 0.6, 0.5, 0.3],
+        "base_type": "投资估算造价",
+        "base_from": "total_investment",
         "category": "编制",
     },
     "概算编制": {
         "rates": [3.0, 2.5, 2.0, 1.8, 1.6],
-        "base_type": "设计概算额",
+        "base_type": "设计概算造价",
+        "base_from": "total_investment",
+        "category": "编制",
+    },
+    "预算编制": {
+        "rates": [4.0, 3.5, 3.0, 2.5, 2.0],
+        "base_type": "建安费",
         "base_from": "jianan",
         "category": "编制",
     },
     "工程量清单编制(审核)": {
         "rates": [5.0, 4.0, 3.0, 2.2, 1.8],
-        "base_type": "建安工程造价",
+        "base_type": "建安费",
         "base_from": "jianan",
         "category": "编制",
-        "note": "按建安工程费取费",
     },
     "招标控制价编制(审核)": {
         "rates": [2.0, 1.8, 1.6, 1.4, 1.2],
-        "base_type": "建安工程造价",
+        "base_type": "建安费",
         "base_from": "jianan",
         "category": "编制",
     },
-    "投资估算": {
-        "rates": [0.8, 0.7, 0.6, 0.5, 0.3],
-        "base_type": "投资估算额",
+    "结算编制": {
+        "rates": [5.0, 4.5, 4.0, 3.5, 3.0],
+        "base_type": "建安费",
         "base_from": "jianan",
         "category": "编制",
     },
@@ -499,23 +504,24 @@ _HEBEI_COST_CONSULTING_RATES: dict[str, dict] = {
         "category": "编制",
     },
     # ── 审核类 ──
+    "概算审核": {
+        "rates": [2.0, 1.8, 1.5, 1.2, 1.0],
+        "base_type": "设计概算造价",
+        "base_from": "total_investment",
+        "category": "审核",
+    },
     "预算审核": {
         "rates": [3.2, 2.8, 2.4, 2.0, 1.6],
-        "base_type": "建安工程造价",
+        "base_type": "建安费",
         "base_from": "jianan",
         "category": "审核",
     },
     "结算审核": {
-        "rates": [5.0, 4.5, 4.0, 3.5, 3.0],
-        "base_type": "建安工程造价",
+        "rates": [4.5, 4.0, 3.5, 3.0, 2.5],
+        "base_type": "建安费",
         "base_from": "jianan",
         "category": "审核",
-    },
-    "概算审核": {
-        "rates": [2.0, 1.8, 1.5, 1.2, 1.0],
-        "base_type": "设计概算额",
-        "base_from": "jianan",
-        "category": "审核",
+        "note": "计费=(1)基本收费+(2)效益收费。效益收费=(核减+核增)×8%",
     },
     # ── 其他 ──
     "投标报价分析(清标)": {
@@ -524,20 +530,20 @@ _HEBEI_COST_CONSULTING_RATES: dict[str, dict] = {
         "base_from": "jianan",
         "category": "其他",
     },
-    # 施工阶段造价咨询：仅前3档有费率，>2000万按驻场人月费协商
+    # 施工阶段造价咨询：≤500万不适用（费率=0），实际从500万起算
     "施工阶段造价咨询": {
-        "rates": [8.0, 6.0, 4.0],
-        "base_type": "建安工程造价",
+        "rates": [0.0, 0.0, 8.0, 6.0, 4.0],
+        "base_type": "建安费",
         "base_from": "jianan",
         "category": "全过程",
-        "note": "计费=(1)基本收费+(2)效益收费。超过2000万元时，驻场人员10000~20000元/月；效益收费=(核减+核增)×5%",
+        "note": "计费=(1)基本收费+(2)效益收费。X≤500万不建议采用此模式，费率=0；效益收费=(核减+核增)×5%；驻场人员10000~20000元/月",
     },
     "全过程造价咨询": {
-        "rates": [13.0, 10.0, 8.0],
-        "base_type": "建安工程造价",
+        "rates": [0.0, 0.0, 13.0, 10.0, 8.0],
+        "base_type": "建安费",
         "base_from": "jianan",
         "category": "全过程",
-        "note": "计费=(1)基本收费+(2)效益收费。超过2000万元时，驻场人员10000~20000元/月；效益收费=(核减+核增)×5%",
+        "note": "计费=(1)基本收费+(2)效益收费。X≤500万不建议采用，费率=0；驻场人员10000~20000元/月；效益收费=(核减+核增)×5%",
     },
     "工程造价鉴定": {
         "rates": [12.0, 10.0, 8.0, 6.0, 5.0],
@@ -550,6 +556,7 @@ _HEBEI_COST_CONSULTING_RATES: dict[str, dict] = {
 # 河北省造价咨询服务类型展示顺序
 _HEBEI_COST_CONSULTING_SERVICE_ORDER: list[str] = [
     "投资估算",
+    "经济评价",
     "概算编制",
     "概算审核",
     "预算编制",
@@ -601,6 +608,7 @@ def _detect_hebei_cost_consulting_type(query: str) -> str | None:
         ("招标控制价", "招标控制价编制(审核)"),
         ("投标报价分析|清标", "投标报价分析(清标)"),
         ("投资估算", "投资估算"),
+        ("经济评价|国民经济评价|财务评价", "经济评价"),
         ("概算编[制审]|编制.*概算", "概算编制"),
         ("概算审核", "概算审核"),
         ("概算", "概算编制"),
@@ -689,8 +697,9 @@ def calc_cost_consulting_hebei(
     total_fee = round(total_fee * professional_coef, 4)
 
     # 最低收费检查（3000元 = 0.3万元）
+    # 仅当实际计算费用 > 0 且低于最低标准时才适用（费率=0的档位不触发最低收费）
     min_fee_wan = _HEBEI_COST_CONSULTING_MIN_FEE / 10000.0
-    applied_min = total_fee < min_fee_wan
+    applied_min = total_fee > 0 and total_fee < min_fee_wan
     if applied_min:
         total_fee = round(min_fee_wan, 4)
 
@@ -4017,7 +4026,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             base_amount = jianan_only  # Hebei uses 建安费 only
 
             total_invest = _extract_total_investment(query)
-            if total_invest is None and svc_type in ("竣工决算编制", "工程造价鉴定"):
+            if total_invest is None and svc_type in ("投资估算", "经济评价", "概算编制", "概算审核", "竣工决算编制", "工程造价鉴定"):
                 cascade_r = calc_cascade(query)
                 if cascade_r:
                     total_invest = cascade_r["结果汇总"]["项目总投资(万元)"]
