@@ -11,7 +11,7 @@ from fee_engine import (
     _HEBEI_PROFESSIONAL_COEFFICIENTS,
     resolve_dependent_calc, calc_huanping_multi,
     _build_fee_selection_meta, _TIER_DEPS, _calc_all_fees,
-    _FEE_LABELS,
+    _FEE_LABELS, _is_hebei_project,
 )
 
 # ===== 政策依据可点击链接 =====
@@ -2344,15 +2344,31 @@ if "pending_fee_selection" in st.session_state:
                     ctx["coef_overrides"][fee_name] = overrides
                     st.session_state.pending_fee_selection["coef_overrides"] = ctx["coef_overrides"]
 
-                    # ── Service type checkboxes for 环评费 ──
+                    # ── Service type checkboxes ──
                     if fd.get("has_services") and fd.get("service_config"):
-                        st.markdown("---")
-                        st.markdown("#### 📋 选择服务类型")
-                        st.caption("勾选需要计算的环境影响咨询服务类型。")
-
                         service_config = fd["service_config"]
-                        all_svcs = service_config["services"]
-                        prev_selected_svcs = ctx.get("service_selections", {}).get(fee_name, service_config.get("default_selected", ["编制报告书"]))
+                        is_cost_consulting = (fee_name == "造价咨询费")
+
+                        st.markdown("---")
+                        if is_cost_consulting:
+                            st.markdown("#### 📋 选择造价咨询服务子项")
+                            # 根据项目地域选择服务列表
+                            if _is_hebei_project(ctx["query"]):
+                                all_svcs = service_config.get("services_hebei", [])
+                                default_svcs = service_config.get("default_selected_hebei", ["预算编制"])
+                                svc_caption = "勾选需要计算的河北省造价咨询服务子项（冀建市研[2017]2号）。"
+                            else:
+                                all_svcs = service_config.get("services_tianjin", [])
+                                default_svcs = service_config.get("default_selected_tianjin", ["编制施工图预算"])
+                                svc_caption = "勾选需要计算的造价咨询服务子项（津价房地[2008]136号）。"
+                            st.caption(svc_caption)
+                        else:
+                            st.markdown("#### 📋 选择服务类型")
+                            st.caption("勾选需要计算的环境影响咨询服务类型。")
+                            all_svcs = service_config["services"]
+                            default_svcs = service_config.get("default_selected", ["编制报告书"])
+
+                        prev_selected_svcs = ctx.get("service_selections", {}).get(fee_name, default_svcs)
 
                         selected_svcs: list[str] = []
                         svc_col1, svc_col2 = st.columns(2)
@@ -2365,20 +2381,48 @@ if "pending_fee_selection" in st.session_state:
                                 if st.checkbox(
                                     svc_label,
                                     value=checked,
-                                    key=f"cascade_hpsvc_{fee_name}_{svc_name}",
+                                    key=f"cascade_svc_{fee_name}_{svc_name}",
                                 ):
                                     selected_svcs.append(svc_name)
 
                         if not selected_svcs:
                             st.warning("⚠️ 请至少选择一项服务类型")
+                        elif is_cost_consulting:
+                            # 实时预览（造价咨询费）
+                            try:
+                                if _is_hebei_project(ctx["query"]):
+                                    from fee_engine import calc_cost_consulting_multi_hebei
+                                    cc_preview = calc_cost_consulting_multi_hebei(
+                                        selected_svcs,
+                                        ctx["total_part1"],  # 建安费
+                                        total_investment=ctx.get("_total_invest"),
+                                        professional_coef=1.0,
+                                        discount_coef=1.0,
+                                    )
+                                else:
+                                    from fee_engine import calc_cost_consulting_multi
+                                    cc_preview = calc_cost_consulting_multi(
+                                        selected_svcs,
+                                        ctx["total_part1"],
+                                        jianan_only=ctx["jianan"],
+                                    )
+                                cc_total = cc_preview.get("合计(万元)", 0)
+                                cc_details = cc_preview.get("明细", [])
+                                st.markdown("**预览**：")
+                                for d in cc_details:
+                                    st.markdown(
+                                        f"- {d['服务类型']}：**{d['费用(万元)']}** 万元"
+                                    )
+                                st.caption(f"造价咨询费合计：**{cc_total:.4f}** 万元")
+                            except Exception:
+                                pass
                         else:
-                            # 实时预览（调用 calc_huanping_multi）
-                            from fee_engine import HUANPING_INDUSTRY_OPTIONS, HUANPING_SENSITIVITY_OPTIONS
+                            # 实时预览（环评费）
+                            from fee_engine import calc_huanping_multi
                             hp_coefs = ctx["coef_overrides"].get(fee_name, {})
                             hp_ind_coef = hp_coefs.get("industry_coef", 1.0)
                             hp_sens_coef = hp_coefs.get("sensitivity_coef", 1.0)
                             try:
-                                from fee_engine import calc_huanping_multi
                                 hp_preview = calc_huanping_multi(
                                     ctx["total_part1"],
                                     selected_svcs,
@@ -2603,6 +2647,56 @@ if "pending_fee_selection" in st.session_state:
                             preview_raw.get("T0小计(万元)", 0)
                             + preview_raw.get("T1小计(万元)", 0)
                             + new_t2
+                        )
+                        preview_raw["二类费合计(万元)"] = round(fee_total_raw, 4)
+                        # 重新计算总投资
+                        preview_raw["总投资(万元)"] = round(
+                            ctx["total_part1"] + fee_total_raw, 4)
+                        preview_raw["项目总投资(万元)"] = round(
+                            ctx["total_part1"] + fee_total_raw + preview_raw.get("预备费小计(万元)", 0), 4)
+                    except Exception:
+                        pass  # 失败时保留原始值
+
+            # ── 造价咨询费多服务类型计算 ──
+            if "造价咨询费" in new_selected:
+                cc_svcs = ctx.get("service_selections", {}).get("造价咨询费", [])
+                if cc_svcs:
+                    try:
+                        if _is_hebei_project(ctx["query"]):
+                            from fee_engine import calc_cost_consulting_multi_hebei
+                            cc_multi = calc_cost_consulting_multi_hebei(
+                                cc_svcs,
+                                ctx["total_part1"],  # 建安费
+                                total_investment=None,
+                                professional_coef=1.0,
+                                discount_coef=1.0,
+                            )
+                        else:
+                            from fee_engine import calc_cost_consulting_multi
+                            cc_multi = calc_cost_consulting_multi(
+                                cc_svcs,
+                                ctx["total_part1"],
+                                jianan_only=ctx["jianan"],
+                            )
+                        cc_total = cc_multi.get("合计(万元)", 0)
+                        # 添加/覆盖到 numerical
+                        old_cc = numerical.get("造价咨询费(万元)", 0)
+                        numerical["造价咨询费(万元)"] = cc_total
+                        # 更新原始结果
+                        preview_raw["原始结果"]["造价咨询费"] = cc_multi
+                        # 重新计算 T0 小计（造价咨询费是 Tier 0）
+                        t0_keys = [
+                            "监理费", "工程设计费", "勘察费",
+                            "劳动安全卫生评审费", "场地准备费及临时设施费", "工程保险费",
+                            "造价咨询费",
+                        ]
+                        new_t0 = sum(numerical.get(f"{k}(万元)", 0) for k in t0_keys)
+                        preview_raw["T0小计(万元)"] = round(new_t0, 4)
+                        # 重新计算二类费合计
+                        fee_total_raw = (
+                            new_t0
+                            + preview_raw.get("T1小计(万元)", 0)
+                            + preview_raw.get("T2小计(万元)", 0)
                         )
                         preview_raw["二类费合计(万元)"] = round(fee_total_raw, 4)
                         # 重新计算总投资
@@ -2933,6 +3027,11 @@ if prompt:
                             "rate_overrides": {},
                             "service_selections": {
                                 "环境影响咨询费": ["编制报告书"],
+                                "造价咨询费": (
+                                    ["预算编制"]
+                                    if _is_hebei_project(prompt)
+                                    else ["编制施工图预算"]
+                                ),
                             },
                             "custom_fees": [],
                             "discount_coef": 1.0,

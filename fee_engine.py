@@ -4487,6 +4487,7 @@ def format_for_llm(result: dict) -> str:
 _SKIP_FEES: dict[str, str] = {
     "招标代理费": "需要中标金额，无法根据建安+设备自动计算",
     "水土保持费": "需要土建投资额，无法根据建安+设备自动计算",
+    "造价咨询费": "需要选择具体服务子项（预算编制/结算审核等）",
 }
 
 # 费种依赖层级
@@ -4519,6 +4520,7 @@ _FEE_LABELS: dict[str, str] = {
     "环境影响咨询费": "环境影响咨询费",
     "预备费": "预备费（基本预备费）",
     "招标代理费": "招标代理服务费",
+    "造价咨询费": "工程造价咨询服务费",
 }
 
 
@@ -4943,6 +4945,57 @@ def _build_fee_selection_meta(
         "service_config": None,
         "depends_on": ["监理费", "工程设计费", "勘察费"],
         "default_value_wan": round(zhaobiao_val, 4) if zhaobiao_val else 0,
+        "is_from_skip": True,  # 标记为来自 _SKIP_FEES
+    })
+
+    # 造价咨询费：需要选择具体服务子项（预算编制/结算审核等）
+    # 支持天津（津价房地[2008]136号）和河北（冀建市研[2017]2号）两套规则
+    _cc_tj_services = [
+        {"name": "编制施工图预算", "label": "编制施工图预算（基数=工程费用）"},
+        {"name": "编制工程量清单", "label": "编制工程量清单（基数=工程费用）"},
+        {"name": "编制标底(含清单)", "label": "编制标底，含清单（基数=工程费用）"},
+        {"name": "编制竣工结算", "label": "编制竣工结算（基数=工程费用）"},
+        {"name": "施工阶段全过程造价控制", "label": "施工阶段全过程造价控制（基数=工程费用）"},
+        {"name": "审核概算", "label": "审核概算（基数=总投资）"},
+        {"name": "审核预算、标底", "label": "审核预算、标底（基数=工程费用）"},
+        {"name": "审核竣工结算", "label": "审核竣工结算（基数=工程费用）"},
+        {"name": "编制项目投资估算", "label": "编制项目投资估算（基数=建安费）"},
+        {"name": "编制设计概算", "label": "编制设计概算（基数=建安费）"},
+    ]
+    _cc_hb_services = [
+        {"name": "预算编制", "label": "预算编制（基数=建安费）"},
+        {"name": "结算编制", "label": "结算编制（基数=建安费）"},
+        {"name": "结算审核", "label": "结算审核（基数=建安费）"},
+        {"name": "概算编制", "label": "概算编制（基数=设计概算造价）"},
+        {"name": "概算审核", "label": "概算审核（基数=设计概算造价）"},
+        {"name": "投资估算", "label": "投资估算（基数=投资估算造价）"},
+        {"name": "经济评价", "label": "经济评价（基数=投资估算造价）"},
+        {"name": "工程量清单编制(审核)", "label": "工程量清单编制/审核（基数=建安费）"},
+        {"name": "招标控制价编制(审核)", "label": "招标控制价编制/审核（基数=建安费）"},
+        {"name": "竣工决算编制", "label": "竣工决算编制（基数=总投资）"},
+        {"name": "预算审核", "label": "预算审核（基数=建安费）"},
+        {"name": "投标报价分析(清标)", "label": "投标报价分析/清标（基数=最高投标限价）"},
+        {"name": "施工阶段造价咨询", "label": "施工阶段造价咨询（基数=建安费）"},
+        {"name": "全过程造价咨询", "label": "全过程造价咨询（基数=建安费）"},
+        {"name": "工程造价鉴定", "label": "工程造价鉴定（基数=鉴定标的额）"},
+    ]
+    definitions.append({
+        "name": "造价咨询费",
+        "label": _FEE_LABELS.get("造价咨询费", "工程造价咨询服务费"),
+        "tier": 0,  # 仅需建安+设备费
+        "has_coefs": False,
+        "has_rates": False,
+        "has_services": True,
+        "coef_config": None,
+        "rate_config": None,
+        "service_config": {
+            "services_tianjin": _cc_tj_services,
+            "services_hebei": _cc_hb_services,
+            "default_selected_tianjin": ["编制施工图预算"],
+            "default_selected_hebei": ["预算编制"],
+        },
+        "depends_on": [],
+        "default_value_wan": 0,
         "is_from_skip": True,  # 标记为来自 _SKIP_FEES
     })
 
