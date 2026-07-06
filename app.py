@@ -27,7 +27,7 @@ _POLICY_URLS: dict[str, str] = {
     "计价格[2002]10号": "https://www.baidu.com/s?wd=计价格[2002]10号+工程勘察设计收费管理规定",
     "发改价格[2007]670号": "https://www.baidu.com/s?wd=发改价格[2007]670号+建设工程监理收费",
     "计价格[2002]125号": "https://www.baidu.com/s?wd=计价格[2002]125号+环境影响咨询收费",
-    "计价格[1999]1283号": "https://www.baidu.com/s?wd=计价格[1999]1283号+可行性研究费",
+    "计价格[1999]1283号": "https://www.baidu.com/s?wd=计价格[1999]1283号+建设项目前期工作咨询费",
     "计价格[2002]1980号": "https://www.baidu.com/s?wd=计价格[2002]1980号+招标代理服务收费",
     "建市[2007]86号": "https://www.baidu.com/s?wd=建市[2007]86号+工程设计资质标准",
 }
@@ -320,7 +320,7 @@ def _render_cascade_result(result):
         "**依赖层级说明**：\n"
         "- **T0**（仅依赖建安+设备）：监理费、设计费、勘察费、劳安评审费、场地准备费、工程保险费\n"
         "- **T1**（依赖 T0 结果）：施工图审查费、交易服务费\n"
-        "- **T2**（依赖总投资）：建设管理费、可行性研究费、环境影响咨询费\n"
+        "- **T2**（依赖总投资）：建设管理费、建设项目前期工作咨询费、环境影响咨询费\n"
         "- **预备费**：（第一部分工程费+二类费）× 5%"
     )
 
@@ -411,7 +411,7 @@ def _render_iteration_result(result):
     col2.metric("设备购置费", f"{params['设备购置费(万元)']} 万元")
 
     st.info(
-        "**迭代原理**：建设管理费、可行性研究费、环境影响咨询费依赖总投资；"
+        "**迭代原理**：建设管理费、建设项目前期工作咨询费、环境影响咨询费依赖总投资；"
         "总投资又包含这些二类费本身。通过反复迭代使总投资收敛到稳定值。"
     )
 
@@ -2170,6 +2170,212 @@ if "pending_huanping" in st.session_state:
                     del st.session_state.pending_huanping
                     st.rerun()
 
+# ===== 建设项目前期工作咨询费多服务类型选择（单费种提问） =====
+if "pending_keyan" in st.session_state:
+    ctx = st.session_state.pending_keyan
+    amount_yi = ctx.get("amount_yi", 0)
+    ind_coef = ctx.get("industry_coef", 1.0)
+    ind_name = ctx.get("industry_name", "")
+    comp_coef = ctx.get("complexity_coef", 1.0)
+    discount_coef = ctx.get("discount_coef", 1.0)
+
+    st.divider()
+
+    with st.container(border=True):
+        st.markdown("## 📊 建设项目前期工作咨询费 — 服务类型选择")
+
+        st.caption(
+            "前期工作咨询费（建设项目前期工作咨询费）包含 **4 项服务类型**。"
+            "请勾选需要计算的服务类型，调整系数后点击确认。"
+        )
+
+        # ── 服务类型多选 ──
+        st.markdown("### 📋 选择服务类型")
+        all_services = ["编制项目建议书", "编制可研报告", "评估项目建议书", "评估可研报告"]
+        selected = []
+        svc_col1, svc_col2 = st.columns(2)
+        for i, svc in enumerate(all_services):
+            col = svc_col1 if i < 2 else svc_col2
+            with col:
+                checked = st.checkbox(svc, value=True, key=f"keyan_svc_{i}")
+                if checked:
+                    selected.append(svc)
+
+        if not selected:
+            st.warning("⚠️ 请至少选择一项服务类型")
+        else:
+            st.markdown("---")
+
+            # ── 系数调整 ──
+            st.markdown("### 🎛️ 系数调整")
+
+            # 行业调整系数
+            from fee_engine import KEYAN_INDUSTRY_COEFS
+
+            ky_industry_items = sorted(
+                set(KEYAN_INDUSTRY_COEFS.items()), key=lambda x: (-x[1], x[0]))
+            ky_ind_labels = [f"{label}（{val}）" for label, val in ky_industry_items]
+            ky_ind_values = [val for _, val in ky_industry_items]
+            try:
+                cur_ind_idx = ky_ind_values.index(ind_coef)
+            except ValueError:
+                cur_ind_idx = 0
+            ind_label = st.selectbox(
+                "行业调整系数",
+                range(len(ky_ind_labels)),
+                index=cur_ind_idx,
+                format_func=lambda idx: ky_ind_labels[idx],
+                key="keyan_ind_coef",
+            )
+            chosen_ind_coef = ky_ind_values[ind_label]
+            chosen_ind_name = ky_industry_items[ind_label][0]
+
+            # 复杂程度系数
+            comp_options = [("简单", 0.8), ("一般", 1.0), ("复杂", 1.2)]
+            comp_labels = [f"{label}（{val}）" for label, val in comp_options]
+            comp_values = [val for _, val in comp_options]
+            try:
+                cur_comp_idx = comp_values.index(comp_coef)
+            except ValueError:
+                cur_comp_idx = 1
+            comp_label = st.selectbox(
+                "复杂程度系数",
+                range(len(comp_labels)),
+                index=cur_comp_idx,
+                format_func=lambda idx: comp_labels[idx],
+                key="keyan_comp_coef",
+            )
+            chosen_comp_coef = comp_values[comp_label]
+
+            st.markdown("---")
+
+            # ── 实时费用预览 ──
+            st.markdown("### 💡 费用预览")
+            try:
+                from fee_engine import calc_keyan_multi
+
+                preview = calc_keyan_multi(
+                    amount_yi,
+                    selected,
+                    industry_coef=chosen_ind_coef,
+                    industry_name=chosen_ind_name,
+                    complexity_coef=chosen_comp_coef,
+                )
+                detail_list = preview.get("明细", [])
+                total_fee = preview.get("合计(万元)", 0)
+
+                # 明细表
+                detail_rows = []
+                for d in detail_list:
+                    detail_rows.append(
+                        f"| **{d['服务类型']}** "
+                        f"| {d.get('基准价(万元)', '-')} "
+                        f"| {d.get('系数', '-')} "
+                        f"| **{d['费用(万元)']}** |"
+                    )
+                st.markdown(
+                    "| 服务类型 | 基准价（万元） | 调整系数 | 费用（万元） |\n"
+                    "|----------|:--:|:--:|:--:|\n" + "\n".join(detail_rows)
+                )
+
+                st.markdown(f"### 💰 建设项目前期工作咨询费合计：**{total_fee} 万元**")
+
+                # 分档计算详情
+                with st.expander("📐 查看各项计算过程"):
+                    for d in detail_list:
+                        st.markdown(f"**{d['服务类型']}**")
+                        steps = d.get("计算步骤", [])
+                        if steps:
+                            for s in steps:
+                                st.caption(
+                                    f"{s.get('步骤', '')}：{s.get('公式', '')} → {s.get('结果', '')}"
+                                )
+                        else:
+                            st.caption(f"费用：{d['费用(万元)']} 万元")
+                        st.markdown("---")
+
+            except Exception as e:
+                st.error(f"预览计算失败：{e}")
+                total_fee = 0
+                detail_list = []
+
+            st.markdown("---")
+
+            # ── 打折系数 ──
+            st.markdown("### 💰 费用打折")
+            discount_coef = st.number_input(
+                "打折系数（1.0 = 不打折，0.8 = 打八折）",
+                min_value=0.01, max_value=2.00,
+                value=ctx.get("discount_coef", 1.0), step=0.05,
+                format="%.2f",
+                key="discount_keyan",
+                help="输入打折系数调整最终费用。",
+            )
+            ctx["discount_coef"] = discount_coef
+            discounted_total = round(total_fee * discount_coef, 4)
+
+            if abs(discount_coef - 1.0) < 0.005:
+                st.info(f"**不打折**，最终费用：**{discounted_total} 万元**")
+            elif discount_coef < 1.0:
+                st.warning(
+                    f"打折系数 **{discount_coef:.2f}** → "
+                    f"{total_fee:.4f} 万 × {discount_coef:.2f} = "
+                    f"**{discounted_total} 万元**"
+                    f"（节省 {round(total_fee - discounted_total, 4)} 万元）"
+                )
+            else:
+                st.warning(
+                    f"上浮系数 **{discount_coef:.2f}** → "
+                    f"{total_fee:.4f} 万 × {discount_coef:.2f} = "
+                    f"**{discounted_total} 万元**"
+                    f"（增加 {round(discounted_total - total_fee, 4)} 万元）"
+                )
+
+            st.markdown("---")
+
+            # ── 确认 / 取消 ──
+            col_btn1, col_btn2 = st.columns(2)
+            discount_text = ""
+            if abs(discount_coef - 1.0) >= 0.005:
+                discount_text = (
+                    f"\n\n**打折系数**：{discount_coef:.2f}\n\n"
+                    f"**打折后费用**：{discounted_total} 万元"
+                    f"（{total_fee:.4f} 万 × {discount_coef:.2f}）"
+                )
+
+            with col_btn1:
+                if st.button("✅ 确认结果", use_container_width=True, key="confirm_keyan"):
+                    # 构建详情文本
+                    detail_parts = []
+                    for d in detail_list:
+                        detail_parts.append(
+                            f"- **{d['服务类型']}**：{d['费用(万元)']} 万元"
+                        )
+
+                    final_response = (
+                        f"## 建设项目前期工作咨询费\n\n"
+                        f"**依据**：{_basis_md_links('《建设项目前期工作咨询收费暂行规定》（计价格[1999]1283号）')}"
+                        f"（计价格[1999]1283号）\n\n"
+                        f"**参数**："
+                        f"估算投资额 {amount_yi:.4f} 亿元（{amount_yi * 10000:.0f} 万元），"
+                        f"行业「{chosen_ind_name}」系数 {chosen_ind_coef}，"
+                        f"复杂程度系数 {chosen_comp_coef}\n\n"
+                        f"### 服务类型明细\n\n"
+                        + "\n".join(detail_parts) +
+                        f"\n\n### 💰 合计：**{total_fee} 万元**"
+                        f"{discount_text}"
+                    )
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": final_response,
+                    })
+                    del st.session_state.pending_keyan
+                    st.rerun()
+            with col_btn2:
+                if st.button("🗑 取消", use_container_width=True, key="cancel_keyan"):
+                    del st.session_state.pending_keyan
+                    st.rerun()
+
 # ===== 全费用交互式选择 =====
 if "pending_fee_selection" in st.session_state:
     ctx = st.session_state.pending_fee_selection
@@ -2360,6 +2566,7 @@ if "pending_fee_selection" in st.session_state:
                     continue
                 is_cost_consulting = (fee_name == "造价咨询费")
                 is_huanping = (fee_name == "环境影响咨询费")
+                is_keyan = (fee_name == "可行性研究费")
 
                 if is_cost_consulting:
                     st.markdown("#### 🌿 工程造价咨询服务子项")
@@ -2376,6 +2583,11 @@ if "pending_fee_selection" in st.session_state:
                     all_svcs = service_config["services"]
                     default_svcs = service_config.get("default_selected", ["编制报告书"])
                     st.caption("勾选需要计算的环境影响咨询服务类型（计价格[2002]125号）。")
+                elif is_keyan:
+                    st.markdown("#### 📊 建设项目前期工作咨询服务子项")
+                    all_svcs = service_config["services"]
+                    default_svcs = service_config.get("default_selected", ["编制可研报告"])
+                    st.caption("勾选需要计算的建设项目前期工作咨询服务类型（计价格[1999]1283号）。")
                 else:
                     all_svcs = service_config.get("services", [])
                     default_svcs = service_config.get("default_selected", [])
@@ -2402,9 +2614,8 @@ if "pending_fee_selection" in st.session_state:
                     st.warning("⚠️ 请至少选择一项服务类型")
                 elif is_cost_consulting:
                     try:
-                        # 先用 cascade 引擎获取近似总投资，供需要总投资的子项使用
-                        _svc_skip = set(fd["name"] for fd in ctx["fee_defs"]) - new_selected
                         # 构建 param_overrides（与确认区一致的费率覆盖）
+                        _svc_skip = set(fd["name"] for fd in ctx["fee_defs"]) - new_selected
                         _svc_param = {}
                         _rate_map = {
                             "劳动安全卫生评审费": "劳动安全卫生评审费费率",
@@ -2432,31 +2643,13 @@ if "pending_fee_selection" in st.session_state:
                             _cc_prof = (ctx.get("coef_overrides", {})
                                         .get("造价咨询费", {})
                                         .get("professional_coef", 1.0))
-                            # 第一轮：用不含 CC 的总投资近似计算
                             cc_preview = calc_cost_consulting_multi_hebei(
                                 selected_svcs,
-                                ctx["jianan"],  # 河北规则基数为建安费（不含设备费）
+                                ctx["jianan"],
                                 total_investment=_svc_approx_total if _svc_approx_total > 0 else None,
                                 professional_coef=_cc_prof,
                                 discount_coef=1.0,
                             )
-                            # 第二轮：把 CC 计入总投后重算，修正概算审核等依赖总投的子项
-                            _cc_preview_total = cc_preview.get("合计(万元)", 0)
-                            if _cc_preview_total > 0 and _svc_approx_total > 0:
-                                _adjusted_total = _svc_approx_total + _cc_preview_total
-                                # 简易调整预备费影响：总投资增加 ≈ CC × (1 + 5%预备费率)
-                                _adjusted_total = round(
-                                    _svc_approx_total + _cc_preview_total * 1.05, 4)
-                                try:
-                                    cc_preview = calc_cost_consulting_multi_hebei(
-                                        selected_svcs,
-                                        ctx["jianan"],
-                                        total_investment=_adjusted_total,
-                                        professional_coef=_cc_prof,
-                                        discount_coef=1.0,
-                                    )
-                                except Exception:
-                                    pass  # 保留第一轮结果
                         else:
                             from fee_engine import calc_cost_consulting_multi
                             cc_preview = calc_cost_consulting_multi(
@@ -2496,6 +2689,38 @@ if "pending_fee_selection" in st.session_state:
                                 f"（中值 **{d['结果中值(万元)']}** 万元）"
                             )
                         st.caption(f"环评费合计：**{hp_total:.4f}** 万元")
+                    except Exception:
+                        pass
+                elif is_keyan:
+                    from fee_engine import calc_keyan_multi
+                    _ky_coefs = ctx.get("coef_overrides", {}).get(fee_name, {})
+                    _ky_ind_coef = _ky_coefs.get("industry_coef", 1.0)
+                    _ky_comp_coef = _ky_coefs.get("complexity_coef", 1.0)
+                    try:
+                        # 可研费基数为总投资（亿元），用 cascade 引擎近似总投
+                        _ky_skip = set(fd["name"] for fd in ctx["fee_defs"]) - new_selected
+                        _ky_raw = _calc_all_fees(
+                            jianan=ctx["jianan"], shebei=ctx["shebei"],
+                            project_type=ctx["project_type"], query=ctx["query"],
+                            skip_fees=_ky_skip if _ky_skip else None,
+                            coef_overrides=ctx.get("coef_overrides") or None,
+                        )
+                        _ky_total = _ky_raw.get("项目总投资(万元)", 0)
+                        _ky_amount_yi = _ky_total / 10000.0
+                        ky_preview = calc_keyan_multi(
+                            _ky_amount_yi,
+                            selected_svcs,
+                            industry_coef=_ky_ind_coef,
+                            complexity_coef=_ky_comp_coef,
+                        )
+                        ky_total = ky_preview.get("合计(万元)", 0)
+                        ky_details = ky_preview.get("明细", [])
+                        st.markdown("**预览**：")
+                        for d in ky_details:
+                            st.markdown(
+                                f"- {d['服务类型']}：**{d['费用(万元)']}** 万元"
+                            )
+                        st.caption(f"可研费合计：**{ky_total:.4f}** 万元")
                     except Exception:
                         pass
 
@@ -2714,6 +2939,47 @@ if "pending_fee_selection" in st.session_state:
                     except Exception:
                         pass  # 失败时保留原始值
 
+            # ── 可行性研究费多服务类型计算 ──
+            if "可行性研究费" in new_selected:
+                ky_svcs = ctx.get("service_selections", {}).get("可行性研究费", [])
+                if ky_svcs and ky_svcs != ["编制可研报告"]:
+                    from fee_engine import calc_keyan_multi
+                    _ky_coefs = ctx.get("coef_overrides", {}).get("可行性研究费", {})
+                    _ky_ind_coef = _ky_coefs.get("industry_coef", 1.0)
+                    _ky_comp_coef = _ky_coefs.get("complexity_coef", 1.0)
+                    try:
+                        _ky_total_wan = preview_raw.get("项目总投资(万元)", 0)
+                        _ky_amount_yi = _ky_total_wan / 10000.0
+                        ky_multi = calc_keyan_multi(
+                            _ky_amount_yi,
+                            ky_svcs,
+                            industry_coef=_ky_ind_coef,
+                            complexity_coef=_ky_comp_coef,
+                        )
+                        ky_total = ky_multi.get("合计(万元)", 0)
+                        old_ky = numerical.get("可行性研究费(万元)", 0)
+                        numerical["可行性研究费(万元)"] = ky_total
+                        preview_raw["原始结果"]["可行性研究费"] = ky_multi
+                        # 重新计算 T2 小计
+                        t2_keys = [k for k in ("建设管理费", "可行性研究费", "环境影响咨询费")
+                                   if f"{k}(万元)" in numerical]
+                        new_t2 = sum(numerical.get(f"{k}(万元)", 0) for k in t2_keys)
+                        preview_raw["T2小计(万元)"] = round(new_t2, 4)
+                        # 重新计算二类费合计
+                        fee_total_raw = (
+                            preview_raw.get("T0小计(万元)", 0)
+                            + preview_raw.get("T1小计(万元)", 0)
+                            + new_t2
+                        )
+                        preview_raw["二类费合计(万元)"] = round(fee_total_raw, 4)
+                        # 重新计算总投资
+                        preview_raw["总投资(万元)"] = round(
+                            ctx["total_part1"] + fee_total_raw, 4)
+                        preview_raw["项目总投资(万元)"] = round(
+                            ctx["total_part1"] + fee_total_raw + preview_raw.get("预备费小计(万元)", 0), 4)
+                    except Exception:
+                        pass  # 失败时保留原始值
+
             # ── 造价咨询费多服务类型计算 ──
             if "造价咨询费" in new_selected:
                 cc_svcs = ctx.get("service_selections", {}).get("造价咨询费", [])
@@ -2789,8 +3055,10 @@ if "pending_fee_selection" in st.session_state:
                                 break
                             _prev_total = _curr_total
 
-                            # 1) 用最新项目总投资重算建设管理费
-                            _gl_r = calc_jianshe_guanli(_curr_total)
+                            # 1) 重算建设管理费 — 基数 = 项目总投资 − 建管费自身
+                            _gl_old = numerical.get("建设管理费(万元)", 0)
+                            _gl_base = _curr_total - _gl_old
+                            _gl_r = calc_jianshe_guanli(_gl_base)
                             numerical["建设管理费(万元)"] = _ext_num(_gl_r)
 
                             # 2) 重算可行性研究费
@@ -2837,18 +3105,18 @@ if "pending_fee_selection" in st.session_state:
                                 ctx["total_part1"] + _fee_total + _yb
                                 + _custom_total, 4)
 
-                        # 收敛后写入汇总值（含自定义费用）
+                        # 收敛后写入汇总值（不含自定义费用——展示层单独添加）
                         cc_multi = preview_raw["原始结果"]["造价咨询费"]
                         cc_total = numerical["造价咨询费(万元)"]
                         preview_raw["T0小计(万元)"] = round(_new_t0, 4)
                         preview_raw["T2小计(万元)"] = round(_new_t2, 4)
-                        preview_raw["二类费合计(万元)"] = round(
-                            _fee_total + _custom_total, 4)
+                        preview_raw["二类费合计(万元)"] = round(_fee_total, 4)
                         preview_raw["总投资(万元)"] = round(
-                            ctx["total_part1"] + _fee_total + _custom_total, 4)
+                            ctx["total_part1"] + _fee_total, 4)
                         preview_raw["预备费小计(万元)"] = round(_yb, 4)
                         numerical["预备费(万元)"] = _yb
-                        preview_raw["项目总投资(万元)"] = round(_curr_total, 4)
+                        preview_raw["项目总投资(万元)"] = round(
+                            ctx["total_part1"] + _fee_total + _yb, 4)
                     except Exception as _e:
                         import traceback
                         print(f"[CC convergence ERROR] {type(_e).__name__}: {_e}", flush=True)
@@ -3093,6 +3361,7 @@ if prompt:
     st.session_state.pop("pending_coef_select", None)
     st.session_state.pop("pending_dependent_fee", None)
     st.session_state.pop("pending_huanping", None)
+    st.session_state.pop("pending_keyan", None)
     st.session_state.pop("pending_fee_selection", None)
     # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -3119,15 +3388,9 @@ if prompt:
 
     # 生成回答
     with st.chat_message("assistant"):
-        # DEBUG（用 st.write 确保可见）
-        st.write(f"🔍 DEBUG A: prompt='{prompt[:60]}' | len={len(prompt)}")
         try:
             fee_result = detect_and_calculate(prompt)
-            st.write(f"🔍 DEBUG B: fee_result is None = {fee_result is None}, type={type(fee_result).__name__}")
-            if fee_result:
-                st.write(f"🔍 DEBUG C: fee_type={fee_result.get('fee_type')}, has_amount={fee_result.get('has_amount')}")
         except Exception as e:
-            st.write(f"🔍 DEBUG EXCEPTION: {e}")
             import traceback
             st.code(traceback.format_exc())
             fee_result = None
@@ -3140,21 +3403,20 @@ if prompt:
                 # === 多费种迭代模式路由 ===
                 mode = fee_result.get("mode")
                 if mode == "cascade":
+                    raw = fee_result.get("_engine_raw", {})
+                    params = fee_result["输入参数"]
+                    jianan = params["建安工程费(万元)"]
+                    shebei = params["设备购置费(万元)"]
+                    project_type = params["项目类型"]
+                    total_part1 = params["第一部分工程费(万元)"]
+
+                    # 始终用最新代码重建 fee_defs（支持热更新 service_config）
+                    fee_defs = _build_fee_selection_meta(raw, prompt)
+
                     if "pending_fee_selection" not in st.session_state:
                         # 首次：初始化交互式费种选择面板
-                        raw = fee_result.get("_engine_raw", {})
-                        params = fee_result["输入参数"]
-                        jianan = params["建安工程费(万元)"]
-                        shebei = params["设备购置费(万元)"]
-                        project_type = params["项目类型"]
-                        total_part1 = params["第一部分工程费(万元)"]
-
-                        fee_defs = _build_fee_selection_meta(raw, prompt)
-
-                        # 默认全部选中
                         selected_fees = set(fd["name"] for fd in fee_defs)
 
-                        # 初始化系数覆盖值（从 query 中自动检测的默认值）
                         coef_overrides = {}
                         for fd in fee_defs:
                             if fd["has_coefs"] and fd["coef_config"]:
@@ -3175,6 +3437,7 @@ if prompt:
                             "rate_overrides": {},
                             "service_selections": {
                                 "环境影响咨询费": ["编制报告书"],
+                                "可行性研究费": ["编制可研报告"],
                                 "造价咨询费": (
                                     ["预算编制"]
                                     if _is_hebei_project(prompt)
@@ -3185,6 +3448,32 @@ if prompt:
                             "discount_coef": 1.0,
                             "preview": None,
                         }
+                    else:
+                        # 更新已有的 session：替换 fee_defs（保持用户已选状态）
+                        ctx = st.session_state.pending_fee_selection
+                        ctx["fee_defs"] = fee_defs
+                        ctx["query"] = prompt
+                        ctx["jianan"] = jianan
+                        ctx["shebei"] = shebei
+                        ctx["total_part1"] = total_part1
+                        ctx["project_type"] = project_type
+                        # 补上可能缺失的 service_selections
+                        svc = ctx.setdefault("service_selections", {})
+                        svc.setdefault("环境影响咨询费", ["编制报告书"])
+                        svc.setdefault("可行性研究费", ["编制可研报告"])
+                        if "造价咨询费" not in svc:
+                            svc["造价咨询费"] = (
+                                ["预算编制"] if _is_hebei_project(prompt)
+                                else ["编制施工图预算"]
+                            )
+                        # 补上可能缺失的 coef_overrides（新费种）
+                        for fd in fee_defs:
+                            if fd["has_coefs"] and fd["coef_config"]:
+                                if fd["name"] not in ctx["coef_overrides"]:
+                                    defaults = {}
+                                    for c in fd["coef_config"]["coefs"]:
+                                        defaults[c["param_name"]] = c["current"]
+                                    ctx["coef_overrides"][fd["name"]] = defaults
 
                     n_fees = len(st.session_state.pending_fee_selection["fee_defs"])
                     response = (
@@ -3245,6 +3534,22 @@ if prompt:
                             f"请滚动到页面下方 **🌿 环评费 — 服务类型选择** 区域，"
                             f"选择需要计算的服务类型并调整系数后点击确认。"
                         )
+                    elif fee_result.get("needs_keyan_select"):
+                        # === 可行性研究费多服务类型选择 ===
+                        st.session_state.pending_keyan = {
+                            "amount_yi": fee_result["amount_yi"],
+                            "industry_coef": fee_result.get("industry_coef", 1.0),
+                            "industry_name": fee_result.get("industry_name", ""),
+                            "complexity_coef": fee_result.get("complexity_coef", 1.0),
+                            "query": prompt,
+                            "discount_coef": 1.0,
+                        }
+                        response = (
+                            f"## 建设项目前期工作咨询费\n\n"
+                            f"> 📊 该费种包含 4 项服务类型\n\n"
+                            f"请滚动到页面下方 **📊 建设项目前期工作咨询费 — 服务类型选择** 区域，"
+                            f"选择需要计算的服务类型并调整系数后点击确认。"
+                        )
                     elif is_rate_selectable:
                         # === 交互式费率选择：存入 session state，在聊天区外渲染 ===
                         st.session_state.pending_rate_select = {
@@ -3278,7 +3583,7 @@ if prompt:
                         st.markdown("### 计算结果（程序精确计算）")
                         _render_engine_card(fee_result)
 
-                    if needs_dep or is_rate_selectable or is_coef_selectable or fee_result.get("needs_huanping_select"):
+                    if needs_dep or is_rate_selectable or is_coef_selectable or fee_result.get("needs_huanping_select") or fee_result.get("needs_keyan_select"):
                         pass  # 已在上面通过 pending_* 处理完成
                     elif is_sheji:
                         st.divider()
@@ -3345,7 +3650,7 @@ if prompt:
                         is_shencha = ft == "施工图审查费"
                         # 环评费（计价格[2002]125号 — 四项服务类型全部输出）
                         is_huanping = ft == "环境影响咨询费"
-                        # 可行性研究费（计价格[1999]1283号 — 内插法详细步骤）
+                        # 建设项目前期工作咨询费（计价格[1999]1283号 — 内插法详细步骤）
                         is_keyan = ft == "可行性研究费"
                         # 粗略估算类费种（《市政工程设计概算编制办法》）
                         is_rough = ft in (

@@ -1804,7 +1804,7 @@ def calc_keyan(
     ])
 
     return {
-        "费种": f"可行性研究费（{service_type}）",
+        "费种": f"建设项目前期工作咨询费（{service_type}）",
         "依据": "《建设项目前期工作咨询收费暂行规定》（计价格[1999]1283号）",
         "计算公式": "基准价 = 按估算投资额分档线性内插；最终费用 = 基准价 × 行业调整系数 × 复杂程度系数",
         "参数": {
@@ -1825,6 +1825,58 @@ def calc_keyan(
             f"最终费用 = {base_fee:.4f} × {total_coef} = **{final_fee_mid:.4f} 万元**"
         ),
         "计算步骤": steps,
+    }
+
+
+def calc_keyan_multi(
+    amount_yi: float,
+    selected_services: list[str],
+    industry_coef: float = 1.0,
+    industry_name: str = "",
+    complexity_coef: float = 1.0,
+) -> dict:
+    """可行性研究费 — 多服务类型选择计算。
+
+    对用户选择的每项服务分别计算，汇总合计。
+    """
+    details: list[dict] = []
+    total = 0.0
+
+    for svc in selected_services:
+        r = calc_keyan(
+            amount_yi, svc,
+            industry_coef=industry_coef,
+            industry_name=industry_name,
+            complexity_coef=complexity_coef,
+        )
+        fee = r["结果(万元)"]
+        details.append({
+            "服务类型": svc,
+            "费用(万元)": fee,
+            "基准价(万元)": r.get("基准价(万元)", 0),
+            "计算步骤": r.get("计算步骤", []),
+        })
+        total += fee
+
+    total = round(total, 4)
+
+    desc_parts = []
+    for d in details:
+        desc_parts.append(f"- **{d['服务类型']}**：{d['费用(万元)']} 万元")
+
+    return {
+        "费种": "建设项目前期工作咨询费",
+        "依据": "《建设项目前期工作咨询收费暂行规定》（计价格[1999]1283号）",
+        "明细": details,
+        "合计(万元)": total,
+        "参数": {
+            "估算投资额(亿元)": amount_yi,
+            "行业调整系数": industry_coef,
+            "行业名称": industry_name or "默认",
+            "复杂程度系数": complexity_coef,
+            "选中服务": selected_services,
+        },
+        "说明": "\n".join(desc_parts),
     }
 
 
@@ -2899,7 +2951,7 @@ def _get_fee_reference(fee_type: str) -> dict:
             ),
         },
         "可行性研究费": {
-            "费种": "可行性研究费（建设项目前期工作咨询费）",
+            "费种": "建设项目前期工作咨询费",
             "依据": "《建设项目前期工作咨询收费暂行规定》（计价格[1999]1283号）",
             "计费方式": "按估算投资额分档线性内插基准价，乘以行业调整系数（0.7~1.3）和复杂程度系数（0.8~1.2）",
             "参数说明": "估算投资额（亿元）+ 服务类型（编制可研/编制建议书/评估可研/评估建议书）",
@@ -3783,6 +3835,12 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                 f"四种服务类型全部结果：\n" +
                 "\n".join(lines)
             )
+        # 标记需要交互式服务类型选择（前端渲染 pending_keyan 面板）
+        result["needs_keyan_select"] = True
+        result["amount_yi"] = amount_yi
+        result["industry_coef"] = ind_coef
+        result["industry_name"] = ind_name
+        result["complexity_coef"] = comp_coef
     elif fee_type == "施工图审查费":
         # 津价管[2011]46号 + 建市[2007]86号
         if re.search(r"住宅", query):
@@ -4516,7 +4574,7 @@ _FEE_LABELS: dict[str, str] = {
     "交易服务费": "交易服务费（招标代理相关）",
     "施工图审查费": "施工图审查费",
     "建设管理费": "建设管理费（建设单位管理费）",
-    "可行性研究费": "可行性研究费",
+    "可行性研究费": "建设项目前期工作咨询费",
     "环境影响咨询费": "环境影响咨询费",
     "预备费": "预备费（基本预备费）",
     "招标代理费": "招标代理服务费",
@@ -4751,10 +4809,19 @@ def _calc_all_fees(
 
     # ============ Tier 2：需要总投资 ============
 
-    # 建设管理费
-    gl_r = calc_jianshe_guanli(total_investment)
+    # 建设管理费 — 基数 = 项目总投资 − 建管费自身（财建[2016]504号）
+    # 迭代求解：建管费 = f(总投 − 建管费)
+    _gl_guess = 0.0
+    for __ in range(10):
+        _gl_base = total_investment - _gl_guess
+        _gl_r = calc_jianshe_guanli(_gl_base)
+        _gl_new = _extract_numeric_value(_gl_r)
+        if abs(_gl_new - _gl_guess) < 0.001:
+            break
+        _gl_guess = _gl_new
+    gl_r = _gl_r
     raw_results["建设管理费"] = gl_r
-    numerical["建设管理费(万元)"] = _extract_numeric_value(gl_r)
+    numerical["建设管理费(万元)"] = _gl_new
 
     # 可行性研究费
     keyan_ind, keyan_coef = _detect_keyan_industry(query)
@@ -4888,10 +4955,11 @@ def _build_fee_selection_meta(
         default_val = numerical.get(f"{fee_name}(万元)", 0)
         label = _FEE_LABELS.get(fee_name, fee_name)
         deps = _TIER_DEPS.get(fee_name, [])
-        has_coefs = fee_name in ("监理费", "工程设计费", "环境影响咨询费")
+        has_coefs = fee_name in ("监理费", "工程设计费", "环境影响咨询费",
+                                 "可行性研究费")
         has_rates = fee_name in ("勘察费", "劳动安全卫生评审费",
                                  "场地准备费及临时设施费", "工程保险费")
-        has_services = fee_name == "环境影响咨询费"
+        has_services = fee_name in ("环境影响咨询费", "可行性研究费")
 
         entry: dict = {
             "name": fee_name,
@@ -4916,17 +4984,28 @@ def _build_fee_selection_meta(
             entry["rate_config"] = _get_rate_config_simple(
                 fee_name, engine_result, query)
 
-        # 为环评费构建服务类型选项
+        # 为环评费 / 可行性研究费构建服务类型选项
         if has_services:
-            entry["service_config"] = {
-                "services": [
-                    {"name": "编制报告书", "label": "编制环境影响报告书（含大纲）"},
-                    {"name": "编制报告表", "label": "编制环境影响报告表"},
-                    {"name": "评估报告书", "label": "评估环境影响报告书（含大纲）"},
-                    {"name": "评估报告表", "label": "评估环境影响报告表"},
-                ],
-                "default_selected": ["编制报告书"],  # 默认只选报告书
-            }
+            if fee_name == "环境影响咨询费":
+                entry["service_config"] = {
+                    "services": [
+                        {"name": "编制报告书", "label": "编制环境影响报告书（含大纲）"},
+                        {"name": "编制报告表", "label": "编制环境影响报告表"},
+                        {"name": "评估报告书", "label": "评估环境影响报告书（含大纲）"},
+                        {"name": "评估报告表", "label": "评估环境影响报告表"},
+                    ],
+                    "default_selected": ["编制报告书"],
+                }
+            elif fee_name == "可行性研究费":
+                entry["service_config"] = {
+                    "services": [
+                        {"name": "编制项目建议书", "label": "编制项目建议书"},
+                        {"name": "编制可研报告", "label": "编制可行性研究报告"},
+                        {"name": "评估项目建议书", "label": "评估项目建议书"},
+                        {"name": "评估可研报告", "label": "评估可行性研究报告"},
+                    ],
+                    "default_selected": ["编制可研报告"],
+                }
 
         definitions.append(entry)
 
@@ -5103,6 +5182,30 @@ def _get_coef_config_simple(fee_name: str, query: str) -> dict | None:
                     "current": 1.0,
                     "options": list(_HEBEI_PROFESSIONAL_COEFFICIENTS.items()),
                     "description": "冀建市研[2017]2号 附件2：不同专业工程适用不同调整系数",
+                },
+            ],
+        }
+    elif fee_name == "可行性研究费":
+        ind_name, ind_coef = _detect_keyan_industry(query)
+        # 构建行业系数选项（去重排序）
+        _ky_options = sorted(
+            set(KEYAN_INDUSTRY_COEFS.items()), key=lambda x: (-x[1], x[0]))
+        return {
+            "calc_func": "calc_keyan",
+            "coefs": [
+                {
+                    "key": "行业调整系数",
+                    "param_name": "industry_coef",
+                    "current": ind_coef,
+                    "options": _ky_options,
+                    "description": "计价格[1999]1283号：不同行业适用不同调整系数",
+                },
+                {
+                    "key": "复杂程度系数",
+                    "param_name": "complexity_coef",
+                    "current": 1.0,
+                    "options": [("简单", 0.8), ("一般", 1.0), ("复杂", 1.2)],
+                    "description": "计价格[1999]1283号：工程复杂程度调整系数",
                 },
             ],
         }
