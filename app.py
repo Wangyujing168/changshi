@@ -2402,13 +2402,25 @@ if "pending_fee_selection" in st.session_state:
                     st.warning("⚠️ 请至少选择一项服务类型")
                 elif is_cost_consulting:
                     try:
+                        # 先用 cascade 引擎获取近似总投资，供需要总投资的子项使用
+                        _svc_skip = set(fd["name"] for fd in ctx["fee_defs"]) - new_selected
+                        _svc_raw = _calc_all_fees(
+                            jianan=ctx["jianan"], shebei=ctx["shebei"],
+                            project_type=ctx["project_type"], query=ctx["query"],
+                            skip_fees=_svc_skip if _svc_skip else None,
+                            coef_overrides=ctx.get("coef_overrides") or None,
+                        )
+                        _svc_approx_total = _svc_raw.get("项目总投资(万元)", 0)
                         if _is_hebei_project(ctx["query"]):
                             from fee_engine import calc_cost_consulting_multi_hebei
+                            _cc_prof = (ctx.get("coef_overrides", {})
+                                        .get("造价咨询费", {})
+                                        .get("professional_coef", 1.0))
                             cc_preview = calc_cost_consulting_multi_hebei(
                                 selected_svcs,
-                                ctx["total_part1"],
-                                total_investment=None,
-                                professional_coef=1.0,
+                                ctx["jianan"],  # 河北规则基数为建安费（不含设备费）
+                                total_investment=_svc_approx_total if _svc_approx_total > 0 else None,
+                                professional_coef=_cc_prof,
                                 discount_coef=1.0,
                             )
                         else:
@@ -2417,6 +2429,7 @@ if "pending_fee_selection" in st.session_state:
                                 selected_svcs,
                                 ctx["total_part1"],
                                 jianan_only=ctx["jianan"],
+                                total_investment=_svc_approx_total if _svc_approx_total > 0 else None,
                             )
                         cc_total = cc_preview.get("合计(万元)", 0)
                         cc_details = cc_preview.get("明细", [])
@@ -2672,13 +2685,19 @@ if "pending_fee_selection" in st.session_state:
                 cc_svcs = ctx.get("service_selections", {}).get("造价咨询费", [])
                 if cc_svcs:
                     try:
+                        # 对于需要总投资的子项（概算审核/概算编制等），
+                        # 使用 cascade 引擎已计算的项目总投资作为基数
+                        _cascade_total = preview_raw.get("项目总投资(万元)", 0)
                         if _is_hebei_project(ctx["query"]):
                             from fee_engine import calc_cost_consulting_multi_hebei
+                            _cc_prof = (ctx.get("coef_overrides", {})
+                                        .get("造价咨询费", {})
+                                        .get("professional_coef", 1.0))
                             cc_multi = calc_cost_consulting_multi_hebei(
                                 cc_svcs,
-                                ctx["total_part1"],  # 建安费
-                                total_investment=None,
-                                professional_coef=1.0,
+                                ctx["jianan"],  # 河北规则基数为建安费（不含设备费）
+                                total_investment=_cascade_total if _cascade_total > 0 else None,
+                                professional_coef=_cc_prof,
                                 discount_coef=1.0,
                             )
                         else:
@@ -2687,6 +2706,7 @@ if "pending_fee_selection" in st.session_state:
                                 cc_svcs,
                                 ctx["total_part1"],
                                 jianan_only=ctx["jianan"],
+                                total_investment=_cascade_total if _cascade_total > 0 else None,
                             )
                         cc_total = cc_multi.get("合计(万元)", 0)
                         # 添加/覆盖到 numerical
@@ -2702,18 +2722,88 @@ if "pending_fee_selection" in st.session_state:
                         ]
                         new_t0 = sum(numerical.get(f"{k}(万元)", 0) for k in t0_keys)
                         preview_raw["T0小计(万元)"] = round(new_t0, 4)
-                        # 重新计算二类费合计
-                        fee_total_raw = (
-                            new_t0
-                            + preview_raw.get("T1小计(万元)", 0)
-                            + preview_raw.get("T2小计(万元)", 0)
+
+                        # ── 迭代收敛：建设管理费 ↔ 造价咨询费(概算审核等) ──
+                        # 建设管理费和概算审核都依赖项目总投资，形成循环依赖，
+                        # 需要迭代至收敛（阈值 0.01 万元）
+                        from fee_engine import (
+                            calc_jianshe_guanli, _extract_numeric_value as _ext_num,
+                            _detect_keyan_industry, calc_keyan, JIANSHE_GUANLI_RATES,
+                            _cumulative_tiered,
                         )
-                        preview_raw["二类费合计(万元)"] = round(fee_total_raw, 4)
-                        # 重新计算总投资
+                        t1_total = preview_raw.get("T1小计(万元)", 0)
+                        # 预备费率：优先从 param_overrides，否则默认 5%
+                        _yb_rate = param_overrides.get("预备费率", 5.0)
+                        _prev_total = 0.0
+                        _curr_total = round(
+                            ctx["total_part1"] + new_t0 + t1_total
+                            + preview_raw.get("T2小计(万元)", 0), 4)
+                        # 先用当前 total 计算预备费，得到完整项目总投资
+                        _yb = round((_curr_total) * _yb_rate / 100.0, 4)
+                        _curr_total = round(_curr_total + _yb, 4)
+
+                        for _iter_i in range(20):
+                            if abs(_curr_total - _prev_total) < 0.01:
+                                break
+                            _prev_total = _curr_total
+
+                            # 1) 用最新项目总投资重算建设管理费
+                            _gl_r = calc_jianshe_guanli(_curr_total)
+                            numerical["建设管理费(万元)"] = _ext_num(_gl_r)
+
+                            # 2) 重算可行性研究费
+                            _keyan_ind, _keyan_coef = _detect_keyan_industry(ctx["query"])
+                            _amount_yi = _curr_total / 10000.0
+                            _keyan_r = calc_keyan(
+                                _amount_yi, service_type="编制可研报告",
+                                industry_coef=_keyan_coef, industry_name=_keyan_ind,
+                            )
+                            numerical["可行性研究费(万元)"] = _ext_num(_keyan_r)
+
+                            # 3) 更新 T2
+                            _t2_keys = ["建设管理费", "可行性研究费", "环境影响咨询费"]
+                            _new_t2 = sum(
+                                numerical.get(f"{k}(万元)", 0) for k in _t2_keys)
+
+                            # 4) 用最新项目总投资重算造价咨询费（概算审核等依赖总投资）
+                            if _is_hebei_project(ctx["query"]):
+                                _cc_multi = calc_cost_consulting_multi_hebei(
+                                    cc_svcs, ctx["jianan"],
+                                    total_investment=_curr_total,
+                                    professional_coef=_cc_prof, discount_coef=1.0,
+                                )
+                            else:
+                                _cc_multi = calc_cost_consulting_multi(
+                                    cc_svcs, ctx["total_part1"],
+                                    jianan_only=ctx["jianan"],
+                                    total_investment=_curr_total,
+                                )
+                            _cc_total = _cc_multi.get("合计(万元)", 0)
+                            numerical["造价咨询费(万元)"] = _cc_total
+                            preview_raw["原始结果"]["造价咨询费"] = _cc_multi
+
+                            # 5) 更新 T0（CC 变了）
+                            _new_t0 = sum(
+                                numerical.get(f"{k}(万元)", 0) for k in t0_keys)
+
+                            # 6) 重算汇总
+                            _fee_total = _new_t0 + t1_total + _new_t2
+                            _yb = round(
+                                (ctx["total_part1"] + _fee_total) * _yb_rate / 100.0, 4)
+                            _curr_total = round(
+                                ctx["total_part1"] + _fee_total + _yb, 4)
+
+                        # 收敛后写入汇总值
+                        cc_multi = preview_raw["原始结果"]["造价咨询费"]
+                        cc_total = numerical["造价咨询费(万元)"]
+                        preview_raw["T0小计(万元)"] = round(_new_t0, 4)
+                        preview_raw["T2小计(万元)"] = round(_new_t2, 4)
+                        preview_raw["二类费合计(万元)"] = round(_fee_total, 4)
                         preview_raw["总投资(万元)"] = round(
-                            ctx["total_part1"] + fee_total_raw, 4)
-                        preview_raw["项目总投资(万元)"] = round(
-                            ctx["total_part1"] + fee_total_raw + preview_raw.get("预备费小计(万元)", 0), 4)
+                            ctx["total_part1"] + _fee_total, 4)
+                        preview_raw["预备费小计(万元)"] = round(_yb, 4)
+                        numerical["预备费(万元)"] = _yb
+                        preview_raw["项目总投资(万元)"] = round(_curr_total, 4)
                     except Exception:
                         pass  # 失败时保留原始值
 

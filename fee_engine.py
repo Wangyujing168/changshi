@@ -767,7 +767,7 @@ def calc_cost_consulting_multi_hebei(
                 "费用(万元)": fee,
                 "计算步骤": single["计算步骤"],
             })
-        except ValueError as e:
+        except (ValueError, KeyError) as e:
             warnings.append(f"⚠️ **{svc}**：{e}")
     total_before_discount = round(total, 4)
     total = round(total_before_discount * discount_coef, 4)
@@ -826,7 +826,7 @@ def calc_cost_consulting_multi(
                 "费用(万元)": fee,
                 "计算步骤": single["计算步骤"],
             })
-        except ValueError as e:
+        except (ValueError, KeyError) as e:
             warnings.append(f"⚠️ **{svc}**：{e}")
     total = round(total, 4)
     desc = f"共 {len(details)} 项服务，合计 **{total} 万元**"
@@ -4979,14 +4979,15 @@ def _build_fee_selection_meta(
         {"name": "全过程造价咨询", "label": "全过程造价咨询（基数=建安费）"},
         {"name": "工程造价鉴定", "label": "工程造价鉴定（基数=鉴定标的额）"},
     ]
+    _cc_hebei = _is_hebei_project(query)
     definitions.append({
         "name": "造价咨询费",
         "label": _FEE_LABELS.get("造价咨询费", "工程造价咨询服务费"),
         "tier": 0,  # 仅需建安+设备费
-        "has_coefs": False,
+        "has_coefs": _cc_hebei,  # 河北项目有专业调整系数（附件2）
         "has_rates": False,
         "has_services": True,
-        "coef_config": None,
+        "coef_config": _get_coef_config_simple("造价咨询费", query) if _cc_hebei else None,
         "rate_config": None,
         "service_config": {
             "services_tianjin": _cc_tj_services,
@@ -5088,6 +5089,20 @@ def _get_coef_config_simple(fee_name: str, query: str) -> dict | None:
                     "current": 1.0,
                     "options": list(HUANPING_SENSITIVITY_OPTIONS),
                     "description": "计价格[2002]125号 附件二 表2",
+                },
+            ],
+        }
+    elif fee_name == "造价咨询费":
+        # 河北省专业工程调整系数（冀建市研[2017]2号 附件2）
+        return {
+            "calc_func": "calc_cost_consulting_multi_hebei",
+            "coefs": [
+                {
+                    "key": "专业调整系数",
+                    "param_name": "professional_coef",
+                    "current": 1.0,
+                    "options": list(_HEBEI_PROFESSIONAL_COEFFICIENTS.items()),
+                    "description": "冀建市研[2017]2号 附件2：不同专业工程适用不同调整系数",
                 },
             ],
         }
