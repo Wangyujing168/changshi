@@ -2209,17 +2209,21 @@ if "pending_keyan" in st.session_state:
             # ── 系数调整 ──
             st.markdown("### 🎛️ 系数调整")
 
-            # 行业调整系数
-            from fee_engine import KEYAN_INDUSTRY_COEFS
-
-            ky_industry_items = sorted(
-                set(KEYAN_INDUSTRY_COEFS.items()), key=lambda x: (-x[1], x[0]))
-            ky_ind_labels = [f"{label}（{val}）" for label, val in ky_industry_items]
-            ky_ind_values = [val for _, val in ky_industry_items]
+            # 行业调整系数（按系数分组）
+            ky_ind_groups = [
+                ("石化、化工、钢铁", 1.3),
+                ("石油、天然气、水利、水电、交通（水运）、化纤", 1.2),
+                ("有色、黄金、纺织、轻工、邮电、广播电视、医药、煤炭、"
+                 "火电（含核电）、机械（含船舶、航空、航天、兵器）", 1.0),
+                ("林业、商业、粮食、建筑", 0.8),
+                ("建材、交通（公路）、铁道、市政公用工程", 0.7),
+            ]
+            ky_ind_labels = [f"{label}（{val}）" for label, val in ky_ind_groups]
+            ky_ind_values = [val for _, val in ky_ind_groups]
             try:
                 cur_ind_idx = ky_ind_values.index(ind_coef)
             except ValueError:
-                cur_ind_idx = 0
+                cur_ind_idx = 2  # 默认 1.0
             ind_label = st.selectbox(
                 "行业调整系数",
                 range(len(ky_ind_labels)),
@@ -2228,7 +2232,7 @@ if "pending_keyan" in st.session_state:
                 key="keyan_ind_coef",
             )
             chosen_ind_coef = ky_ind_values[ind_label]
-            chosen_ind_name = ky_industry_items[ind_label][0]
+            chosen_ind_name = ky_ind_groups[ind_label][0]
 
             # 复杂程度系数
             comp_options = [("简单", 0.8), ("一般", 1.0), ("复杂", 1.2)]
