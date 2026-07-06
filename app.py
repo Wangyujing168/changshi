@@ -3213,38 +3213,62 @@ if "pending_fee_selection" in st.session_state:
 
         st.markdown("---")
 
-        # ── Discount ──
+        # ── 按费种独立打折 ──
         st.markdown("### 💰 费用打折")
-        discount_coef = st.number_input(
-            "打折系数（1.0 = 不打折，0.8 = 打八折，0.5 = 打五折）",
-            min_value=0.01, max_value=2.00,
-            value=ctx.get("discount_coef", 1.0),
-            step=0.05, format="%.2f",
-            key="discount_fee_selection",
-            help="输入打折系数调整最终费用。",
-        )
-        ctx["discount_coef"] = discount_coef
-        st.session_state.pending_fee_selection["discount_coef"] = discount_coef
+        st.caption("为每个选中的费种单独设置打折系数（1.0 = 不打折）")
+        discounts = ctx.setdefault("fee_discounts", {})
+        preview = ctx.get("preview")
+        numerical = preview["numerical"] if preview else {}
+        discounted_total = 0.0
+        raw_total = 0.0
 
-        if ctx["preview"]:
-            base_total = ctx["preview"]["fee_total_with_custom"]
-            discounted = round(base_total * discount_coef, 4)
-            if abs(discount_coef - 1.0) < 0.005:
-                st.info(f"**不打折**，最终二类费合计：**{discounted} 万元**")
-            elif discount_coef < 1.0:
-                st.warning(
-                    f"打折系数 **{discount_coef:.2f}** → "
-                    f"{base_total:.4f} 万 × {discount_coef:.2f} = "
-                    f"**{discounted} 万元**"
-                    f"（节省 {round(base_total - discounted, 4)} 万元）"
+        selected_fee_list = sorted(
+            [fd for fd in ctx["fee_defs"]
+             if fd["name"] in new_selected and fd["name"] != "预备费"],
+            key=lambda fd: (fd["tier"], fd["name"]),
+        )
+
+        for fd in selected_fee_list:
+            fn = fd["name"]
+            val = numerical.get(f"{fn}(万元)", 0)
+            if val <= 0:
+                continue
+            raw_total += val
+            cur_discount = discounts.get(fn, 1.0)
+            disc_col1, disc_col2 = st.columns([3, 1])
+            with disc_col1:
+                st.caption(f"**{fd['label']}**（{val:.4f} 万元）")
+            with disc_col2:
+                new_discount = st.number_input(
+                    f"系数",
+                    min_value=0.01, max_value=2.00,
+                    value=float(cur_discount), step=0.05,
+                    format="%.2f",
+                    key=f"discount_{fn}",
+                    label_visibility="collapsed",
                 )
+                discounts[fn] = new_discount
+            discounted_val = round(val * new_discount, 4)
+            discounted_total += discounted_val
+            if abs(new_discount - 1.0) >= 0.005:
+                st.caption(f"  → {discounted_val:.4f} 万元")
+
+        # 自定义费用不打折
+        custom_total = sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
+        discounted_total += custom_total
+        raw_total += custom_total
+
+        if abs(discounted_total - raw_total) > 0.005:
+            st.markdown(f"**打折前二类费合计**：{raw_total:.4f} 万元")
+            st.markdown(f"**打折后二类费合计**：**{discounted_total:.4f} 万元**")
+            if discounted_total < raw_total:
+                st.success(f"节省 **{round(raw_total - discounted_total, 4)}** 万元")
             else:
-                st.warning(
-                    f"上浮系数 **{discount_coef:.2f}** → "
-                    f"{base_total:.4f} 万 × {discount_coef:.2f} = "
-                    f"**{discounted} 万元**"
-                    f"（增加 {round(discounted - base_total, 4)} 万元）"
-                )
+                st.warning(f"增加 **{round(discounted_total - raw_total, 4)}** 万元")
+        else:
+            st.info(f"二类费合计（未打折）：**{raw_total:.4f} 万元**")
+
+        st.session_state.pending_fee_selection["fee_discounts"] = discounts
 
         # ── Confirm / Cancel ──
         st.markdown("---")
@@ -3259,12 +3283,14 @@ if "pending_fee_selection" in st.session_state:
                 # 构建响应文本
                 preview = ctx.get("preview")
                 numerical = preview["numerical"] if preview else {}
-                discount_coef_val = ctx.get("discount_coef", 1.0)
+                fee_discounts = ctx.get("fee_discounts", {})
                 custom_fees = ctx.get("custom_fees", [])
                 fee_defs = ctx["fee_defs"]
 
-                # 按层级生成费用明细
+                # 按层级生成费用明细（含各自打折，预备费不计入二类费合计）
                 tier_lines = []
+                discounted_fee_total = 0.0
+                raw_fee_total = 0.0
                 for tier in [0, 1, 2, 3]:
                     tier_fees = [
                         fd for fd in fee_defs
@@ -3276,6 +3302,15 @@ if "pending_fee_selection" in st.session_state:
                         fn = fd["name"]
                         val = numerical.get(f"{fn}(万元)")
                         if val is not None:
+                            is_yubei = (fn == "预备费")
+                            if not is_yubei:
+                                raw_fee_total += val
+                                disc = fee_discounts.get(fn, 1.0)
+                                disc_val = round(val * disc, 4)
+                                discounted_fee_total += disc_val
+                            else:
+                                disc = 1.0
+                                disc_val = val
                             coef_note = ""
                             note_parts = []
                             if fn in ctx["coef_overrides"]:
@@ -3289,9 +3324,12 @@ if "pending_fee_selection" in st.session_state:
                                 svcs = ctx["service_selections"][fn]
                                 if svcs and svcs != ["编制报告书"]:
                                     note_parts.append(f"{'、'.join(svcs)}")
+                            if abs(disc - 1.0) >= 0.005:
+                                note_parts.append(f"打折={disc:.2f}")
                             if note_parts:
                                 coef_note = f"（{'，'.join(note_parts)}）"
-                            tier_lines.append(f"- **{fd['label']}**{coef_note}：{val:.4f} 万元")
+                            display_val = disc_val if abs(disc - 1.0) >= 0.005 else val
+                            tier_lines.append(f"- **{fd['label']}**{coef_note}：{display_val:.4f} 万元")
 
                 # 自定义费用
                 custom_lines = []
@@ -3304,15 +3342,15 @@ if "pending_fee_selection" in st.session_state:
                         custom_total_val += cf["amount_wan"]
 
                 # 打折文本
-                base_total = preview["fee_total_with_custom"] if preview else 0
-                discounted = round(base_total * discount_coef_val, 4)
                 discount_text = ""
-                if abs(discount_coef_val - 1.0) >= 0.005:
+                if abs(discounted_fee_total - raw_fee_total) > 0.005:
                     discount_text = (
-                        f"\n\n**打折系数**：{discount_coef_val:.2f}\n\n"
-                        f"**打折后二类费合计**：{discounted} 万元"
-                        f"（{base_total:.4f} 万 × {discount_coef_val:.2f}）"
+                        f"\n\n**打折后二类费合计**：{discounted_fee_total:.4f} 万元"
+                        f"（打折前 {raw_fee_total:.4f} 万元）"
                     )
+
+                # 加上自定义费用
+                discounted_with_custom = discounted_fee_total + custom_total_val
 
                 # 预备费文本
                 yb_val = preview["yubei_total"] if preview else 0
@@ -3329,7 +3367,8 @@ if "pending_fee_selection" in st.session_state:
                     f"项目类型：**{ctx['project_type']}**\n\n"
                     f"### 各项费用\n\n"
                     + "\n".join(tier_lines) +
-                    (f"\n\n**二类费合计**：{discounted} 万元" if not discount_text else "")
+                    (f"\n\n**二类费合计**：{discounted_with_custom:.4f} 万元"
+                     if not discount_text else "")
                     + (f"\n".join(custom_lines) if custom_lines else "")
                     + discount_text
                     + yb_text
@@ -3449,7 +3488,7 @@ if prompt:
                                 ),
                             },
                             "custom_fees": [],
-                            "discount_coef": 1.0,
+                            "fee_discounts": {fd["name"]: 1.0 for fd in fee_defs},
                             "preview": None,
                         }
                     else:
@@ -3478,6 +3517,10 @@ if prompt:
                                     for c in fd["coef_config"]["coefs"]:
                                         defaults[c["param_name"]] = c["current"]
                                     ctx["coef_overrides"][fd["name"]] = defaults
+                        # 补上可能缺失的 fee_discounts
+                        discounts = ctx.setdefault("fee_discounts", {})
+                        for fd in fee_defs:
+                            discounts.setdefault(fd["name"], 1.0)
 
                     n_fees = len(st.session_state.pending_fee_selection["fee_defs"])
                     response = (
