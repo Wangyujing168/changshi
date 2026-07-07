@@ -124,7 +124,7 @@ def _build_cascade_excel(ctx: dict) -> bytes:
     center_align = Alignment(horizontal="center", vertical="center")
     left_align = Alignment(horizontal="left", vertical="center")
     right_align = Alignment(horizontal="right", vertical="center")
-    money_fmt = '#,##0.0000'
+    money_fmt = '#,##0.00'
 
     preview = ctx.get("preview", {})
     numerical = preview.get("numerical", {}) if preview else {}
@@ -150,9 +150,9 @@ def _build_cascade_excel(ctx: dict) -> bytes:
 
     # ── 项目基本信息 ──
     info_data = [
-        ("建安工程费", f"{ctx.get('jianan', 0):.4f} 万元"),
-        ("设备购置费", f"{ctx.get('shebei', 0):.4f} 万元"),
-        ("第一部分工程费", f"{ctx.get('total_part1', 0):.4f} 万元"),
+        ("建安工程费", f"{ctx.get('jianan', 0):.2f} 万元"),
+        ("设备购置费", f"{ctx.get('shebei', 0):.2f} 万元"),
+        ("第一部分工程费", f"{ctx.get('total_part1', 0):.2f} 万元"),
         ("项目类型", ctx.get("project_type", "")),
         ("计算日期", datetime.date.today().isoformat()),
     ]
@@ -329,13 +329,13 @@ def _render_discount_section(fee_value_wan: float, default_discount: float, key_
     elif discount < 1.0:
         st.warning(
             f"打折系数 **{discount:.2f}** → "
-            f"{fee_value_wan:.4f} 万 × {discount:.2f} = **{discounted} 万元**"
+            f"{fee_value_wan:.2f} 万 × {discount:.2f} = **{discounted} 万元**"
             f"（节省 {round(fee_value_wan - discounted, 4)} 万元）"
         )
     else:
         st.warning(
             f"上浮系数 **{discount:.2f}** → "
-            f"{fee_value_wan:.4f} 万 × {discount:.2f} = **{discounted} 万元**"
+            f"{fee_value_wan:.2f} 万 × {discount:.2f} = **{discounted} 万元**"
             f"（增加 {round(discounted - fee_value_wan, 4)} 万元）"
         )
 
@@ -551,21 +551,21 @@ def _render_cascade_result(result):
 
     st.markdown("### 费用汇总")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("第一部分工程费", f"{summary['第一部分工程费(万元)']:.4f} 万元")
-    col2.metric("二类费合计", f"{summary['二类费合计(万元)']:.4f} 万元")
+    col1.metric("第一部分工程费", f"{summary['第一部分工程费(万元)']:.2f} 万元")
+    col2.metric("二类费合计", f"{summary['二类费合计(万元)']:.2f} 万元")
     yubei_val = summary.get("预备费(万元)", 0)
-    col3.metric("预备费", f"{yubei_val:.4f} 万元")
-    col4.metric("项目总投资", f"{summary['项目总投资(万元)']:.4f} 万元")
+    col3.metric("预备费", f"{yubei_val:.2f} 万元")
+    col4.metric("项目总投资", f"{summary['项目总投资(万元)']:.2f} 万元")
 
     # 层级小计
     extra_caption = ""
     if extra_fees:
         extra_total = summary.get("额外费用小计(万元)", 0)
-        extra_caption = f" ｜ 额外费用：{extra_total:.4f} 万元"
+        extra_caption = f" ｜ 额外费用：{extra_total:.2f} 万元"
     st.caption(
-        f"T0 小计：{summary['T0小计(万元)']:.4f} 万元 ｜ "
-        f"T1 小计：{summary['T1小计(万元)']:.4f} 万元 ｜ "
-        f"T2 小计：{summary['T2小计(万元)']:.4f} 万元"
+        f"T0 小计：{summary['T0小计(万元)']:.2f} 万元 ｜ "
+        f"T1 小计：{summary['T1小计(万元)']:.2f} 万元 ｜ "
+        f"T2 小计：{summary['T2小计(万元)']:.2f} 万元"
         f"{extra_caption}"
     )
 
@@ -583,22 +583,22 @@ def _render_cascade_result(result):
     # 构建响应文本
     lines = []
     for r in rows:
-        lines.append(f"- **{r['费种']}**：{r['金额(万元)']:.4f} 万元")
+        lines.append(f"- **{r['费种']}**：{r['金额(万元)']:.2f} 万元")
     if extra_fees:
         for e in extra_fees:
             lines.append(f"- **{e['名称']}**（用户指定）：{e['金额(万元)']} 万元")
     yubei_text = ""
     yb_val = summary.get("预备费(万元)", 0)
     if yb_val > 0:
-        yubei_text = f"\n**预备费（基本预备费）：{yb_val:.4f} 万元**（(一类费+二类费)×5%）"
+        yubei_text = f"\n**预备费（基本预备费）：{yb_val:.2f} 万元**（(一类费+二类费)×5%）"
     return (
         f"## 多费种联算结果\n\n"
         f"计费基数：建安费 {params['建安工程费(万元)']} 万 + 设备费 {params['设备购置费(万元)']} 万 "
         f"= **{params['第一部分工程费(万元)']} 万元**\n\n"
         f"### 各项费用\n\n" + "\n".join(lines) + "\n\n"
-        f"**二类费合计：{summary['二类费合计(万元)']:.4f} 万元**"
+        f"**二类费合计：{summary['二类费合计(万元)']:.2f} 万元**"
         f"{yubei_text}\n\n"
-        f"**项目总投资：{summary['项目总投资(万元)']:.4f} 万元**"
+        f"**项目总投资：{summary['项目总投资(万元)']:.2f} 万元**"
     )
 
 
@@ -651,7 +651,7 @@ def _render_iteration_result(result):
             f"（阈值 {result['收敛阈值(万元)']} 万元）。\n\n"
             f"静态总投资：**{final['总投资(万元)']:.2f} 万元**，"
             f"二类费合计：**{final['二类费合计(万元)']:.2f} 万元**\n\n"
-            f"预备费：**{yubei_val:.4f} 万元**（(一类费+二类费)×5%），"
+            f"预备费：**{yubei_val:.2f} 万元**（(一类费+二类费)×5%），"
             f"项目总投资：**{proj_total:.2f} 万元**"
             f"{extra_note}"
         )
@@ -664,11 +664,11 @@ def _render_iteration_result(result):
     st.markdown("### 收敛后各项费用")
     fees = final["各项费用"]
     for fee_key, val in sorted(fees.items()):
-        st.markdown(f"- **{fee_key}**：{val:.4f} 万元")
+        st.markdown(f"- **{fee_key}**：{val:.2f} 万元")
     # 预备费单独显示
     yubei_final_val = final.get("预备费(万元)")
     if yubei_final_val is not None and yubei_final_val > 0:
-        st.markdown(f"- **预备费**：{yubei_final_val:.4f} 万元")
+        st.markdown(f"- **预备费**：{yubei_final_val:.2f} 万元")
     proj_final = final.get("项目总投资(万元)")
     if proj_final is not None:
         st.markdown(f"\n**项目总投资（含预备费）：{proj_final:.2f} 万元**")
@@ -678,13 +678,13 @@ def _render_iteration_result(result):
             st.markdown(f"#### 第 {h['迭代次数']} 轮")
             fees = h["各项费用"]
             for fee_key, val in sorted(fees.items()):
-                st.markdown(f"- {fee_key}：{val:.4f} 万元")
-            st.caption(f"总投资：{h['总投资(万元)']:.2f} 万元 ｜ 变化：{h['变化(万元)']:.4f} 万元")
+                st.markdown(f"- {fee_key}：{val:.2f} 万元")
+            st.caption(f"总投资：{h['总投资(万元)']:.2f} 万元 ｜ 变化：{h['变化(万元)']:.2f} 万元")
 
     # 响应文本
     yb_val = final.get("预备费(万元)", 0)
     proj_total = final.get("项目总投资(万元)", final["总投资(万元)"])
-    yb_text = f"\n预备费：**{yb_val:.4f} 万元**（(一类费+二类费)×5%）" if yb_val > 0 else ""
+    yb_text = f"\n预备费：**{yb_val:.2f} 万元**（(一类费+二类费)×5%）" if yb_val > 0 else ""
     return (
         f"## 迭代计算结果\n\n"
         f"经过 **{result['迭代次数']}** 次迭代，静态总投资收敛至 "
@@ -727,9 +727,9 @@ def _render_comparison_result(result):
             st.markdown(f"#### {s['方案名称']}")
             fees = s["各项费用"]
             for fee_key, val in sorted(fees.items()):
-                st.markdown(f"- **{fee_key}**：{val:.4f} 万元")
-            st.metric("二类费合计", f"{s['二类费合计(万元)']:.4f} 万元")
-            st.metric("总投资", f"{s['总投资(万元)']:.4f} 万元")
+                st.markdown(f"- **{fee_key}**：{val:.2f} 万元")
+            st.metric("二类费合计", f"{s['二类费合计(万元)']:.2f} 万元")
+            st.metric("总投资", f"{s['总投资(万元)']:.2f} 万元")
 
     # 响应文本
     return (
@@ -1267,26 +1267,26 @@ if "pending_simple_fee" in st.session_state:
             elif discount_coef < 1.0:
                 st.warning(
                     f"打折系数 **{discount_coef:.2f}** → "
-                    f"{base_fee_wan:.4f} 万 × {discount_coef:.2f} = "
+                    f"{base_fee_wan:.2f} 万 × {discount_coef:.2f} = "
                     f"**{discounted_fee_wan} 万元**"
                     f"（节省 {round(base_fee_wan - discounted_fee_wan, 4)} 万元）"
                 )
                 discount_text = (
                     f"\n\n**打折系数**：{discount_coef:.2f}\n\n"
                     f"**打折后费用**：{discounted_fee_wan} 万元"
-                    f"（{base_fee_wan:.4f} 万 × {discount_coef:.2f}）"
+                    f"（{base_fee_wan:.2f} 万 × {discount_coef:.2f}）"
                 )
             else:
                 st.warning(
                     f"上浮系数 **{discount_coef:.2f}** → "
-                    f"{base_fee_wan:.4f} 万 × {discount_coef:.2f} = "
+                    f"{base_fee_wan:.2f} 万 × {discount_coef:.2f} = "
                     f"**{discounted_fee_wan} 万元**"
                     f"（增加 {round(discounted_fee_wan - base_fee_wan, 4)} 万元）"
                 )
                 discount_text = (
                     f"\n\n**上浮系数**：{discount_coef:.2f}\n\n"
                     f"**上浮后费用**：{discounted_fee_wan} 万元"
-                    f"（{base_fee_wan:.4f} 万 × {discount_coef:.2f}）"
+                    f"（{base_fee_wan:.2f} 万 × {discount_coef:.2f}）"
                 )
         else:
             discount_coef = 1.0
@@ -1943,7 +1943,7 @@ if "pending_dependent_fee" in st.session_state:
                             preview_fee = dep.get("preview_fee", 0)
 
                         dep_previews[dep_type] = preview_fee
-                        st.info(f"💡 预览：{dep_label} = **{preview_fee:.4f} 万元**")
+                        st.info(f"💡 预览：{dep_label} = **{preview_fee:.2f} 万元**")
                     except Exception as e:
                         st.warning(f"⚠️ 预览计算失败：{e}")
                         dep_previews[dep_type] = 0
@@ -1958,7 +1958,7 @@ if "pending_dependent_fee" in st.session_state:
 
                     # 构建选项
                     rate_labels = [
-                        f"{opt['label']} → {opt['fee']:.4f} 万元"
+                        f"{opt['label']} → {opt['fee']:.2f} 万元"
                         for opt in rate_options
                     ]
                     chosen_label = st.radio(
@@ -1976,7 +1976,7 @@ if "pending_dependent_fee" in st.session_state:
                         "project_type": pt,
                     }
                     dep_previews[dep_type] = chosen_fee
-                    st.info(f"💡 预览：勘察费 = **{chosen_fee:.4f} 万元**"
+                    st.info(f"💡 预览：勘察费 = **{chosen_fee:.2f} 万元**"
                             f"（费率 {chosen_rate}%）")
 
             # ── 底部按钮 ──
@@ -2053,11 +2053,11 @@ if "pending_dependent_fee" in st.session_state:
                         note = d.get("说明", "")
                         if note:
                             detail_rows.append(
-                                f"| **{dtype}** | {dsrc} | {dbase:.4f} | ⚠️ {note} |"
+                                f"| **{dtype}** | {dsrc} | {dbase:.2f} | ⚠️ {note} |"
                             )
                         else:
                             detail_rows.append(
-                                f"| **{dtype}** | {dsrc} | {dbase:.4f} | **{dfee}** |"
+                                f"| **{dtype}** | {dsrc} | {dbase:.2f} | **{dfee}** |"
                             )
                     st.markdown(
                         "| 类型 | 基数来源 | 基数（万元） | 费用（万元） |\n"
@@ -2109,14 +2109,14 @@ if "pending_dependent_fee" in st.session_state:
                 elif discount_coef < 1.0:
                     st.warning(
                         f"打折系数 **{discount_coef:.2f}** → "
-                        f"{base_fee:.4f} 万 × {discount_coef:.2f} = "
+                        f"{base_fee:.2f} 万 × {discount_coef:.2f} = "
                         f"**{discounted_fee} 万元**"
                         f"（节省 {round(base_fee - discounted_fee, 4)} 万元）"
                     )
                 else:
                     st.warning(
                         f"上浮系数 **{discount_coef:.2f}** → "
-                        f"{base_fee:.4f} 万 × {discount_coef:.2f} = "
+                        f"{base_fee:.2f} 万 × {discount_coef:.2f} = "
                         f"**{discounted_fee} 万元**"
                         f"（增加 {round(discounted_fee - base_fee, 4)} 万元）"
                     )
@@ -2149,7 +2149,7 @@ if "pending_dependent_fee" in st.session_state:
                             discount_text = (
                                 f"\n\n**打折系数**：{discount_coef:.2f}\n\n"
                                 f"**打折后费用**：{discounted_fee} 万元"
-                                f"（{base_fee:.4f} 万 × {discount_coef:.2f}）"
+                                f"（{base_fee:.2f} 万 × {discount_coef:.2f}）"
                             )
 
                         final_response = (
@@ -2184,6 +2184,8 @@ if "pending_huanping" in st.session_state:
     ind_name = ctx.get("industry_name", "")
     sens_coef = ctx.get("sensitivity_coef", 1.0)
     discount_coef = ctx.get("discount_coef", 1.0)
+    has_explicit = ctx.get("has_explicit_investment", False)
+    estimated_investment = ctx.get("estimated_investment", amount_wan)
 
     st.divider()
 
@@ -2194,6 +2196,24 @@ if "pending_huanping" in st.session_state:
             "环境影响咨询费包含 **4 项服务类型**。"
             "请勾选需要计算的服务类型，调整系数后点击确认。"
         )
+
+        # ── 计费基数：项目总投资 ──
+        st.markdown("### 💰 计费基数 — 项目总投资")
+        if not has_explicit:
+            st.warning(
+                "⚠️ 环评费计费基数为**项目总投资**（非建安费或设备费）。"
+                "请在下框中输入项目总投资金额。"
+            )
+        investment_input = st.number_input(
+            "项目总投资（万元）",
+            min_value=0.0,
+            value=float(estimated_investment),
+            step=10.0,
+            format="%.2f",
+            key="huanping_investment",
+            help="环评费以项目总投资为计费基数（计价格[2002]125号）",
+        )
+        ctx["estimated_investment"] = investment_input
 
         # ── 服务类型多选 ──
         st.markdown("### 📋 选择服务类型")
@@ -2256,7 +2276,7 @@ if "pending_huanping" in st.session_state:
             st.markdown("### 💡 费用预览")
             try:
                 preview = calc_huanping_multi(
-                    amount_wan,
+                    investment_input,
                     selected,
                     industry_coef=chosen_ind_coef,
                     industry_name=chosen_ind_name,
@@ -2315,14 +2335,14 @@ if "pending_huanping" in st.session_state:
             elif discount_coef < 1.0:
                 st.warning(
                     f"打折系数 **{discount_coef:.2f}** → "
-                    f"{total_fee:.4f} 万 × {discount_coef:.2f} = "
+                    f"{total_fee:.2f} 万 × {discount_coef:.2f} = "
                     f"**{discounted_total} 万元**"
                     f"（节省 {round(total_fee - discounted_total, 4)} 万元）"
                 )
             else:
                 st.warning(
                     f"上浮系数 **{discount_coef:.2f}** → "
-                    f"{total_fee:.4f} 万 × {discount_coef:.2f} = "
+                    f"{total_fee:.2f} 万 × {discount_coef:.2f} = "
                     f"**{discounted_total} 万元**"
                     f"（增加 {round(discounted_total - total_fee, 4)} 万元）"
                 )
@@ -2336,7 +2356,7 @@ if "pending_huanping" in st.session_state:
                 discount_text = (
                     f"\n\n**打折系数**：{discount_coef:.2f}\n\n"
                     f"**打折后费用**：{discounted_total} 万元"
-                    f"（{total_fee:.4f} 万 × {discount_coef:.2f}）"
+                    f"（{total_fee:.2f} 万 × {discount_coef:.2f}）"
                 )
 
             with col_btn1:
@@ -2354,7 +2374,7 @@ if "pending_huanping" in st.session_state:
                         f"**依据**：{_basis_md_links('《关于规范环境影响咨询收费有关问题的通知》（计价格[2002]125号）')}"
                         f"（计价格[2002]125号）\n\n"
                         f"**参数**："
-                        f"估算投资额 {amount_wan:.0f} 万元，"
+                        f"项目总投资 {investment_input:.2f} 万元，"
                         f"行业「{chosen_ind_name}」系数 {chosen_ind_coef}，"
                         f"环境敏感程度系数 {chosen_sens_coef}\n\n"
                         f"### 服务类型明细\n\n"
@@ -2526,14 +2546,14 @@ if "pending_keyan" in st.session_state:
             elif discount_coef < 1.0:
                 st.warning(
                     f"打折系数 **{discount_coef:.2f}** → "
-                    f"{total_fee:.4f} 万 × {discount_coef:.2f} = "
+                    f"{total_fee:.2f} 万 × {discount_coef:.2f} = "
                     f"**{discounted_total} 万元**"
                     f"（节省 {round(total_fee - discounted_total, 4)} 万元）"
                 )
             else:
                 st.warning(
                     f"上浮系数 **{discount_coef:.2f}** → "
-                    f"{total_fee:.4f} 万 × {discount_coef:.2f} = "
+                    f"{total_fee:.2f} 万 × {discount_coef:.2f} = "
                     f"**{discounted_total} 万元**"
                     f"（增加 {round(discounted_total - total_fee, 4)} 万元）"
                 )
@@ -2547,7 +2567,7 @@ if "pending_keyan" in st.session_state:
                 discount_text = (
                     f"\n\n**打折系数**：{discount_coef:.2f}\n\n"
                     f"**打折后费用**：{discounted_total} 万元"
-                    f"（{total_fee:.4f} 万 × {discount_coef:.2f}）"
+                    f"（{total_fee:.2f} 万 × {discount_coef:.2f}）"
                 )
 
             with col_btn1:
@@ -2631,13 +2651,13 @@ if "pending_fee_selection" in st.session_state:
                         f"**{fd['label']}**",
                         value=checked,
                         key=f"fee_sel_{fee_name}",
-                        help=f"默认值：{fd['default_value_wan']:.4f} 万元 | "
+                        help=f"默认值：{fd['default_value_wan']:.2f} 万元 | "
                              f"依据：{_FEE_LABELS.get(fee_name, fee_name)}",
                     )
                     if new_checked:
                         new_selected.add(fee_name)
                     if fd["default_value_wan"] > 0:
-                        st.caption(f"≈ {fd['default_value_wan']:.4f} 万元")
+                        st.caption(f"≈ {fd['default_value_wan']:.2f} 万元")
                     else:
                         st.caption("需满足前提条件")
 
@@ -2878,7 +2898,7 @@ if "pending_fee_selection" in st.session_state:
                                 st.markdown(
                                     f"**{d['服务类型']}**：{d['费用(万元)']} 万元"
                                 )
-                        st.caption(f"造价咨询费合计：**{cc_total:.4f}** 万元")
+                        st.caption(f"造价咨询费合计：**{cc_total:.2f}** 万元")
                     except Exception:
                         pass
                 elif is_huanping:
@@ -2887,8 +2907,21 @@ if "pending_fee_selection" in st.session_state:
                     hp_ind_coef = hp_coefs.get("industry_coef", 1.0)
                     hp_sens_coef = hp_coefs.get("sensitivity_coef", 1.0)
                     try:
+                        # 环评费基数为项目总投资，从 cascade 引擎获取近似值
+                        _hp_skip = set(fd["name"] for fd in ctx["fee_defs"]) - new_selected
+                        _hp_raw = _calc_all_fees(
+                            jianan=ctx["jianan"], shebei=ctx["shebei"],
+                            project_type=ctx["project_type"], query=ctx["query"],
+                            skip_fees=_hp_skip if _hp_skip else None,
+                            coef_overrides=ctx.get("coef_overrides") or None,
+                        )
+                        _hp_approx_total = (
+                            _hp_raw.get("项目总投资(万元)", 0)
+                            + sum(cf["amount_wan"]
+                                  for cf in ctx.get("custom_fees", []))
+                        )
                         hp_preview = calc_huanping_multi(
-                            ctx["total_part1"],
+                            _hp_approx_total if _hp_approx_total > 0 else ctx["total_part1"],
                             selected_svcs,
                             industry_coef=hp_ind_coef,
                             sensitivity_coef=hp_sens_coef,
@@ -2901,7 +2934,7 @@ if "pending_fee_selection" in st.session_state:
                                 f"- {d['服务类型']}：**{d['结果(万元)']}** "
                                 f"（中值 **{d['结果中值(万元)']}** 万元）"
                             )
-                        st.caption(f"环评费合计：**{hp_total:.4f}** 万元")
+                        st.caption(f"环评费合计：**{hp_total:.2f}** 万元")
                     except Exception:
                         pass
                 elif is_keyan:
@@ -2933,7 +2966,7 @@ if "pending_fee_selection" in st.session_state:
                             st.markdown(
                                 f"- {d['服务类型']}：**{d['费用(万元)']}** 万元"
                             )
-                        st.caption(f"可研费合计：**{ky_total:.4f}** 万元")
+                        st.caption(f"可研费合计：**{ky_total:.2f}** 万元")
                     except Exception:
                         pass
 
@@ -2969,7 +3002,7 @@ if "pending_fee_selection" in st.session_state:
                 current_rate = rate_overrides.get(fee_name, default_rate)
 
                 # 构建费率标签列表
-                rate_labels = [f"{ro['rate']} → {ro['fee_wan']:.4f} 万元" for ro in rate_options]
+                rate_labels = [f"{ro['rate']} → {ro['fee_wan']:.2f} 万元" for ro in rate_options]
                 rate_values = [ro["rate"] for ro in rate_options]
 
                 # 找到当前选中费率的索引
@@ -2992,7 +3025,7 @@ if "pending_fee_selection" in st.session_state:
                         rate_values,
                         index=rate_idx,
                         format_func=lambda r, opts=rate_options: next(
-                            (f"{o['rate']}  →  {o['fee_wan']:.4f} 万元"
+                            (f"{o['rate']}  →  {o['fee_wan']:.2f} 万元"
                              for o in opts if o['rate'] == r), r),
                         key=f"cascade_rate_{fee_name}",
                         horizontal=False,
@@ -3018,7 +3051,7 @@ if "pending_fee_selection" in st.session_state:
                             <span style="font-size: 1.1rem;">费率</span>
                             <span style="font-size: 1.8rem; font-weight: 700;">{selected_rate}</span>
                             <span style="font-size: 1.1rem; opacity: 0.7;">→ 费用</span>
-                            <span style="font-size: 1.8rem; font-weight: 700;">{selected_fee:.4f} 万</span>
+                            <span style="font-size: 1.8rem; font-weight: 700;">{selected_fee:.2f} 万</span>
                         </div>""",
                         unsafe_allow_html=True,
                     )
@@ -3061,7 +3094,7 @@ if "pending_fee_selection" in st.session_state:
             for i, cf in enumerate(ctx["custom_fees"]):
                 c1, c2 = st.columns([5, 1])
                 with c1:
-                    st.markdown(f"- **{cf['name']}**：{cf['amount_wan']:.4f} 万元")
+                    st.markdown(f"- **{cf['name']}**：{cf['amount_wan']:.2f} 万元")
                 with c2:
                     if st.button("🗑", key=f"cascade_del_custom_{i}", help="删除此费用"):
                         ctx["custom_fees"].pop(i)
@@ -3121,8 +3154,14 @@ if "pending_fee_selection" in st.session_state:
                     hp_ind_coef = hp_coefs.get("industry_coef", 1.0)
                     hp_sens_coef = hp_coefs.get("sensitivity_coef", 1.0)
                     try:
+                        # 环评费基数为项目总投资（已包含自定义费用）
+                        _hp_base = (
+                            preview_raw.get("项目总投资(万元)", 0)
+                            + sum(cf["amount_wan"]
+                                  for cf in ctx.get("custom_fees", []))
+                        )
                         hp_multi = calc_huanping_multi(
-                            ctx["total_part1"],
+                            _hp_base if _hp_base > 0 else ctx["total_part1"],
                             hp_svcs,
                             industry_coef=hp_ind_coef,
                             sensitivity_coef=hp_sens_coef,
@@ -3346,7 +3385,7 @@ if "pending_fee_selection" in st.session_state:
                     continue
                 st.markdown(
                     f"**{tier_labels[tier]}**  "
-                    f"<small style='color:#888;'>{preview_raw.get(f'T{tier}小计(万元)', 0):.4f} 万元</small>",
+                    f"<small style='color:#888;'>{preview_raw.get(f'T{tier}小计(万元)', 0):.2f} 万元</small>",
                     unsafe_allow_html=True,
                 )
                 for fd in tier_fees:
@@ -3370,21 +3409,21 @@ if "pending_fee_selection" in st.session_state:
                         if note_parts:
                             note_str = f" <small style='color:#888;'>({'，'.join(note_parts)})</small>"
                         st.markdown(
-                            f"- {fd['label']}：**{val:.4f}** 万元{note_str}",
+                            f"- {fd['label']}：**{val:.2f}** 万元{note_str}",
                             unsafe_allow_html=True,
                         )
 
             # 预备费
             yb_val = numerical.get("预备费(万元)")
             if yb_val is not None and yb_val > 0:
-                st.markdown(f"**预备费**：**{yb_val:.4f}** 万元")
+                st.markdown(f"**预备费**：**{yb_val:.2f}** 万元")
 
             # 自定义费用
             custom_total = sum(cf["amount_wan"] for cf in ctx["custom_fees"])
             if ctx["custom_fees"]:
                 st.markdown("**自定义费用**：")
                 for cf in ctx["custom_fees"]:
-                    st.markdown(f"- {cf['name']}：**{cf['amount_wan']:.4f}** 万元")
+                    st.markdown(f"- {cf['name']}：**{cf['amount_wan']:.2f}** 万元")
 
             # ── 汇总指标 ──
             st.markdown("---")
@@ -3397,10 +3436,10 @@ if "pending_fee_selection" in st.session_state:
             project_total_with_custom = round(pt + custom_total, 4)
 
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("二类费合计", f"{fee_total_with_custom:.4f} 万元")
-            col2.metric("预备费", f"{yb_total:.4f} 万元")
-            col3.metric("项目总投资", f"{project_total_with_custom:.4f} 万元")
-            col4.metric("自定义费小计", f"{custom_total:.4f} 万元")
+            col1.metric("二类费合计", f"{fee_total_with_custom:.2f} 万元")
+            col2.metric("预备费", f"{yb_total:.2f} 万元")
+            col3.metric("项目总投资", f"{project_total_with_custom:.2f} 万元")
+            col4.metric("自定义费小计", f"{custom_total:.2f} 万元")
 
             # 存储预览结果供确认按钮使用
             ctx["preview"] = {
@@ -3446,7 +3485,7 @@ if "pending_fee_selection" in st.session_state:
             cur_discount = discounts.get(fn, 1.0)
             disc_col1, disc_col2 = st.columns([3, 1])
             with disc_col1:
-                st.caption(f"**{fd['label']}**（{val:.4f} 万元）")
+                st.caption(f"**{fd['label']}**（{val:.2f} 万元）")
             with disc_col2:
                 new_discount = st.number_input(
                     f"系数",
@@ -3460,7 +3499,7 @@ if "pending_fee_selection" in st.session_state:
             discounted_val = round(val * new_discount, 4)
             discounted_total += discounted_val
             if abs(new_discount - 1.0) >= 0.005:
-                st.caption(f"  → {discounted_val:.4f} 万元")
+                st.caption(f"  → {discounted_val:.2f} 万元")
 
         # 自定义费用不打折
         custom_total = sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
@@ -3468,14 +3507,14 @@ if "pending_fee_selection" in st.session_state:
         raw_total += custom_total
 
         if abs(discounted_total - raw_total) > 0.005:
-            st.markdown(f"**打折前二类费合计**：{raw_total:.4f} 万元")
-            st.markdown(f"**打折后二类费合计**：**{discounted_total:.4f} 万元**")
+            st.markdown(f"**打折前二类费合计**：{raw_total:.2f} 万元")
+            st.markdown(f"**打折后二类费合计**：**{discounted_total:.2f} 万元**")
             if discounted_total < raw_total:
-                st.success(f"节省 **{round(raw_total - discounted_total, 4)}** 万元")
+                st.success(f"节省 **{round(raw_total - discounted_total, 2)}** 万元")
             else:
-                st.warning(f"增加 **{round(discounted_total - raw_total, 4)}** 万元")
+                st.warning(f"增加 **{round(discounted_total - raw_total, 2)}** 万元")
         else:
-            st.info(f"二类费合计（未打折）：**{raw_total:.4f} 万元**")
+            st.info(f"二类费合计（未打折）：**{raw_total:.2f} 万元**")
 
         st.session_state.pending_fee_selection["fee_discounts"] = discounts
 
@@ -3552,7 +3591,7 @@ if "pending_fee_selection" in st.session_state:
                             if note_parts:
                                 coef_note = f"（{'，'.join(note_parts)}）"
                             display_val = disc_val if abs(disc - 1.0) >= 0.005 else val
-                            tier_lines.append(f"- **{fd['label']}**{coef_note}：{display_val:.4f} 万元")
+                            tier_lines.append(f"- **{fd['label']}**{coef_note}：{display_val:.2f} 万元")
 
                 # 自定义费用
                 custom_lines = []
@@ -3561,15 +3600,15 @@ if "pending_fee_selection" in st.session_state:
                     custom_lines.append("")
                     custom_lines.append("**自定义费用**：")
                     for cf in custom_fees:
-                        custom_lines.append(f"- **{cf['name']}**：{cf['amount_wan']:.4f} 万元")
+                        custom_lines.append(f"- **{cf['name']}**：{cf['amount_wan']:.2f} 万元")
                         custom_total_val += cf["amount_wan"]
 
                 # 打折文本
                 discount_text = ""
                 if abs(discounted_fee_total - raw_fee_total) > 0.005:
                     discount_text = (
-                        f"\n\n**打折后二类费合计**：{discounted_fee_total:.4f} 万元"
-                        f"（打折前 {raw_fee_total:.4f} 万元）"
+                        f"\n\n**打折后二类费合计**：{discounted_fee_total:.2f} 万元"
+                        f"（打折前 {raw_fee_total:.2f} 万元）"
                     )
 
                 # 加上自定义费用
@@ -3579,7 +3618,7 @@ if "pending_fee_selection" in st.session_state:
                 yb_val = preview["yubei_total"] if preview else 0
                 yb_text = ""
                 if yb_val > 0:
-                    yb_text = f"\n\n**预备费（基本预备费）**：{yb_val:.4f} 万元"
+                    yb_text = f"\n\n**预备费（基本预备费）**：{yb_val:.2f} 万元"
 
                 project_total_val = preview["project_total_with_custom"] if preview else 0
 
@@ -3590,12 +3629,12 @@ if "pending_fee_selection" in st.session_state:
                     f"项目类型：**{ctx['project_type']}**\n\n"
                     f"### 各项费用\n\n"
                     + "\n".join(tier_lines) +
-                    (f"\n\n**二类费合计**：{discounted_with_custom:.4f} 万元"
+                    (f"\n\n**二类费合计**：{discounted_with_custom:.2f} 万元"
                      if not discount_text else "")
                     + (f"\n".join(custom_lines) if custom_lines else "")
                     + discount_text
                     + yb_text
-                    + f"\n\n**项目总投资**：{project_total_val:.4f} 万元"
+                    + f"\n\n**项目总投资**：{project_total_val:.2f} 万元"
                 )
 
                 st.session_state.messages.append({
@@ -3792,6 +3831,8 @@ if prompt:
                         # === 环评费多服务类型选择 ===
                         st.session_state.pending_huanping = {
                             "amount_wan": fee_result["amount_wan"],
+                            "estimated_investment": fee_result.get("estimated_investment", fee_result["amount_wan"]),
+                            "has_explicit_investment": fee_result.get("has_explicit_investment", False),
                             "industry_coef": fee_result.get("industry_coef", 1.0),
                             "industry_name": fee_result.get("industry_name", ""),
                             "sensitivity_coef": fee_result.get("sensitivity_coef", 1.0),
@@ -3890,14 +3931,14 @@ if prompt:
                             elif discount_coef < 1.0:
                                 st.warning(
                                     f"打折系数 **{discount_coef:.2f}** → "
-                                    f"{base_fee_wan:.4f} 万 × {discount_coef:.2f} = "
+                                    f"{base_fee_wan:.2f} 万 × {discount_coef:.2f} = "
                                     f"**{discounted_fee_wan} 万元**"
                                     f"（节省 {round(base_fee_wan - discounted_fee_wan, 4)} 万元）"
                                 )
                             else:
                                 st.warning(
                                     f"上浮系数 **{discount_coef:.2f}** → "
-                                    f"{base_fee_wan:.4f} 万 × {discount_coef:.2f} = "
+                                    f"{base_fee_wan:.2f} 万 × {discount_coef:.2f} = "
                                     f"**{discounted_fee_wan} 万元**"
                                     f"（增加 {round(discounted_fee_wan - base_fee_wan, 4)} 万元）"
                                 )
@@ -3911,7 +3952,7 @@ if prompt:
                             discount_text = (
                                 f"\n\n**打折系数**：{discount_coef:.2f}\n\n"
                                 f"**打折后费用**：{discounted_fee_wan} 万元"
-                                f"（{base_fee_wan:.4f} 万 × {discount_coef:.2f}）"
+                                f"（{base_fee_wan:.2f} 万 × {discount_coef:.2f}）"
                             )
                             discounted_display = discounted_fee_wan
                             discounted_unit = "万元"
@@ -3957,9 +3998,9 @@ if prompt:
                                 dfee = d.get("费用(万元)", 0)
                                 note = d.get("说明", "")
                                 if note:
-                                    detail_rows.append(f"| **{dtype}** | {dsrc} | {dbase:.4f} | ⚠️ {note} |")
+                                    detail_rows.append(f"| **{dtype}** | {dsrc} | {dbase:.2f} | ⚠️ {note} |")
                                 else:
-                                    detail_rows.append(f"| **{dtype}** | {dsrc} | {dbase:.4f} | **{dfee}** |")
+                                    detail_rows.append(f"| **{dtype}** | {dsrc} | {dbase:.2f} | **{dfee}** |")
                             st.markdown(
                                 "| 类型 | 基数来源 | 基数（万元） | 费用（万元） |\n"
                                 "|:--|:--|:--|:--|\n" + "\n".join(detail_rows)
@@ -4049,7 +4090,7 @@ if prompt:
                                     detail_md += f"- **{dtype}**（{dsrc}）：{note}\n"
                                 else:
                                     detail_md += (
-                                        f"- **{dtype}**：基数 {dsrc} {dbase:.4f} 万 → **{dfee} 万元**\n"
+                                        f"- **{dtype}**：基数 {dsrc} {dbase:.2f} 万 → **{dfee} 万元**\n"
                                     )
                             response = (
                                 f"## 招标代理服务费\n\n"

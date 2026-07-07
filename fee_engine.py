@@ -720,7 +720,7 @@ def calc_cost_consulting_hebei(
     # 构建说明
     lines = [f"计费基数 {amount:.0f} 万元（{base_type}），{service_type}"]
     if abs(professional_coef - 1.0) > 0.001:
-        lines.append(f"专业调整系数 {professional_coef}，调整前 {total_fee_before_prof:.4f} 万元")
+        lines.append(f"专业调整系数 {professional_coef}，调整前 {total_fee_before_prof:.2f} 万元")
     if applied_min:
         lines.append(f"计算费用不足最低收费标准 {_HEBEI_COST_CONSULTING_MIN_FEE:.0f} 元，按最低标准收取")
     if abs(discount_coef - 1.0) > 0.001:
@@ -744,7 +744,7 @@ def calc_cost_consulting_hebei(
         "结果(万元)": total_fee,
         "说明": (
             f"计费基数 {amount:.0f} 万元（{base_type}），{service_type}，\n"
-            f"差额分档累进计算，造价咨询费基准价为 **{total_fee:.4f} 万元**"
+            f"差额分档累进计算，造价咨询费基准价为 **{total_fee:.2f} 万元**"
             f"（可在下浮 ≤20% 幅度内协商浮动）"
         ),
     }
@@ -970,7 +970,7 @@ def calc_cost_consulting(
         "结果(万元)": total_fee,
         "说明": (
             f"计费基数 {amount:.0f} 万元（{base_type}），{service_type}，\n"
-            f"差额分档累进计算，造价咨询费基准价为 **{total_fee:.4f} 万元**"
+            f"差额分档累进计算，造价咨询费基准价为 **{total_fee:.2f} 万元**"
             f"（可在 ±20% 幅度内协商浮动）"
         ),
     }
@@ -1185,7 +1185,7 @@ def _detect_all_fee_types(query: str) -> list[str]:
 # ============================================================
 
 _MODES: list[tuple[str, str]] = [
-    ("cascade", r"全部费用|所有费用|各项费用|费用汇总|联算|一并计算|各项二类费"),
+    ("cascade", r"全部费用|所有费用|各项费用|费用汇总|联算|一并计算|算.*二类费|二类费.*算|计算.*二类费"),
     ("iteration", r"迭代.*(?:计算|总投资|总概算)|反复.*计算|循环.*收敛|总投资.*收敛|工程总概算.*计算"),
     ("comparison", r"方案对比|方案比选|敏感性分析|多方案|比选"),
 ]
@@ -1229,7 +1229,7 @@ def calc_jianshe_guanli(amount_wan: float) -> dict:
         "结果(万元)": total,
         "说明": (
             f"工程总概算 {amount_wan:.0f} 万元，"
-            f"项目建设管理费总额控制数为 **{total:.4f} 万元**"
+            f"项目建设管理费总额控制数为 **{total:.2f} 万元**"
         ),
     }
 
@@ -1255,7 +1255,7 @@ def calc_zhaobiao_daili(amount_wan: float, service_type: str = "工程招标") -
         "结果(万元)": total,
         "说明": (
             f"{service_type} 中标金额 {amount_wan:.0f} 万元，"
-            f"招标代理服务费为 **{total:.4f} 万元**（可上下浮动 20%）"
+            f"招标代理服务费为 **{total:.2f} 万元**（可上下浮动 20%）"
         ),
     }
 
@@ -1403,7 +1403,7 @@ def calc_zhaobiao_daili_all(
     desc_parts = []
     for d in details:
         desc_parts.append(
-            f"- **{d['类型']}**：基数 {d['基数来源']} {d['基数(万元)']:.4f} 万 → {d['费用(万元)']:.4f} 万元"
+            f"- **{d['类型']}**：基数 {d['基数来源']} {d['基数(万元)']:.2f} 万 → {d['费用(万元)']:.2f} 万元"
         )
     desc = "### 费用明细\n\n" + "\n".join(desc_parts)
     desc += f"\n\n### 💰 合计：**{total} 万元**"
@@ -1598,7 +1598,7 @@ def calc_jianli(
     if adjustment_info and adjustment_info.get("触发调整"):
         params["计费额调整"] = adjustment_info["说明"]
 
-    desc = f"计费额 {amount_wan:.0f} 万元，收费基价 {base_price:.4f} 万元"
+    desc = f"计费额 {amount_wan:.0f} 万元，收费基价 {base_price:.2f} 万元"
     if has_coef:
         coef_parts = []
         if professional_coef != 1.0:
@@ -1608,9 +1608,9 @@ def calc_jianli(
         if elevation_coef != 1.0:
             coef_parts.append(f"高程调整系数 {elevation_coef}（{_describe_elevation_coef(elevation_coef)}）")
         coef_desc = "，".join(coef_parts)
-        desc += f"，{coef_desc}，调整后基准价 **{benchmark:.4f} 万元**"
+        desc += f"，{coef_desc}，调整后基准价 **{benchmark:.2f} 万元**"
     else:
-        desc += f"，基准价 **{benchmark:.4f} 万元**（专业系数1.0、复杂系数1.0、高程系数1.0，均为默认值）"
+        desc += f"，基准价 **{benchmark:.2f} 万元**（专业系数1.0、复杂系数1.0、高程系数1.0，均为默认值）"
     desc += "（可上下浮动 20%）"
 
     return {
@@ -1702,19 +1702,19 @@ def calc_sheji(
     if additional_coefs and len(additional_coefs) > 1:
         params["附加系数明细"] = f"{' + '.join(str(c) for c in additional_coefs)} → 合并后 {additional_coef:.2f}"
 
-    desc = f"计费额 {amount_wan:.0f} 万元，收费基价 {base_price:.4f} 万元"
+    desc = f"计费额 {amount_wan:.0f} 万元，收费基价 {base_price:.2f} 万元"
     coef_parts = [
         f"专业系数 {professional_coef}",
         f"复杂系数 {complexity_coef}",
         f"附加系数 {additional_coef}",
     ]
-    desc += f"，{'×'.join(coef_parts)}，基本设计收费 **{basic_design:.4f} 万元**"
+    desc += f"，{'×'.join(coef_parts)}，基本设计收费 **{basic_design:.2f} 万元**"
 
     if other_items:
         desc += "\n其他设计收费："
-        desc += " + ".join(f"{label} {fee:.4f} 万" for label, fee in other_items)
-        desc += f" = **{other_total:.4f} 万元**"
-        desc += f"\n工程设计收费基准价 = {basic_design:.4f} + {other_total:.4f} = **{benchmark:.4f} 万元**"
+        desc += " + ".join(f"{label} {fee:.2f} 万" for label, fee in other_items)
+        desc += f" = **{other_total:.2f} 万元**"
+        desc += f"\n工程设计收费基准价 = {basic_design:.2f} + {other_total:.2f} = **{benchmark:.2f} 万元**"
 
     return {
         "费种": "工程设计费",
@@ -1807,11 +1807,11 @@ def calc_keyan(
             break
 
     steps.extend([
-        {"步骤": "线性内插基准价", "公式": f"插值({amount_yi:.4f})", "结果": f"{base_fee:.4f} 万元"},
+        {"步骤": "线性内插基准价", "公式": f"插值({amount_yi:.4f})", "结果": f"{base_fee:.2f} 万元"},
         {"步骤": "行业调整系数", "公式": f"{industry_name}", "结果": str(industry_coef)},
         {"步骤": "工程复杂程度系数", "公式": f"复杂程度 {complexity_coef}", "result": str(complexity_coef)},
         {"步骤": "总调整系数", "公式": f"{industry_coef} × {complexity_coef}", "结果": str(total_coef)},
-        {"步骤": "最终费用", "公式": f"{base_fee:.4f} × {total_coef}", "结果": f"{final_fee_mid:.4f} 万元"},
+        {"步骤": "最终费用", "公式": f"{base_fee:.2f} × {total_coef}", "结果": f"{final_fee_mid:.2f} 万元"},
     ])
 
     return {
@@ -1830,10 +1830,10 @@ def calc_keyan(
         "基准价(万元)": base_fee,
         "说明": (
             f"估算投资额 {amount_yi:.4f} 亿元（{amount_yi * 10000:.0f} 万元），{service_type}\n"
-            f"分档线性内插基准价：**{base_fee:.4f} 万元**\n"
+            f"分档线性内插基准价：**{base_fee:.2f} 万元**\n"
             f"行业「{industry_name}」调整系数：**{industry_coef}**\n"
             f"工程复杂程度系数：**{complexity_coef}**\n"
-            f"最终费用 = {base_fee:.4f} × {total_coef} = **{final_fee_mid:.4f} 万元**"
+            f"最终费用 = {base_fee:.2f} × {total_coef} = **{final_fee_mid:.2f} 万元**"
         ),
         "计算步骤": steps,
     }
@@ -1945,32 +1945,32 @@ def calc_shigong_shencha(
         hebei_rate = HEBEI_SHENCHA_RATE
         if sheji_fee is not None:
             fee = round(sheji_fee * hebei_rate / 100.0, 4)
-            desc = f"河北省项目，勘察设计费（设计费+勘察费）{sheji_fee:.4f} 万元 × {hebei_rate}%，审查费 **{fee:.4f} 万元**"
+            desc = f"河北省项目，勘察设计费（设计费+勘察费）{sheji_fee:.2f} 万元 × {hebei_rate}%，审查费 **{fee:.2f} 万元**"
             params = {"勘察设计费(万元)": sheji_fee, "= 设计费+勘察费": "", "费率(%)": hebei_rate, "适用地区": "河北省"}
             if sheji_fee_only is not None and kancha_fee_mid is not None:
                 steps = [
                     {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
-                    {"步骤": "计算设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee_only:.4f} 万元"},
-                    {"步骤": "计算勘察费", "公式": f"《市政工程设计概算编制办法》百分比法（{kancha_rate_desc}）", "结果": f"{kancha_fee_mid:.4f} 万元"},
-                    {"步骤": "计算勘察设计费基数", "公式": f"设计费 + 勘察费 = {sheji_fee_only:.4f} + {kancha_fee_mid:.4f}", "结果": f"{sheji_fee:.4f} 万元"},
+                    {"步骤": "计算设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee_only:.2f} 万元"},
+                    {"步骤": "计算勘察费", "公式": f"《市政工程设计概算编制办法》百分比法（{kancha_rate_desc}）", "结果": f"{kancha_fee_mid:.2f} 万元"},
+                    {"步骤": "计算勘察设计费基数", "公式": f"设计费 + 勘察费 = {sheji_fee_only:.2f} + {kancha_fee_mid:.2f}", "结果": f"{sheji_fee:.2f} 万元"},
                     {"步骤": "应用河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
-                    {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {hebei_rate}%", "结果": f"{fee:.4f} 万元"},
+                    {"步骤": "计算审查费", "公式": f"{sheji_fee:.2f} 万元 × {hebei_rate}%", "结果": f"{fee:.2f} 万元"},
                 ]
             else:
                 steps = [
                     {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
-                    {"步骤": "计算勘察设计费", "公式": "设计费（计价格[2002]10号）+ 勘察费（概算编制办法百分比法）", "结果": f"{sheji_fee:.4f} 万元"},
+                    {"步骤": "计算勘察设计费", "公式": "设计费（计价格[2002]10号）+ 勘察费（概算编制办法百分比法）", "结果": f"{sheji_fee:.2f} 万元"},
                     {"步骤": "应用河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
-                    {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {hebei_rate}%", "结果": f"{fee:.4f} 万元"},
+                    {"步骤": "计算审查费", "公式": f"{sheji_fee:.2f} 万元 × {hebei_rate}%", "结果": f"{fee:.2f} 万元"},
                 ]
         else:
             fee = round(amount * hebei_rate / 100.0, 4)
-            desc = f"河北省项目，计费基数 {amount:.0f} 万元 × {hebei_rate}%，审查费 **{fee:.4f} 万元**"
+            desc = f"河北省项目，计费基数 {amount:.0f} 万元 × {hebei_rate}%，审查费 **{fee:.2f} 万元**"
             params = {"计费基数(万元)": amount, "费率(%)": hebei_rate, "适用地区": "河北省"}
             steps = [
                 {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
                 {"步骤": "查找河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
-                {"步骤": "计算审查费", "公式": f"{amount:.0f} 万元 × {hebei_rate}%", "结果": f"{fee:.4f} 万元"},
+                {"步骤": "计算审查费", "公式": f"{amount:.0f} 万元 × {hebei_rate}%", "结果": f"{fee:.2f} 万元"},
             ]
         return {
             "费种": f"施工图审查费（河北省）",
@@ -1991,35 +1991,35 @@ def calc_shigong_shencha(
 
     if sheji_fee is not None:
         fee = round(sheji_fee * rate_pct / 100.0, 4)
-        desc = f"{project_type} {size_desc} 项目，勘察设计费（设计费+勘察费）{sheji_fee:.4f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
+        desc = f"{project_type} {size_desc} 项目，勘察设计费（设计费+勘察费）{sheji_fee:.2f} 万元 × {rate_pct}%，审查费 **{fee:.2f} 万元**"
         params = {"勘察设计费(万元)": sheji_fee, "= 设计费+勘察费": "", "项目类型": project_type, "项目规模": size_desc, "费率(%)": rate_pct}
         if sheji_fee_only is not None and kancha_fee_mid is not None:
             steps = [
                 {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": f"{project_type}类"},
                 {"步骤": "判定项目规模", "公式": "建市[2007]86号各行业大中小项目划分标准", "结果": f"{size_desc}项目"},
-                {"步骤": "计算设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee_only:.4f} 万元"},
-                {"步骤": "计算勘察费", "公式": f"《市政工程设计概算编制办法》百分比法（{kancha_rate_desc}）", "结果": f"{kancha_fee_mid:.4f} 万元"},
-                {"步骤": "计算勘察设计费基数", "公式": f"设计费 + 勘察费 = {sheji_fee_only:.4f} + {kancha_fee_mid:.4f}", "结果": f"{sheji_fee:.4f} 万元"},
+                {"步骤": "计算设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee_only:.2f} 万元"},
+                {"步骤": "计算勘察费", "公式": f"《市政工程设计概算编制办法》百分比法（{kancha_rate_desc}）", "结果": f"{kancha_fee_mid:.2f} 万元"},
+                {"步骤": "计算勘察设计费基数", "公式": f"设计费 + 勘察费 = {sheji_fee_only:.2f} + {kancha_fee_mid:.2f}", "结果": f"{sheji_fee:.2f} 万元"},
                 {"步骤": "查找审查费率", "公式": f"津价管[2011]46号：{project_type}类{size_desc} {rate_pct}%", "结果": f"{rate_pct}%"},
-                {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {rate_pct}%", "结果": f"{fee:.4f} 万元"},
+                {"步骤": "计算审查费", "公式": f"{sheji_fee:.2f} 万元 × {rate_pct}%", "结果": f"{fee:.2f} 万元"},
             ]
         else:
             steps = [
                 {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": f"{project_type}类"},
                 {"步骤": "判定项目规模", "公式": "建市[2007]86号各行业大中小项目划分标准", "结果": f"{size_desc}项目"},
-                {"步骤": "计算勘察设计费", "公式": "设计费（计价格[2002]10号）+ 勘察费（概算编制办法百分比法）", "结果": f"{sheji_fee:.4f} 万元"},
+                {"步骤": "计算勘察设计费", "公式": "设计费（计价格[2002]10号）+ 勘察费（概算编制办法百分比法）", "结果": f"{sheji_fee:.2f} 万元"},
                 {"步骤": "查找审查费率", "公式": f"津价管[2011]46号：{project_type}类{size_desc} {rate_pct}%", "结果": f"{rate_pct}%"},
-                {"步骤": "计算审查费", "公式": f"{sheji_fee:.4f} 万元 × {rate_pct}%", "结果": f"{fee:.4f} 万元"},
+                {"步骤": "计算审查费", "公式": f"{sheji_fee:.2f} 万元 × {rate_pct}%", "结果": f"{fee:.2f} 万元"},
             ]
     else:
         fee = round(amount * rate_pct / 100.0, 4)
-        desc = f"{project_type} {size_desc} 项目，计费基数 {amount:.0f} 万元 × {rate_pct}%，审查费 **{fee:.4f} 万元**"
+        desc = f"{project_type} {size_desc} 项目，计费基数 {amount:.0f} 万元 × {rate_pct}%，审查费 **{fee:.2f} 万元**"
         params = {"计费基数(万元)": amount, "项目类型": project_type, "项目规模": size_desc, "费率(%)": rate_pct}
         steps = [
             {"步骤": "判定项目类型", "公式": "查询关键词检测", "结果": f"{project_type}类"},
             {"步骤": "判定项目规模", "公式": "建市[2007]86号各行业大中小项目划分标准", "结果": f"{size_desc}项目"},
             {"步骤": "查找审查费率", "公式": f"津价管[2011]46号：{project_type}类{size_desc} {rate_pct}%", "结果": f"{rate_pct}%"},
-            {"步骤": "计算审查费", "公式": f"{amount:.0f} 万元 × {rate_pct}%", "结果": f"{fee:.4f} 万元"},
+            {"步骤": "计算审查费", "公式": f"{amount:.0f} 万元 × {rate_pct}%", "结果": f"{fee:.2f} 万元"},
         ]
 
     return {
@@ -2075,7 +2075,7 @@ def calc_shuibao(amount_yi: float, service_type: str = "方案编制") -> dict:
         },
         "结果(万元)": fee,
         "说明": (
-            f"土建投资 {amount_yi:.1f} 亿元，{name} **{fee:.4f} 万元**"
+            f"土建投资 {amount_yi:.1f} 亿元，{name} **{fee:.2f} 万元**"
             f"（可根据地貌类型乘以调整系数）"
         ),
     }
@@ -2350,8 +2350,8 @@ def calc_kancha_rough(
             "费率区间": f"{lo}%~{hi}%",
             "间隔": "0.1%",
         },
-        "结果(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
-        "结果范围(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果(万元)": f"{fee_lo:.2f} ~ {fee_hi:.2f}",
+        "结果范围(万元)": f"{fee_lo:.2f} ~ {fee_hi:.2f}",
         "结果中值(万元)": fee_mid,
         "费率明细": detail,
         "计算步骤": [
@@ -2368,8 +2368,8 @@ def calc_kancha_rough(
         "说明": (
             f"第一部分工程费 {total:.0f} 万元（建安 {jianan:.0f} 万 + 设备 {shebei:.0f} 万），"
             f"{project_type}项目，费率 {lo}%~{hi}%（间隔 0.1%），"
-            f"勘察费粗略估算范围为 **{fee_lo:.4f} ~ {fee_hi:.4f} 万元**"
-            f"（中值约 **{fee_mid:.4f} 万元**）。\n\n"
+            f"勘察费粗略估算范围为 **{fee_lo:.2f} ~ {fee_hi:.2f} 万元**"
+            f"（中值约 **{fee_mid:.2f} 万元**）。\n\n"
             f"⚠️ 此为粗略估算，精确计算需按计价格[2002]10号以实物工作量定额计费。"
             f"如需精确计算，请提供勘察类型（工程测量/岩土勘察/水文地质等）和实物工作量"
             f"（钻探米数、测量面积等）。"
@@ -2393,8 +2393,8 @@ def calc_laodong_anquan(total_wan: float) -> dict:
         "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
         "计算公式": f"第一部分工程费用 × {lo}%~{hi}%（间隔 0.1%）",
         "参数": {"第一部分工程费用(万元)": total_wan, "费率区间": f"{lo}%~{hi}%", "间隔": "0.1%"},
-        "结果(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
-        "结果范围(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果(万元)": f"{fee_lo:.2f} ~ {fee_hi:.2f}",
+        "结果范围(万元)": f"{fee_lo:.2f} ~ {fee_hi:.2f}",
         "结果中值(万元)": fee_mid,
         "费率明细": detail,
         "计算步骤": [
@@ -2403,8 +2403,8 @@ def calc_laodong_anquan(total_wan: float) -> dict:
         ],
         "说明": (
             f"第一部分工程费用 {total_wan:.0f} 万元，费率 {lo}%~{hi}%（间隔 0.1%），"
-            f"劳动安全卫生评审费估算范围为 **{fee_lo:.4f} ~ {fee_hi:.4f} 万元**"
-            f"（中值约 **{fee_mid:.4f} 万元**）。"
+            f"劳动安全卫生评审费估算范围为 **{fee_lo:.2f} ~ {fee_hi:.2f} 万元**"
+            f"（中值约 **{fee_mid:.2f} 万元**）。"
         ),
     }
 
@@ -2425,8 +2425,8 @@ def calc_changdi_zhunbei(total_wan: float) -> dict:
         "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
         "计算公式": f"第一部分工程费用 × {lo}%~{hi}%（间隔 0.1%）",
         "参数": {"第一部分工程费用(万元)": total_wan, "费率区间": f"{lo}%~{hi}%", "间隔": "0.1%"},
-        "结果(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
-        "结果范围(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果(万元)": f"{fee_lo:.2f} ~ {fee_hi:.2f}",
+        "结果范围(万元)": f"{fee_lo:.2f} ~ {fee_hi:.2f}",
         "结果中值(万元)": fee_mid,
         "费率明细": detail,
         "计算步骤": [
@@ -2435,8 +2435,8 @@ def calc_changdi_zhunbei(total_wan: float) -> dict:
         ],
         "说明": (
             f"第一部分工程费用 {total_wan:.0f} 万元，费率 {lo}%~{hi}%（间隔 0.1%），"
-            f"场地准备费及临时设施费估算范围为 **{fee_lo:.4f} ~ {fee_hi:.4f} 万元**"
-            f"（中值约 **{fee_mid:.4f} 万元**）。"
+            f"场地准备费及临时设施费估算范围为 **{fee_lo:.2f} ~ {fee_hi:.2f} 万元**"
+            f"（中值约 **{fee_mid:.2f} 万元**）。"
         ),
     }
 
@@ -2457,8 +2457,8 @@ def calc_gongcheng_baoxian(total_wan: float) -> dict:
         "依据": "《市政工程设计概算编制办法》（中国计划出版社）",
         "计算公式": f"第一部分工程费用 × {lo}%~{hi}%（间隔 0.1%）",
         "参数": {"第一部分工程费用(万元)": total_wan, "费率区间": f"{lo}%~{hi}%", "间隔": "0.1%"},
-        "结果(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
-        "结果范围(万元)": f"{fee_lo:.4f} ~ {fee_hi:.4f}",
+        "结果(万元)": f"{fee_lo:.2f} ~ {fee_hi:.2f}",
+        "结果范围(万元)": f"{fee_lo:.2f} ~ {fee_hi:.2f}",
         "结果中值(万元)": fee_mid,
         "费率明细": detail,
         "计算步骤": [
@@ -2467,8 +2467,8 @@ def calc_gongcheng_baoxian(total_wan: float) -> dict:
         ],
         "说明": (
             f"第一部分工程费用 {total_wan:.0f} 万元，费率 {lo}%~{hi}%（间隔 0.1%），"
-            f"工程保险费估算范围为 **{fee_lo:.4f} ~ {fee_hi:.4f} 万元**"
-            f"（中值约 **{fee_mid:.4f} 万元**）。"
+            f"工程保险费估算范围为 **{fee_lo:.2f} ~ {fee_hi:.2f} 万元**"
+            f"（中值约 **{fee_mid:.2f} 万元**）。"
         ),
     }
 
@@ -2504,9 +2504,9 @@ def calc_yubei(part1_wan: float, erlei_wan: float, rate: float = 5.0) -> dict:
              "结果": f"{round(base, 4)} × {rate}% = {fee} 万元"},
         ],
         "说明": (
-            f"一类费（工程费用）{part1_wan:.4f} 万 + 二类费（工程建设其他费）{erlei_wan:.4f} 万 "
-            f"= {round(base, 4):.4f} 万，预备费率 {rate}%，"
-            f"预备费为 **{fee:.4f} 万元**。"
+            f"一类费（工程费用）{part1_wan:.2f} 万 + 二类费（工程建设其他费）{erlei_wan:.2f} 万 "
+            f"= {round(base, 4):.2f} 万，预备费率 {rate}%，"
+            f"预备费为 **{fee:.2f} 万元**。"
         ),
     }
 
@@ -2646,7 +2646,7 @@ def calc_huanping(
     sensitivity_label = {1.2: "敏感", 0.8: "一般", 1.0: "未指定"}.get(sensitivity_coef, str(sensitivity_coef))
 
     steps = [
-        {"步骤": "估算投资额", "公式": f"{amount_wan} 万元", "结果": f"{invest_yi:.4f} 亿元"},
+        {"步骤": "估算投资额", "公式": f"{amount_wan} 万元", "结果": f"{invest_yi:.2f} 亿元"},
         {"步骤": "确定服务类型", "公式": "", "结果": service_type},
     ]
 
@@ -2662,11 +2662,11 @@ def calc_huanping(
             break
 
     steps.extend([
-        {"步骤": "线性内插基准价", "公式": f"插值({invest_yi:.4f})", "结果": f"{base_fee:.4f} 万元"},
+        {"步骤": "线性内插基准价", "公式": f"插值({invest_yi:.2f})", "结果": f"{base_fee:.2f} 万元"},
         {"步骤": "行业调整系数", "公式": f"{industry_name}", "结果": str(industry_coef)},
         {"步骤": "环境敏感程度系数", "公式": sensitivity_label, "结果": str(sensitivity_coef)},
         {"步骤": "总调整系数", "公式": f"{industry_coef} × {sensitivity_coef}", "结果": str(total_coef)},
-        {"步骤": "最终费用(协商浮动±20%前)", "公式": f"{base_fee:.4f} × {total_coef}", "结果": f"{final_fee_mid:.4f} 万元"},
+        {"步骤": "最终费用(协商浮动±20%前)", "公式": f"{base_fee:.2f} × {total_coef}", "结果": f"{final_fee_mid:.2f} 万元"},
     ])
 
     return {
@@ -2683,18 +2683,18 @@ def calc_huanping(
             "总调整系数": total_coef,
             "协商浮动": "±20%",
         },
-        "结果(万元)": f"{final_fee_lo:.4f} ~ {final_fee_hi:.4f}",
-        "结果范围(万元)": f"{final_fee_lo:.4f} ~ {final_fee_hi:.4f}",
+        "结果(万元)": f"{final_fee_lo:.2f} ~ {final_fee_hi:.2f}",
+        "结果范围(万元)": f"{final_fee_lo:.2f} ~ {final_fee_hi:.2f}",
         "结果中值(万元)": final_fee_mid,
         "基准价(万元)": base_fee,
         "调整系数明细": {"行业系数": industry_coef, "敏感度系数": sensitivity_coef, "总系数": total_coef},
         "计算步骤": steps,
         "说明": (
-            f"估算投资额 {invest_yi:.4f} 亿元（{amount_wan:.0f}万元），服务类型「{service_type}」，"
+            f"估算投资额 {invest_yi:.2f} 亿元（{amount_wan:.0f}万元），服务类型「{service_type}」，"
             f"行业「{industry_name}」系数 {industry_coef}，环境{ sensitivity_label }系数 {sensitivity_coef}。\n"
-            f"分档定额基准价 **{base_fee:.4f} 万元** × 总调整系数 **{total_coef}**"
-            f" = 基准收费 **{final_fee_mid:.4f} 万元**。\n"
-            f"可在上下 20% 幅度内协商确定，即 **{final_fee_lo:.4f} ~ {final_fee_hi:.4f} 万元**。"
+            f"分档定额基准价 **{base_fee:.2f} 万元** × 总调整系数 **{total_coef}**"
+            f" = 基准收费 **{final_fee_mid:.2f} 万元**。\n"
+            f"可在上下 20% 幅度内协商确定，即 **{final_fee_lo:.2f} ~ {final_fee_hi:.2f} 万元**。"
         ),
     }
 
@@ -3483,7 +3483,7 @@ def resolve_dependent_calc(
                 "计算公式": f"第一部分工程费 × {rate}%（{pt}项目，用户选择）",
                 "结果(万元)": fee,
                 "结果中值(万元)": fee,
-                "说明": f"{pt}项目，费率 {rate}%，费用 {fee:.4f} 万元",
+                "说明": f"{pt}项目，费率 {rate}%，费用 {fee:.2f} 万元",
             }
         else:
             r = calc_kancha_rough(jianan, shebei, pt)
@@ -3793,7 +3793,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                 r = pair_results[svc_name]
                 fee = r["结果(万元)"]
                 base = r["基准价(万元)"]
-                lines.append(f"- **{svc_name}**：基准价 {base:.4f} 万 × 总系数 {total_coef} = **{fee:.4f} 万元**")
+                lines.append(f"- **{svc_name}**：基准价 {base:.2f} 万 × 总系数 {total_coef} = **{fee:.2f} 万元**")
 
             result["全部服务类型结果"] = {
                 svc_name: {
@@ -3829,7 +3829,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                 r = all_results[svc_name]
                 fee = r["结果(万元)"]
                 base = r["基准价(万元)"]
-                lines.append(f"- **{svc_name}**：基准价 {base:.4f} 万 × 总系数 {total_coef} = **{fee:.4f} 万元**")
+                lines.append(f"- **{svc_name}**：基准价 {base:.2f} 万 × 总系数 {total_coef} = **{fee:.2f} 万元**")
 
             result["全部服务类型结果"] = {
                 svc_name: {
@@ -4031,12 +4031,20 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
 
         if explicit_svc is None:
             # 用户未指定具体服务类型 → 显示多选面板
+            # 环评费基数为项目总投资，优先从查询中提取
+            estimated_investment = _extract_total_investment(query)
+            has_explicit_investment = estimated_investment is not None
+            if not has_explicit_investment:
+                # 未提供总投资，用查询中的金额作为临时估算
+                estimated_investment = amount
             result = {
                 "fee_type": "环境影响咨询费",
                 "费种": "环境影响咨询费",
                 "has_amount": True,
                 "needs_huanping_select": True,
-                "amount_wan": amount,
+                "amount_wan": amount,  # 查询中提取的原始金额（可能是建安费）
+                "estimated_investment": estimated_investment,
+                "has_explicit_investment": has_explicit_investment,
                 "industry_coef": ind_coef,
                 "industry_name": ind_name,
                 "sensitivity_coef": sens_coef,
@@ -4075,7 +4083,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                 for svc_name in all_svc
             }
             result["说明"] = (
-                f"估算投资额 {invest_yi:.4f} 亿元（{amount:.0f}万元），"
+                f"估算投资额 {invest_yi:.2f} 亿元（{amount:.0f}万元），"
                 f"行业「{ind_name}」系数 {ind_coef}，"
                 f"环境{'敏感' if sens_coef==1.2 else '一般' if sens_coef==0.8 else '未指定'}系数 {sens_coef}，"
                 f"总调整系数 **{total_coef}**。\n\n"
