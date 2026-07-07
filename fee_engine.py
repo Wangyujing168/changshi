@@ -699,23 +699,23 @@ def calc_cost_consulting_hebei(
             "区间": step_qujian,
             "金额(万元)": round(tier_amount, 2),
             "费率(‰)": rate,
-            "费用(万元)": round(tier_fee, 4),
+            "费用(万元)": round(tier_fee, 2),
         })
         prev_limit = limit
 
     # 应用专业调整系数
-    total_fee_before_prof = round(total_fee, 4)
-    total_fee = round(total_fee * professional_coef, 4)
+    total_fee_before_prof = round(total_fee, 2)
+    total_fee = round(total_fee * professional_coef, 2)
 
     # 最低收费检查（3000元 = 0.3万元）
     # 仅当实际计算费用 > 0 且低于最低标准时才适用（费率=0的档位不触发最低收费）
     min_fee_wan = _HEBEI_COST_CONSULTING_MIN_FEE / 10000.0
     applied_min = total_fee > 0 and total_fee < min_fee_wan
     if applied_min:
-        total_fee = round(min_fee_wan, 4)
+        total_fee = round(min_fee_wan, 2)
 
     # 打折系数
-    total_fee = round(total_fee * discount_coef, 4)
+    total_fee = round(total_fee * discount_coef, 2)
 
     # 构建说明
     lines = [f"计费基数 {amount:.0f} 万元（{base_type}），{service_type}"]
@@ -780,8 +780,8 @@ def calc_cost_consulting_multi_hebei(
             })
         except (ValueError, KeyError) as e:
             warnings.append(f"⚠️ **{svc}**：{e}")
-    total_before_discount = round(total, 4)
-    total = round(total_before_discount * discount_coef, 4)
+    total_before_discount = round(total, 2)
+    total = round(total_before_discount * discount_coef, 2)
     desc = f"共 {len(details)} 项服务，合计 **{total_before_discount} 万元**"
     if abs(discount_coef - 1.0) > 0.001:
         desc += f"，打折后 **{total} 万元**（系数 {discount_coef:.2f}）"
@@ -794,8 +794,8 @@ def calc_cost_consulting_multi_hebei(
         "合计(万元)": total,
         "合计(打折前)(万元)": total_before_discount,
         "参数": {
-            "建安工程造价(万元)": round(jianan_wan, 4),
-            "工程总投资(万元)": round(total_investment, 4) if total_investment else None,
+            "建安工程造价(万元)": round(jianan_wan, 2),
+            "工程总投资(万元)": round(total_investment, 2) if total_investment else None,
             "选中服务": selected_services,
             "专业调整系数": professional_coef,
             "打折系数": discount_coef,
@@ -839,7 +839,7 @@ def calc_cost_consulting_multi(
             })
         except (ValueError, KeyError) as e:
             warnings.append(f"⚠️ **{svc}**：{e}")
-    total = round(total, 4)
+    total = round(total, 2)
     desc = f"共 {len(details)} 项服务，合计 **{total} 万元**"
     if warnings:
         desc += "\n\n" + "\n\n".join(warnings)
@@ -847,9 +847,9 @@ def calc_cost_consulting_multi(
         "明细": details,
         "合计(万元)": total,
         "参数": {
-            "工程费用(万元)": round(base_amount_wan, 4),
-            "建安工程费用(万元)": round(jianan_only, 4) if jianan_only else None,
-            "工程总投资(万元)": round(total_investment, 4) if total_investment else None,
+            "工程费用(万元)": round(base_amount_wan, 2),
+            "建安工程费用(万元)": round(jianan_only, 2) if jianan_only else None,
+            "工程总投资(万元)": round(total_investment, 2) if total_investment else None,
             "选中服务": selected_services,
             "警告": warnings,
         },
@@ -950,11 +950,11 @@ def calc_cost_consulting(
             "区间": f"{prev_limit:.0f}~{limit:.0f}" if limit != float("inf") else f">{prev_limit:.0f}",
             "金额(万元)": round(tier_amount, 2),
             "费率(‰)": rate,
-            "费用(万元)": round(tier_fee, 4),
+            "费用(万元)": round(tier_fee, 2),
         })
         prev_limit = limit
 
-    total_fee = round(total_fee, 4)
+    total_fee = round(total_fee, 2)
 
     return {
         "费种": f"造价咨询费（{service_type}）",
@@ -1000,17 +1000,17 @@ def _cumulative_tiered(
         if tier_amount <= 0:
             prev_limit = limit
             continue
-        tier_fee = tier_amount * rate / 100.0
+        tier_fee = round(tier_amount * rate / 100.0, 2)
         total += tier_fee
         steps.append({
             "区间": f"{prev_limit:.0f}~{limit:.0f}" if limit != float("inf") else f">{prev_limit:.0f}",
             "金额(万元)": round(tier_amount, 2),
             "费率(%)": rate,
-            "费用(万元)": round(tier_fee, 4),
+            "费用(万元)": tier_fee,
         })
         prev_limit = limit
 
-    return round(total, 4), steps
+    return round(total, 2), steps
 
 
 def _bracket_fixed(
@@ -1039,7 +1039,7 @@ def _linear_interpolate(
     """
     if amount <= table[0][0]:
         # 低于最低档，按最低档比例折算
-        return round(amount * table[0][1] / table[0][0], 4)
+        return round(amount * table[0][1] / table[0][0], 2)
 
     for i in range(len(table) - 1):
         x1, y1 = table[i]
@@ -1047,10 +1047,10 @@ def _linear_interpolate(
         if x1 <= amount <= x2:
             # 线性内插: y = y1 + (y2-y1)*(x-x1)/(x2-x1)
             result = y1 + (y2 - y1) * (amount - x1) / (x2 - x1)
-            return round(result, 4)
+            return round(result, 2)
 
     # 超出最大档位 → 按 1.039% 收费率
-    return round(amount * JIANLI_LARGE_RATE / 100.0, 4)
+    return round(amount * JIANLI_LARGE_RATE / 100.0, 2)
 
 
 # ============================================================
@@ -1328,7 +1328,7 @@ def calc_zhaobiao_daili_all(
         kc_rate = kc_cfg.get("rate")
         kc_ptype = kc_cfg.get("project_type", project_type)
         if kc_rate is not None:
-            kancha_fee = round((jianan + shebei) * kc_rate / 100.0, 4)
+            kancha_fee = round((jianan + shebei) * kc_rate / 100.0, 2)
             kancha_result = {"结果中值(万元)": kancha_fee, "结果(万元)": kancha_fee}
         else:
             kancha_result = calc_kancha_rough(jianan, shebei, kc_ptype)
@@ -1391,7 +1391,7 @@ def calc_zhaobiao_daili_all(
         total += fee
         details.append({
             "类型": key,
-            "基数(万元)": round(base, 4),
+            "基数(万元)": round(base, 2),
             "基数来源": base_label,
             "费用(万元)": fee,
             "计算步骤": single["计算步骤"],
@@ -1584,7 +1584,7 @@ def calc_jianli(
         raise ValueError("请提供计费额 amount_wan，或分项金额 jianan + shebei")
 
     base_price = _linear_interpolate(amount_wan, JIANLI_BASE_RATES)
-    benchmark = round(base_price * professional_coef * complexity_coef * elevation_coef, 4)
+    benchmark = round(base_price * professional_coef * complexity_coef * elevation_coef, 2)
 
     has_coef = any(c != 1.0 for c in [professional_coef, complexity_coef, elevation_coef])
 
@@ -1689,8 +1689,8 @@ def calc_sheji(
     if qita_sheji_fee > 0:
         other_items.append(("其他设计收费", qita_sheji_fee))
 
-    other_total = round(sum(f for _, f in other_items), 4)
-    benchmark = round(basic_design + other_total, 4)  # 基准价
+    other_total = round(sum(f for _, f in other_items), 2)
+    benchmark = round(basic_design + other_total, 2)  # 基准价
 
     params: dict = {
         "计费额(万元)": amount_wan,
@@ -1742,7 +1742,7 @@ def _keyan_interpolate(amount_yi: float, brackets: list[tuple]) -> float:
                 return fee_lo
             # 线性内插
             ratio = (amount_yi - inv_lo) / (inv_hi - inv_lo)
-            return round(fee_lo + ratio * (fee_hi - fee_lo), 4)
+            return round(fee_lo + ratio * (fee_hi - fee_lo), 2)
     return 0.0
 
 
@@ -2584,7 +2584,7 @@ def _huanping_interpolate(invest_yi: float, brackets: list[tuple]) -> float:
                 return fee_lo
             # 线性内插
             ratio = (invest_yi - inv_lo) / (inv_hi - inv_lo)
-            return round(fee_lo + ratio * (fee_hi - fee_lo), 4)
+            return round(fee_lo + ratio * (fee_hi - fee_lo), 2)
     return 0.0
 
 
