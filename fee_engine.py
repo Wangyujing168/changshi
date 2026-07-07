@@ -1157,7 +1157,8 @@ _FEE_PATTERNS: list[tuple[str, str]] = [
     ("施工图审查费", r"施工图(?:设计文件)?审查|图审[费费]|津价管.*46"),
     ("勘察费", r"勘察费|工程勘察(?!设计)|岩土.*勘察.*费|水文地质.*勘察.*费|勘察.*(?:多少|计算|怎么|如何|收费|取费|标准|定额)"),
     ("可行性研究费", r"可行性研究|可研|项目建议书|前期工作咨询|计价格.*1283"),
-    ("水土保持费", r"水土保持.*(?:费|方案编制|监测|验收|咨询)|保监.*22"),
+    ("水土保持补偿费", r"水土保持补偿|水保补偿|水土保持.*补偿|津发改价综.*351|发改价格.*1186.*水土|水土保持.*1186"),
+    ("水土保持费", r"水土保持(?!.*补偿).*(?:费|方案编制|监测|验收|咨询)|保监.*22"),
     ("环境影响咨询费", r"环境影响(?:咨询|评价).*[费费]|环评[费费]|计价格.*125"),
     ("劳动安全卫生评审费", r"劳动安全卫生评审|安全卫生评审费|安全评审费|劳安评审"),
     ("场地准备费及临时设施费", r"场地准备费|临时设施费|场地准备及临时设施|场地.*准备.*费"),
@@ -2077,6 +2078,153 @@ def calc_shuibao(amount_yi: float, service_type: str = "方案编制") -> dict:
         "说明": (
             f"土建投资 {amount_yi:.1f} 亿元，{name} **{fee:.2f} 万元**"
             f"（可根据地貌类型乘以调整系数）"
+        ),
+    }
+
+
+def calc_shuibao_compensation(
+    calc_type: str = "general",
+    land_area_m2: float = 0,
+    well_count: int = 0,
+    additional_wells: int = 0,
+    extraction_volume_m3: float = 0,
+    material_volume_m3: float = 0,
+    waste_volume_m3: float = 0,
+) -> dict:
+    """
+    水土保持补偿费（津发改价综〔2020〕351号 / 发改价格[2017]1186号）。
+
+    天津市水土保持补偿费征收标准：
+    - 一般性生产建设项目：1.4 元/m²（一次性，按征占土地面积）
+    - 矿产资源开采（建设期）：1.4 元/m²（一次性）
+    - 矿产资源开采（油气生产期）：每口井 2000m² × 1.4 元/m²/年
+      （丛式井每增加一口井 +400m²）
+    - 矿产资源开采（其他矿产）：0.3 元/m³（按开采量）
+    - 取土/挖砂/采石/烧制砖瓦瓷石灰：0.3 元/m³
+    - 排放废弃土石渣：0.3 元/m³
+    - 总缴费额的 10% 上缴中央
+
+    参数：
+        calc_type: 计算类型
+            - "general": 一般性生产建设项目
+            - "mining_construction": 矿产资源开采（建设期）
+            - "mining_oil_gas": 矿产资源开采（油气生产期）
+            - "mining_other": 矿产资源开采（其他矿产 / 非油气）
+            - "material_extraction": 取土/挖砂/采石/烧制
+            - "waste_disposal": 排放废弃土石渣
+        land_area_m2: 征占土地面积（m²）
+        well_count: 油气生产井数量
+        additional_wells: 丛式井增加井数
+        extraction_volume_m3: 开采量（m³）— 非油气矿产
+        material_volume_m3: 取土/挖砂/采石/烧制量（m³）
+        waste_volume_m3: 排放废弃土石渣量（m³）
+    """
+    RATE_PER_M2 = 1.4       # 元/m²
+    RATE_PER_M3 = 0.3       # 元/m³
+    WELL_AREA = 2000        # m² per well (oil/gas)
+    ADDITIONAL_WELL_AREA = 400  # m² per additional cluster well
+    CENTRAL_SHARE = 0.10    # 中央收入 10%
+
+    type_labels = {
+        "general": "一般性生产建设项目",
+        "mining_construction": "矿产资源开采（建设期）",
+        "mining_oil_gas": "矿产资源开采（油气生产期）",
+        "mining_other": "矿产资源开采（其他矿产）",
+        "material_extraction": "取土/挖砂/采石/烧制砖瓦瓷石灰",
+        "waste_disposal": "排放废弃土石渣",
+    }
+
+    fee_yuan = 0.0
+    calc_detail = ""
+    params_detail = {}
+
+    if calc_type == "general":
+        fee_yuan = land_area_m2 * RATE_PER_M2
+        calc_detail = f"{land_area_m2:.0f} m² × {RATE_PER_M2} 元/m²"
+        params_detail = {"征占土地面积(m²)": land_area_m2, "收费标准(元/m²)": RATE_PER_M2}
+
+    elif calc_type == "mining_construction":
+        fee_yuan = land_area_m2 * RATE_PER_M2
+        calc_detail = f"{land_area_m2:.0f} m² × {RATE_PER_M2} 元/m²（建设期一次性）"
+        params_detail = {"征占土地面积(m²)": land_area_m2, "收费标准(元/m²)": RATE_PER_M2}
+
+    elif calc_type == "mining_oil_gas":
+        total_area = well_count * WELL_AREA + additional_wells * ADDITIONAL_WELL_AREA
+        fee_yuan = total_area * RATE_PER_M2
+        if additional_wells > 0:
+            calc_detail = (
+                f"({well_count}口 × {WELL_AREA}m² + {additional_wells}口 × {ADDITIONAL_WELL_AREA}m²)"
+                f" × {RATE_PER_M2} 元/m²"
+            )
+        else:
+            calc_detail = f"{well_count}口 × {WELL_AREA}m² × {RATE_PER_M2} 元/m²"
+        params_detail = {
+            "油气生产井数(口)": well_count,
+            "丛式井增加井数(口)": additional_wells,
+            "计费面积(m²)": total_area,
+            "收费标准(元/m²)": RATE_PER_M2,
+        }
+
+    elif calc_type == "mining_other":
+        fee_yuan = extraction_volume_m3 * RATE_PER_M3
+        calc_detail = f"{extraction_volume_m3:.0f} m³ × {RATE_PER_M3} 元/m³"
+        params_detail = {"开采量(m³)": extraction_volume_m3, "收费标准(元/m³)": RATE_PER_M3}
+
+    elif calc_type == "material_extraction":
+        fee_yuan = material_volume_m3 * RATE_PER_M3
+        calc_detail = f"{material_volume_m3:.0f} m³ × {RATE_PER_M3} 元/m³"
+        params_detail = {"取土/挖砂/采石/烧制量(m³)": material_volume_m3, "收费标准(元/m³)": RATE_PER_M3}
+
+    elif calc_type == "waste_disposal":
+        fee_yuan = waste_volume_m3 * RATE_PER_M3
+        calc_detail = f"{waste_volume_m3:.0f} m³ × {RATE_PER_M3} 元/m³"
+        params_detail = {"废弃土石渣量(m³)": waste_volume_m3, "收费标准(元/m³)": RATE_PER_M3}
+
+    central_fee = round(fee_yuan * CENTRAL_SHARE, 2)
+    local_fee = round(fee_yuan - central_fee, 2)
+    fee_wan = round(fee_yuan / 10000.0, 4)
+
+    type_label = type_labels.get(calc_type, calc_type)
+
+    # 重复计征提示
+    no_double_note = ""
+    if calc_type in ("material_extraction", "waste_disposal"):
+        no_double_note = (
+            "\n\n⚠️ 对缴纳义务人已按前几种方式计征水土保持补偿费的，不再重复计征。"
+        )
+
+    return {
+        "费种": "水土保持补偿费",
+        "依据": (
+            "《天津市财政局天津市发展改革委关于继续向企业征收水土保持补偿费"
+            "有关问题的通知》（津发改价综〔2020〕351号）\n"
+            "依据国家发展改革委、财政部《关于降低电信网码号资源占用费等部分"
+            "行政事业性收费标准的通知》（发改价格[2017]1186号）"
+        ),
+        "计算公式": f"{calc_detail} = {fee_yuan:.2f} 元",
+        "计算步骤": [
+            {"步骤": "确定计征类型", "公式": "", "结果": type_label},
+            {"步骤": "计算补偿费", "公式": calc_detail, "结果": f"{fee_yuan:.2f} 元"},
+            {"步骤": "划分中央/地方",
+             "公式": f"中央 {CENTRAL_SHARE*100:.0f}%，地方 {(1-CENTRAL_SHARE)*100:.0f}%",
+             "结果": f"中央 {central_fee:.2f} 元，地方 {local_fee:.2f} 元"},
+        ],
+        "参数": {
+            "计算类型": type_label,
+            **params_detail,
+            "中央收入比例": f"{CENTRAL_SHARE*100:.0f}%",
+        },
+        "结果(元)": round(fee_yuan, 2),
+        "结果(万元)": fee_wan,
+        "中央收入(元)": central_fee,
+        "地方收入(元)": local_fee,
+        "说明": (
+            f"**{type_label}**\n\n"
+            f"水土保持补偿费 = {calc_detail} = **{fee_yuan:.2f} 元**"
+            f"（{fee_wan:.4f} 万元）\n\n"
+            f"其中：中央收入 {central_fee:.2f} 元（{CENTRAL_SHARE*100:.0f}%），"
+            f"地方收入 {local_fee:.2f} 元（{(1-CENTRAL_SHARE)*100:.0f}%）。"
+            f"{no_double_note}"
         ),
     }
 
@@ -3016,6 +3164,34 @@ def _get_fee_reference(fee_type: str) -> dict:
             ],
             "计算说明": "土建投资在两个值之间时取线性内插；超过最大值按最后一个值计取",
         },
+        "水土保持补偿费": {
+            "费种": "水土保持补偿费",
+            "依据": "《天津市水土保持补偿费征收标准》（津发改价综〔2020〕351号 / 发改价格[2017]1186号）",
+            "计费方式": "按征占土地面积 / 开采量 / 弃渣量 × 固定单价（10% 上缴中央）",
+            "参数说明": (
+                "计算类型：\n"
+                "① 一般性生产建设项目 — 征占土地面积 × 1.4 元/m²\n"
+                "② 矿产资源开采（建设期）— 征占土地面积 × 1.4 元/m²\n"
+                "③ 矿产资源开采（油气生产期）— 每口井 2000m² × 1.4 元/m²/年（丛式井 +400m²/口）\n"
+                "④ 矿产资源开采（其他矿产）— 开采量 × 0.3 元/m³\n"
+                "⑤ 取土/挖砂/采石/烧制 — 取料量 × 0.3 元/m³\n"
+                "⑥ 排放废弃土石渣 — 弃渣量 × 0.3 元/m³"
+            ),
+            "费率表": [
+                ("类型", "收费标准", "计征方式"),
+                ("一般性生产建设项目", "1.4 元/m²", "一次性，按征占土地面积"),
+                ("矿产资源开采（建设期）", "1.4 元/m²", "一次性，按征占土地面积"),
+                ("油气生产井（开采期）", "1.4 元/m²", "每口井 2000m² 每年（丛式井 +400m²/口）"),
+                ("其他矿产（开采期）", "0.3 元/m³", "按开采量（采掘/采剥量）"),
+                ("取土/挖砂/采石/烧制", "0.3 元/m³", "按取料量"),
+                ("排放废弃土石渣", "0.3 元/m³", "按弃渣量"),
+            ],
+            "计算说明": (
+                "总缴费额的 10% 上缴中央收入。\n"
+                "⚠️ 对缴纳义务人已按前几种方式计征的，不再重复计征。\n"
+                "水利水电工程建设项目水库淹没区不在计征范围之内。"
+            ),
+        },
         "环境影响咨询费": {
             "费种": "环境影响咨询费",
             "依据": "《关于规范环境影响咨询收费有关问题的通知》（计价格[2002]125号）",
@@ -3584,6 +3760,68 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
 
     amount = _extract_amount(query)
     if amount is None:
+        # 水土保持补偿费：不需要金额，需要物理参数 → 直接路由到交互面板
+        if fee_type == "水土保持补偿费":
+            # 尝试提取物理参数，有则直接计算，无则走交互面板
+            land_m2 = _extract_land_area_m2(query)
+            well_cnt = _extract_well_count(query)
+            add_wells = _extract_additional_wells(query)
+            extract_vol = _extract_volume_m3(query, "开采")
+            material_vol = _extract_volume_m3(query, "取土|挖砂|采石|烧制")
+            waste_vol = _extract_volume_m3(query, "废弃|土石渣|排弃")
+
+            if re.search(r"油气|石油|天然气|生产井", query) and well_cnt > 0:
+                result = calc_shuibao_compensation(
+                    calc_type="mining_oil_gas",
+                    well_count=well_cnt, additional_wells=add_wells)
+            elif re.search(r"矿产|开采|采掘|采剥", query) and not re.search(r"油气|石油|天然气", query):
+                if extract_vol > 0:
+                    result = calc_shuibao_compensation(
+                        calc_type="mining_other", extraction_volume_m3=extract_vol)
+                elif land_m2 > 0:
+                    result = calc_shuibao_compensation(
+                        calc_type="mining_construction", land_area_m2=land_m2)
+                else:
+                    result = {
+                        "fee_type": "水土保持补偿费", "费种": "水土保持补偿费",
+                        "has_amount": True,
+                        "needs_shuibao_compensation_select": True,
+                        "calc_type": "mining", "query": query,
+                    }
+            elif re.search(r"取土|挖砂|采石|烧制|砖|瓦|瓷|石灰", query):
+                if material_vol > 0:
+                    result = calc_shuibao_compensation(
+                        calc_type="material_extraction", material_volume_m3=material_vol)
+                else:
+                    result = {
+                        "fee_type": "水土保持补偿费", "费种": "水土保持补偿费",
+                        "has_amount": True,
+                        "needs_shuibao_compensation_select": True,
+                        "calc_type": "material_extraction", "query": query,
+                    }
+            elif re.search(r"废弃|土石渣|排弃|排放", query):
+                if waste_vol > 0:
+                    result = calc_shuibao_compensation(
+                        calc_type="waste_disposal", waste_volume_m3=waste_vol)
+                else:
+                    result = {
+                        "fee_type": "水土保持补偿费", "费种": "水土保持补偿费",
+                        "has_amount": True,
+                        "needs_shuibao_compensation_select": True,
+                        "calc_type": "waste_disposal", "query": query,
+                    }
+            elif land_m2 > 0:
+                result = calc_shuibao_compensation(
+                    calc_type="general", land_area_m2=land_m2)
+            else:
+                result = {
+                    "fee_type": "水土保持补偿费", "费种": "水土保持补偿费",
+                    "has_amount": True,
+                    "needs_shuibao_compensation_select": True,
+                    "calc_type": "general", "query": query,
+                }
+            return result
+
         # 没有金额 — 返回该费种的费率表和计费规则参考
         ref = _get_fee_reference(fee_type)
         ref["fee_type"] = fee_type
@@ -3906,6 +4144,101 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                 else:
                     amount = val
             result = calc_shigong_shencha(amount, ptype, size, query=query)
+    elif fee_type == "水土保持补偿费":
+        # ── 水土保持补偿费（津发改价综〔2020〕351号）──
+        # 尝试从查询中提取物理参数
+        land_m2 = _extract_land_area_m2(query)
+        well_cnt = _extract_well_count(query)
+        add_wells = _extract_additional_wells(query)
+        extract_vol = _extract_volume_m3(query, "开采")
+        material_vol = _extract_volume_m3(query, "取土|挖砂|采石|烧制")
+        waste_vol = _extract_volume_m3(query, "废弃|土石渣|排弃")
+
+        # 判断计算类型
+        if re.search(r"油气|石油|天然气|生产井", query):
+            if well_cnt > 0:
+                result = calc_shuibao_compensation(
+                    calc_type="mining_oil_gas",
+                    well_count=well_cnt,
+                    additional_wells=add_wells,
+                )
+            else:
+                # 需要交互输入井数
+                result = {
+                    "fee_type": "水土保持补偿费",
+                    "费种": "水土保持补偿费",
+                    "has_amount": True,
+                    "needs_shuibao_compensation_select": True,
+                    "calc_type": "mining_oil_gas",
+                    "query": query,
+                }
+        elif re.search(r"矿产|开采|采掘|采剥", query) and not re.search(r"油气|石油|天然气", query):
+            if extract_vol > 0:
+                result = calc_shuibao_compensation(
+                    calc_type="mining_other",
+                    extraction_volume_m3=extract_vol,
+                )
+            elif land_m2 > 0:
+                # 可能是建设期
+                result = calc_shuibao_compensation(
+                    calc_type="mining_construction",
+                    land_area_m2=land_m2,
+                )
+            else:
+                result = {
+                    "fee_type": "水土保持补偿费",
+                    "费种": "水土保持补偿费",
+                    "has_amount": True,
+                    "needs_shuibao_compensation_select": True,
+                    "calc_type": "mining",
+                    "query": query,
+                }
+        elif re.search(r"取土|挖砂|采石|烧制|砖|瓦|瓷|石灰", query):
+            if material_vol > 0:
+                result = calc_shuibao_compensation(
+                    calc_type="material_extraction",
+                    material_volume_m3=material_vol,
+                )
+            else:
+                result = {
+                    "fee_type": "水土保持补偿费",
+                    "费种": "水土保持补偿费",
+                    "has_amount": True,
+                    "needs_shuibao_compensation_select": True,
+                    "calc_type": "material_extraction",
+                    "query": query,
+                }
+        elif re.search(r"废弃|土石渣|排弃|排放", query):
+            if waste_vol > 0:
+                result = calc_shuibao_compensation(
+                    calc_type="waste_disposal",
+                    waste_volume_m3=waste_vol,
+                )
+            else:
+                result = {
+                    "fee_type": "水土保持补偿费",
+                    "费种": "水土保持补偿费",
+                    "has_amount": True,
+                    "needs_shuibao_compensation_select": True,
+                    "calc_type": "waste_disposal",
+                    "query": query,
+                }
+        elif land_m2 > 0:
+            # 一般性项目：有土地面积直接算
+            result = calc_shuibao_compensation(
+                calc_type="general",
+                land_area_m2=land_m2,
+            )
+        else:
+            # 没有具体参数 → 需要交互式输入
+            result = {
+                "fee_type": "水土保持补偿费",
+                "费种": "水土保持补偿费",
+                "has_amount": True,
+                "needs_shuibao_compensation_select": True,
+                "calc_type": "general",
+                "query": query,
+            }
     elif fee_type == "水土保持费":
         amount_yi = _extract_amount_yi(query)
         if amount_yi is None:
@@ -4369,6 +4702,91 @@ def _extract_amount_yi(query: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def _extract_land_area_m2(query: str) -> float:
+    """从查询中提取征占土地面积（m²）。
+
+    支持格式：
+    - "5000平米" / "5000平方米" / "5000m²" / "5000 m2"
+    - "5亩" / "5亩地"
+    - "0.5公顷" / "0.5ha"
+    - "占地5000"（默认m²）
+    """
+    # 亩
+    m = re.search(r'(\d+\.?\d*)\s*亩', query)
+    if m:
+        return round(float(m.group(1)) * 666.67, 2)  # 1亩 ≈ 666.67 m²
+
+    # 公顷
+    m = re.search(r'(\d+\.?\d*)\s*(?:公顷|ha|hm2|hm²)', query)
+    if m:
+        return float(m.group(1)) * 10000
+
+    # 平方公里
+    m = re.search(r'(\d+\.?\d*)\s*(?:平方公里|km2|km²)', query)
+    if m:
+        return float(m.group(1)) * 1000000
+
+    # 平方米
+    m = re.search(r'(\d+\.?\d*)\s*(?:平米|平方米|m2|m²|㎡)\b', query)
+    if m:
+        return float(m.group(1))
+
+    # "占地面积XXX" / "占地XXX" / "征占XXX"（默认 m²）
+    m = re.search(r'(?:占地|征占|用地)(?:面积)?\D*?(\d+\.?\d*)\s*(?:万)?\s*(?:平米|平方米|m2|m²|㎡)?', query)
+    if m:
+        val = float(m.group(1))
+        if re.search(r'万', query):
+            val *= 10000
+        return val
+
+    return 0.0
+
+
+def _extract_well_count(query: str) -> int:
+    """从查询中提取油气生产井数量。"""
+    # "XX口井" / "XX口生产井" / "XX口油井" / "XX口气井"
+    m = re.search(r'(\d+)\s*口\s*(?:井|生产井|油井|气井|油气)', query)
+    if m:
+        return int(m.group(1))
+    # "XX口"（在油气上下文中）
+    m = re.search(r'(\d+)\s*口\b', query)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
+def _extract_additional_wells(query: str) -> int:
+    """从查询中提取丛式井增加井数。"""
+    # "增加XX口" / "丛式井XX口" / "每增加一口"
+    m = re.search(r'(?:增加|丛式井|额外)\s*(\d+)\s*口', query)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
+def _extract_volume_m3(query: str, context: str = "") -> float:
+    """从查询中提取体积/方量（m³）。
+
+    context: 上下文关键词（如 "开采"、"取土"、"废弃"）
+    """
+    # 万立方米
+    m = re.search(rf'(\d+\.?\d*)\s*万\s*(?:m3|m³|立方米|方)\b', query)
+    if m:
+        return float(m.group(1)) * 10000
+
+    # 普通立方米
+    m = re.search(rf'(\d+\.?\d*)\s*(?:m3|m³|立方米|方)\b', query)
+    if m:
+        return float(m.group(1))
+
+    # "XX吨" — 对于土石方，1吨 ≈ 0.6 m³（粗略）
+    m = re.search(rf'(\d+\.?\d*)\s*吨\b', query)
+    if m and context:
+        return round(float(m.group(1)) * 0.6, 2)
+
+    return 0.0
+
+
 def _extract_total_investment(query: str) -> float | None:
     """从查询中提取工程总投资（万元）。
 
@@ -4564,6 +4982,7 @@ def format_for_llm(result: dict) -> str:
 _SKIP_FEES: dict[str, str] = {
     "招标代理费": "需要中标金额，无法根据建安+设备自动计算",
     "水土保持费": "需要土建投资额，无法根据建安+设备自动计算",
+    "水土保持补偿费": "需要土地面积/井数/方量等物理参数，无法根据建安+设备自动计算",
     "造价咨询费": "需要选择具体服务子项（预算编制/结算审核等）",
 }
 
@@ -4598,6 +5017,7 @@ _FEE_LABELS: dict[str, str] = {
     "预备费": "预备费（基本预备费）",
     "招标代理费": "招标代理服务费",
     "造价咨询费": "工程造价咨询服务费",
+    "水土保持补偿费": "水土保持补偿费",
 }
 
 
@@ -4660,7 +5080,9 @@ def _calc_all_fees(
     if sj_addi_override is not None and sj_addi_override != 1.0:
         ss_addi_list = [sj_addi_override]
     sheji_r = calc_sheji(total_part1, professional_coef=sheji_prof,
-                         complexity_coef=sheji_comp, additional_coefs=ss_addi_list)
+                         complexity_coef=sheji_comp, additional_coefs=ss_addi_list,
+                         shigongtu_yusuan=sj_overrides.get("shigongtu_yusuan", False),
+                         jungongtu=sj_overrides.get("jungongtu", False))
     raw_results["工程设计费"] = sheji_r
     numerical["工程设计费(万元)"] = _extract_numeric_value(sheji_r)
 
@@ -5096,6 +5518,33 @@ def _build_fee_selection_meta(
         "depends_on": [],
         "default_value_wan": 0,
         "is_from_skip": True,  # 标记为来自 _SKIP_FEES
+    })
+
+    # 水土保持补偿费：需要物理参数（土地面积/井数/方量），独立于投资额计算
+    definitions.append({
+        "name": "水土保持补偿费",
+        "label": _FEE_LABELS.get("水土保持补偿费", "水土保持补偿费"),
+        "tier": 4,  # 独立费种，不参与层级汇总
+        "has_coefs": False,
+        "has_rates": False,
+        "has_services": False,
+        "has_physical_params": True,  # 需要物理参数输入（土地面积等）
+        "coef_config": None,
+        "rate_config": None,
+        "service_config": None,
+        "depends_on": [],
+        "default_value_wan": 0,
+        "is_from_skip": True,
+        "shuibao_comp_config": {
+            "calc_types": [
+                ("general", "一般性生产建设项目 — 1.4 元/m²"),
+                ("mining_construction", "矿产资源开采（建设期）— 1.4 元/m²"),
+                ("mining_oil_gas", "矿产资源开采（油气生产期）— 2000m²/井 × 1.4 元/m²"),
+                ("mining_other", "矿产资源开采（其他矿产）— 0.3 元/m³"),
+                ("material_extraction", "取土/挖砂/采石/烧制 — 0.3 元/m³"),
+                ("waste_disposal", "排放废弃土石渣 — 0.3 元/m³"),
+            ],
+        },
     })
 
     return definitions

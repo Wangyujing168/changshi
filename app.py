@@ -1058,6 +1058,33 @@ if "pending_coef_select" in st.session_state:
 
         st.markdown("---")
 
+        # ── 设计费附加项（仅当 calc_func == "calc_sheji" 时显示）──
+        sheji_addon_sgys = False
+        sheji_addon_jgt = False
+        if calc_func == "calc_sheji":
+            st.markdown("### 📐 其他设计收费（可选）")
+            st.caption("依据计价格[2002]10号 1.0.16条，以下两项可按需勾选：")
+            col_sgys, col_jgt = st.columns(2)
+            with col_sgys:
+                sheji_addon_sgys = st.checkbox(
+                    "施工图预算编制费",
+                    value=False,
+                    key="sheji_sgys",
+                    help="按基本设计收费的 10% 收取（1.0.16条）",
+                )
+                if sheji_addon_sgys:
+                    st.caption("→ 基本设计收费 × 10%")
+            with col_jgt:
+                sheji_addon_jgt = st.checkbox(
+                    "竣工图编制费",
+                    value=False,
+                    key="sheji_jgt",
+                    help="按基本设计收费的 8% 收取（1.0.16条）",
+                )
+                if sheji_addon_jgt:
+                    st.caption("→ 基本设计收费 × 8%")
+            st.markdown("---")
+
         # ── 根据所选系数实时重算 ──
         recalc_fee = None
         recalc_desc = ""
@@ -1098,7 +1125,9 @@ if "pending_coef_select" in st.session_state:
 
                 if amount_wan is not None:
                     addi_list = [addi] if abs(addi - 1.0) > 0.005 else None
-                    recalc = calc_sheji(amount_wan, prof, comp, additional_coefs=addi_list)
+                    recalc = calc_sheji(amount_wan, prof, comp, additional_coefs=addi_list,
+                                        shigongtu_yusuan=sheji_addon_sgys,
+                                        jungongtu=sheji_addon_jgt)
                 else:
                     recalc = None
                     recalc_error = "无法确定计费额"
@@ -2603,6 +2632,228 @@ if "pending_keyan" in st.session_state:
                     del st.session_state.pending_keyan
                     st.rerun()
 
+# ===== 水土保持补偿费交互式输入 =====
+
+if "pending_shuibao_compensation" in st.session_state:
+    ctx = st.session_state.pending_shuibao_compensation
+
+    st.divider()
+
+    with st.container(border=True):
+        st.markdown("## 🏗️ 水土保持补偿费 — 参数输入")
+        st.caption(
+            "依据《天津市水土保持补偿费征收标准》"
+            "（津发改价综〔2020〕351号 / 发改价格[2017]1186号）"
+        )
+
+        # ── 计算类型选择 ──
+        st.markdown("### 📋 选择计征类型")
+        calc_types = [
+            ("general", "一般性生产建设项目 — 1.4 元/m²（按征占土地面积一次性计征）"),
+            ("mining_construction", "矿产资源开采（建设期）— 1.4 元/m²（一次性）"),
+            ("mining_oil_gas", "矿产资源开采（油气生产期）— 每口井 2000m² × 1.4 元/m²/年"),
+            ("mining_other", "矿产资源开采（其他矿产）— 0.3 元/m³（按开采量）"),
+            ("material_extraction", "取土/挖砂/采石/烧制砖瓦瓷石灰 — 0.3 元/m³"),
+            ("waste_disposal", "排放废弃土石渣 — 0.3 元/m³"),
+        ]
+        type_labels = [label for _, label in calc_types]
+        type_keys = [key for key, _ in calc_types]
+
+        cur_type = ctx.get("calc_type", "general")
+        try:
+            cur_idx = type_keys.index(cur_type)
+        except ValueError:
+            cur_idx = 0
+
+        chosen_idx = st.selectbox(
+            "计征类型",
+            range(len(type_labels)),
+            index=cur_idx,
+            format_func=lambda i: type_labels[i],
+            key="shuibao_comp_type",
+        )
+        chosen_type = type_keys[chosen_idx]
+        ctx["calc_type"] = chosen_type
+
+        st.markdown("---")
+
+        # ── 参数输入（根据类型动态显示）──
+        st.markdown("### 📐 输入参数")
+
+        land_m2 = 0.0
+        well_cnt = 0
+        add_wells = 0
+        extract_vol = 0.0
+        material_vol = 0.0
+        waste_vol = 0.0
+
+        if chosen_type in ("general", "mining_construction"):
+            st.caption("请输入征占土地面积（支持亩、公顷、平方米）")
+            unit_col, val_col = st.columns([1, 3])
+            with unit_col:
+                area_unit = st.selectbox(
+                    "面积单位",
+                    ["m²", "亩", "公顷"],
+                    key="shuibao_area_unit",
+                )
+            with val_col:
+                land_input = st.number_input(
+                    f"征占土地面积（{area_unit}）",
+                    min_value=0.0,
+                    value=float(ctx.get("land_input", 0.0)),
+                    step=1.0 if area_unit == "m²" else 0.1,
+                    format="%.2f",
+                    key="shuibao_land_input",
+                )
+            ctx["land_input"] = land_input
+            if area_unit == "亩":
+                land_m2 = round(land_input * 666.67, 2)
+            elif area_unit == "公顷":
+                land_m2 = land_input * 10000
+            else:
+                land_m2 = land_input
+            if land_input > 0:
+                st.caption(f"换算为 **{land_m2:,.0f} m²**")
+
+        elif chosen_type == "mining_oil_gas":
+            col1, col2 = st.columns(2)
+            with col1:
+                well_cnt = st.number_input(
+                    "油气生产井数量（口）",
+                    min_value=0,
+                    value=int(ctx.get("well_cnt", 0)),
+                    step=1,
+                    key="shuibao_well_cnt",
+                )
+                ctx["well_cnt"] = well_cnt
+            with col2:
+                add_wells = st.number_input(
+                    "丛式井增加井数（口）",
+                    min_value=0,
+                    value=int(ctx.get("add_wells", 0)),
+                    step=1,
+                    key="shuibao_add_wells",
+                    help="每增加一口井，增加计征面积 400m²",
+                )
+                ctx["add_wells"] = add_wells
+            if well_cnt > 0:
+                total_area = well_cnt * 2000 + add_wells * 400
+                st.caption(
+                    f"计费面积 = {well_cnt}口 × 2000m²"
+                    + (f" + {add_wells}口 × 400m²" if add_wells > 0 else "")
+                    + f" = **{total_area:,} m²**"
+                )
+
+        elif chosen_type == "mining_other":
+            extract_vol = st.number_input(
+                "开采量（m³ / 采掘、采剥量）",
+                min_value=0.0,
+                value=float(ctx.get("extract_vol", 0.0)),
+                step=100.0,
+                format="%.0f",
+                key="shuibao_extract_vol",
+            )
+            ctx["extract_vol"] = extract_vol
+
+        elif chosen_type == "material_extraction":
+            material_vol = st.number_input(
+                "取土/挖砂/采石/烧制量（m³）",
+                min_value=0.0,
+                value=float(ctx.get("material_vol", 0.0)),
+                step=100.0,
+                format="%.0f",
+                key="shuibao_material_vol",
+            )
+            ctx["material_vol"] = material_vol
+
+        elif chosen_type == "waste_disposal":
+            waste_vol = st.number_input(
+                "排放废弃土石渣量（m³）",
+                min_value=0.0,
+                value=float(ctx.get("waste_vol", 0.0)),
+                step=100.0,
+                format="%.0f",
+                key="shuibao_waste_vol",
+            )
+            ctx["waste_vol"] = waste_vol
+
+        st.markdown("---")
+
+        # ── 实时预览 ──
+        st.markdown("### 💰 费用预览")
+        can_calc = (
+            (chosen_type in ("general", "mining_construction") and land_m2 > 0)
+            or (chosen_type == "mining_oil_gas" and well_cnt > 0)
+            or (chosen_type == "mining_other" and extract_vol > 0)
+            or (chosen_type == "material_extraction" and material_vol > 0)
+            or (chosen_type == "waste_disposal" and waste_vol > 0)
+        )
+
+        if can_calc:
+            from fee_engine import calc_shuibao_compensation
+
+            preview = calc_shuibao_compensation(
+                calc_type=chosen_type,
+                land_area_m2=land_m2,
+                well_count=well_cnt,
+                additional_wells=add_wells,
+                extraction_volume_m3=extract_vol,
+                material_volume_m3=material_vol,
+                waste_volume_m3=waste_vol,
+            )
+
+            fee_yuan = preview.get("结果(元)", 0)
+            fee_wan = preview.get("结果(万元)", 0)
+            central = preview.get("中央收入(元)", 0)
+            local = preview.get("地方收入(元)", 0)
+            calc_formula = preview.get("计算公式", "")
+
+            st.markdown(f"**计算公式**：{calc_formula}")
+            st.markdown(f"**补偿费合计**：**{fee_yuan:,.2f} 元**（{fee_wan:.4f} 万元）")
+            st.markdown(f"- 中央收入（10%）：{central:,.2f} 元")
+            st.markdown(f"- 地方收入（90%）：{local:,.2f} 元")
+
+            # 重复计征提醒
+            if chosen_type in ("material_extraction", "waste_disposal"):
+                st.info("⚠️ 对缴纳义务人已按前几种方式计征水土保持补偿费的，不再重复计征。")
+            if chosen_type != "mining_oil_gas":
+                st.caption("💡 水利水电工程建设项目，水库淹没区不在计征范围之内。")
+
+            ctx["_preview"] = preview
+        else:
+            st.info("👆 请在上方输入参数后查看费用预览")
+
+        st.markdown("---")
+
+        # ── 确认/取消按钮 ──
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("✅ 确认结果", use_container_width=True, key="confirm_shuibao_comp",
+                         disabled=not can_calc):
+                preview = ctx.get("_preview", {})
+                if preview:
+                    result_text = (
+                        f"## 水土保持补偿费\n\n"
+                        f"**计征类型**：{preview.get('参数', {}).get('计算类型', '')}\n\n"
+                        f"**计算过程**：\n"
+                        f"- 计算公式：{preview.get('计算公式', '')}\n"
+                        f"- 补偿费合计：**{preview.get('结果(元)', 0):,.2f} 元**"
+                        f"（{preview.get('结果(万元)', 0):.4f} 万元）\n"
+                        f"- 其中中央收入（10%）：{preview.get('中央收入(元)', 0):,.2f} 元\n"
+                        f"- 地方收入（90%）：{preview.get('地方收入(元)', 0):,.2f} 元\n\n"
+                        f"> 依据：{preview.get('依据', '')}"
+                    )
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": result_text,
+                    })
+                    del st.session_state.pending_shuibao_compensation
+                    st.rerun()
+        with col_btn2:
+            if st.button("🗑 取消", use_container_width=True, key="cancel_shuibao_comp"):
+                del st.session_state.pending_shuibao_compensation
+                st.rerun()
+
 # ===== 全费用交互式选择 =====
 if "pending_fee_selection" in st.session_state:
     ctx = st.session_state.pending_fee_selection
@@ -2623,22 +2874,24 @@ if "pending_fee_selection" in st.session_state:
         st.caption("勾选需要计算的费种，取消勾选将从最终汇总中移除该费种。")
 
         tier_labels = {0: "第一部分工程费相关", 1: "勘察设计费相关",
-                       2: "总投资相关", 3: "预备费"}
-        tier_colors = {0: "#e8f5e9", 1: "#fff3e0", 2: "#e3f2fd", 3: "#fce4ec"}
+                       2: "总投资相关", 3: "预备费", 4: "独立费种（非投资额相关）"}
+        tier_colors = {0: "#e8f5e9", 1: "#fff3e0", 2: "#e3f2fd", 3: "#fce4ec", 4: "#f3e5f5"}
 
         # 收集当前勾选状态
         new_selected: set[str] = set()
         prev_selected = set(ctx.get("selected_fees", set()))
 
-        for tier in [0, 1, 2, 3]:
+        for tier in [0, 1, 2, 3, 4]:
             tier_fees = [fd for fd in ctx["fee_defs"] if fd["tier"] == tier]
             if not tier_fees:
                 continue
 
             # Tier 标题（小字低调）
+            _bg = tier_colors.get(tier, "#f5f5f5")
+            _tl = tier_labels.get(tier, "")
             st.markdown(
-                f"<span style='background:{tier_colors[tier]};padding:1px 6px;"
-                f"border-radius:3px;font-size:0.8em;color:#666;'>{tier_labels[tier]}</span>",
+                f"<span style='background:{_bg};padding:1px 6px;"
+                f"border-radius:3px;font-size:0.8em;color:#666;'>{_tl}</span>",
                 unsafe_allow_html=True,
             )
 
@@ -2773,6 +3026,30 @@ if "pending_fee_selection" in st.session_state:
                                 help=coef_def.get("description", ""),
                             )
                             overrides[param_name] = float(custom_val)
+
+                    # ── 设计费附加项（计价格[2002]10号 1.0.16条）──
+                    if fee_name == "工程设计费":
+                        st.markdown("---")
+                        st.caption(
+                            "📐 **其他设计收费**（计价格[2002]10号 第1.0.16条）："
+                        )
+                        col_sg, col_jg = st.columns(2)
+                        with col_sg:
+                            sgys = st.checkbox(
+                                "施工图预算编制费",
+                                value=overrides.get("shigongtu_yusuan", False),
+                                key=f"cascade_sgys_{fee_name}",
+                                help="按基本设计收费的 10% 收取",
+                            )
+                            overrides["shigongtu_yusuan"] = sgys
+                        with col_jg:
+                            jgt = st.checkbox(
+                                "竣工图编制费",
+                                value=overrides.get("jungongtu", False),
+                                key=f"cascade_jgt_{fee_name}",
+                                help="按基本设计收费的 8% 收取",
+                            )
+                            overrides["jungongtu"] = jgt
 
                     ctx["coef_overrides"][fee_name] = overrides
                     st.session_state.pending_fee_selection["coef_overrides"] = ctx["coef_overrides"]
@@ -3058,6 +3335,128 @@ if "pending_fee_selection" in st.session_state:
 
             ctx["rate_overrides"] = rate_overrides
             st.session_state.pending_fee_selection["rate_overrides"] = rate_overrides
+
+            st.markdown("---")
+
+        # ── 水土保持补偿费参数输入 ──
+        if "水土保持补偿费" in new_selected:
+            st.markdown("### 🏗️ 水土保持补偿费 — 参数输入")
+            st.caption(
+                "依据津发改价综〔2020〕351号，需输入物理参数。"
+                "该费用独立于投资额计算，不参与层级汇总。"
+            )
+
+            sb_params = ctx.setdefault("shuibao_comp_params", {
+                "calc_type": "general",
+                "land_input": 0.0,
+                "land_unit": "m²",
+                "well_cnt": 0,
+                "add_wells": 0,
+                "extract_vol": 0.0,
+                "material_vol": 0.0,
+                "waste_vol": 0.0,
+            })
+
+            # 计算类型选择
+            sb_type_labels = [
+                "一般性生产建设项目 — 1.4 元/m²",
+                "矿产资源开采（建设期）— 1.4 元/m²",
+                "矿产资源开采（油气生产期）— 2000m²/井 × 1.4 元/m²",
+                "矿产资源开采（其他矿产）— 0.3 元/m³",
+                "取土/挖砂/采石/烧制 — 0.3 元/m³",
+                "排放废弃土石渣 — 0.3 元/m³",
+            ]
+            sb_type_keys = [
+                "general", "mining_construction", "mining_oil_gas",
+                "mining_other", "material_extraction", "waste_disposal",
+            ]
+            cur_sb_type = sb_params.get("calc_type", "general")
+            try:
+                sb_type_idx = sb_type_keys.index(cur_sb_type)
+            except ValueError:
+                sb_type_idx = 0
+            chosen_sb_type = st.selectbox(
+                "计征类型",
+                range(len(sb_type_labels)),
+                index=sb_type_idx,
+                format_func=lambda i: sb_type_labels[i],
+                key="cascade_sb_type",
+            )
+            sb_params["calc_type"] = sb_type_keys[chosen_sb_type]
+            chosen_sb_key = sb_type_keys[chosen_sb_type]
+
+            # 参数输入（根据类型动态显示）
+            land_m2 = 0.0
+            if chosen_sb_key in ("general", "mining_construction"):
+                uc1, uc2 = st.columns([1, 3])
+                with uc1:
+                    area_unit = st.selectbox(
+                        "面积单位", ["m²", "亩", "公顷"],
+                        key="cascade_sb_area_unit",
+                        index=["m²", "亩", "公顷"].index(sb_params.get("land_unit", "m²")),
+                    )
+                    sb_params["land_unit"] = area_unit
+                with uc2:
+                    land_input = st.number_input(
+                        f"征占土地面积（{area_unit}）",
+                        min_value=0.0,
+                        value=float(sb_params.get("land_input", 0.0)),
+                        step=1.0 if area_unit == "m²" else 0.1,
+                        format="%.2f",
+                        key="cascade_sb_land",
+                    )
+                    sb_params["land_input"] = land_input
+                if area_unit == "亩":
+                    land_m2 = round(land_input * 666.67, 2)
+                elif area_unit == "公顷":
+                    land_m2 = land_input * 10000
+                else:
+                    land_m2 = land_input
+                if land_input > 0:
+                    st.caption(f"换算为 **{land_m2:,.0f} m²**")
+
+            elif chosen_sb_key == "mining_oil_gas":
+                wc1, wc2 = st.columns(2)
+                with wc1:
+                    well_cnt = st.number_input(
+                        "油气生产井数量（口）", min_value=0,
+                        value=int(sb_params.get("well_cnt", 0)),
+                        step=1, key="cascade_sb_wells",
+                    )
+                    sb_params["well_cnt"] = well_cnt
+                with wc2:
+                    add_wells = st.number_input(
+                        "丛式井增加井数（口）", min_value=0,
+                        value=int(sb_params.get("add_wells", 0)),
+                        step=1, key="cascade_sb_addwells",
+                    )
+                    sb_params["add_wells"] = add_wells
+
+            elif chosen_sb_key == "mining_other":
+                extract_vol = st.number_input(
+                    "开采量（m³）", min_value=0.0,
+                    value=float(sb_params.get("extract_vol", 0.0)),
+                    step=100.0, format="%.0f", key="cascade_sb_extract",
+                )
+                sb_params["extract_vol"] = extract_vol
+
+            elif chosen_sb_key == "material_extraction":
+                material_vol = st.number_input(
+                    "取土/挖砂/采石/烧制量（m³）", min_value=0.0,
+                    value=float(sb_params.get("material_vol", 0.0)),
+                    step=100.0, format="%.0f", key="cascade_sb_material",
+                )
+                sb_params["material_vol"] = material_vol
+
+            elif chosen_sb_key == "waste_disposal":
+                waste_vol = st.number_input(
+                    "排放废弃土石渣量（m³）", min_value=0.0,
+                    value=float(sb_params.get("waste_vol", 0.0)),
+                    step=100.0, format="%.0f", key="cascade_sb_waste",
+                )
+                sb_params["waste_vol"] = waste_vol
+
+            st.session_state.pending_fee_selection["shuibao_comp_params"] = sb_params
 
             st.markdown("---")
 
@@ -3379,17 +3778,51 @@ if "pending_fee_selection" in st.session_state:
                         traceback.print_exc()
                         pass  # 失败时保留原始值
 
+            # ── 水土保持补偿费计算 ──
+            sb_fee_wan = 0.0
+            if "水土保持补偿费" in new_selected:
+                sb_params = ctx.get("shuibao_comp_params", {})
+                sb_type = sb_params.get("calc_type", "general")
+                try:
+                    from fee_engine import calc_shuibao_compensation
+
+                    _sb_land_m2 = 0.0
+                    _sb_unit = sb_params.get("land_unit", "m²")
+                    _sb_land_input = float(sb_params.get("land_input", 0.0))
+                    if _sb_unit == "亩":
+                        _sb_land_m2 = round(_sb_land_input * 666.67, 2)
+                    elif _sb_unit == "公顷":
+                        _sb_land_m2 = _sb_land_input * 10000
+                    else:
+                        _sb_land_m2 = _sb_land_input
+
+                    sb_result = calc_shuibao_compensation(
+                        calc_type=sb_type,
+                        land_area_m2=_sb_land_m2,
+                        well_count=int(sb_params.get("well_cnt", 0)),
+                        additional_wells=int(sb_params.get("add_wells", 0)),
+                        extraction_volume_m3=float(sb_params.get("extract_vol", 0.0)),
+                        material_volume_m3=float(sb_params.get("material_vol", 0.0)),
+                        waste_volume_m3=float(sb_params.get("waste_vol", 0.0)),
+                    )
+                    sb_fee_wan = sb_result.get("结果(万元)", 0)
+                    numerical["水土保持补偿费(万元)"] = sb_fee_wan
+                    preview_raw["原始结果"]["水土保持补偿费"] = sb_result
+                except Exception:
+                    pass  # 参数不全则跳过
+
             # 按层级显示
-            for tier in [0, 1, 2]:
+            for tier in [0, 1, 2, 4]:
                 tier_fees = [
                     fd for fd in ctx["fee_defs"]
                     if fd["tier"] == tier and fd["name"] in new_selected
                 ]
                 if not tier_fees:
                     continue
+                subtotal = preview_raw.get(f'T{tier}小计(万元)', 0)
+                subtotal_str = f"<small style='color:#888;'>{subtotal:.2f} 万元</small>" if subtotal > 0 else ""
                 st.markdown(
-                    f"**{tier_labels[tier]}**  "
-                    f"<small style='color:#888;'>{preview_raw.get(f'T{tier}小计(万元)', 0):.2f} 万元</small>",
+                    f"**{tier_labels.get(tier, '')}**  {subtotal_str}",
                     unsafe_allow_html=True,
                 )
                 for fd in tier_fees:
@@ -3439,6 +3872,12 @@ if "pending_fee_selection" in st.session_state:
                 # 预备费未选中，不显示
                 pass
 
+            # 水土保持补偿费（独立于投资额的费种）
+            if sb_fee_wan > 0:
+                st.markdown(f"**🏗️ 水土保持补偿费**：**{sb_fee_wan:.4f}** 万元"
+                            f" <small style='color:#888;'>({sb_fee_wan * 10000:,.0f} 元，含10%中央收入)</small>",
+                            unsafe_allow_html=True)
+
             # 自定义费用
             custom_total = sum(cf["amount_wan"] for cf in ctx["custom_fees"])
             if ctx["custom_fees"]:
@@ -3452,15 +3891,18 @@ if "pending_fee_selection" in st.session_state:
             yb_total = preview_raw.get("预备费小计(万元)", 0)
             pt = preview_raw.get("项目总投资(万元)", 0)
 
-            # 加上自定义费用
-            fee_total_with_custom = round(fee_total_raw + custom_total, 4)
-            project_total_with_custom = round(pt + custom_total, 4)
+            # 加上自定义费用 + 水土保持补偿费
+            fee_total_with_custom = round(fee_total_raw + custom_total + sb_fee_wan, 4)
+            project_total_with_custom = round(pt + custom_total + sb_fee_wan, 4)
 
-            col1, col2, col3, col4 = st.columns(4)
+            n_cols = 4 if sb_fee_wan > 0 else 4
+            col1, col2, col3, col4 = st.columns(n_cols)
             col1.metric("二类费合计", f"{fee_total_with_custom:.2f} 万元")
             col2.metric("预备费", f"{yb_total:.2f} 万元")
             col3.metric("项目总投资", f"{project_total_with_custom:.2f} 万元")
-            col4.metric("自定义费小计", f"{custom_total:.2f} 万元")
+            extra_label = "水保补偿费" if sb_fee_wan > 0 else "自定义费小计"
+            extra_val = f"{sb_fee_wan:.4f}" if sb_fee_wan > 0 else f"{custom_total:.2f}"
+            col4.metric(extra_label, f"{extra_val} 万元")
 
             # 存储预览结果供确认按钮使用
             ctx["preview"] = {
@@ -3470,6 +3912,7 @@ if "pending_fee_selection" in st.session_state:
                 "project_total_with_custom": project_total_with_custom,
                 "yubei_total": yb_total,
                 "numerical": numerical,
+                "sb_fee_wan": sb_fee_wan,
             }
             st.session_state.pending_fee_selection["preview"] = ctx["preview"]
 
@@ -3624,6 +4067,16 @@ if "pending_fee_selection" in st.session_state:
                         custom_lines.append(f"- **{cf['name']}**：{cf['amount_wan']:.2f} 万元")
                         custom_total_val += cf["amount_wan"]
 
+                # 水土保持补偿费
+                sb_fee_wan = preview.get("sb_fee_wan", 0) if preview else 0
+                sb_lines = []
+                if sb_fee_wan > 0:
+                    sb_params = ctx.get("shuibao_comp_params", {})
+                    sb_detail = numerical.get("水土保持补偿费(万元)", sb_fee_wan)
+                    sb_lines.append("")
+                    sb_lines.append(f"**🏗️ 水土保持补偿费**：{sb_detail:.4f} 万元"
+                                    f"（{sb_detail * 10000:,.0f} 元，含10%中央收入）")
+
                 # 打折文本
                 discount_text = ""
                 if abs(discounted_fee_total - raw_fee_total) > 0.005:
@@ -3632,8 +4085,8 @@ if "pending_fee_selection" in st.session_state:
                         f"（打折前 {raw_fee_total:.2f} 万元）"
                     )
 
-                # 加上自定义费用
-                discounted_with_custom = discounted_fee_total + custom_total_val
+                # 加上自定义费用 + 水土保持补偿费
+                discounted_with_custom = discounted_fee_total + custom_total_val + sb_fee_wan
 
                 # 预备费文本
                 yb_val = preview["yubei_total"] if preview else 0
@@ -3641,7 +4094,7 @@ if "pending_fee_selection" in st.session_state:
                 if yb_val > 0:
                     yb_text = f"\n\n**预备费（基本预备费）**：{yb_val:.2f} 万元"
 
-                project_total_val = preview["project_total_with_custom"] if preview else 0
+                project_total_val = (preview["project_total_with_custom"] if preview else 0) + sb_fee_wan
 
                 final_response = (
                     f"## 多费种联算结果\n\n"
@@ -3653,6 +4106,7 @@ if "pending_fee_selection" in st.session_state:
                     (f"\n\n**二类费合计**：{discounted_with_custom:.2f} 万元"
                      if not discount_text else "")
                     + (f"\n".join(custom_lines) if custom_lines else "")
+                    + (f"\n".join(sb_lines) if sb_lines else "")
                     + discount_text
                     + yb_text
                     + f"\n\n**项目总投资**：{project_total_val:.2f} 万元"
@@ -3688,6 +4142,7 @@ if prompt:
     st.session_state.pop("pending_dependent_fee", None)
     st.session_state.pop("pending_huanping", None)
     st.session_state.pop("pending_keyan", None)
+    st.session_state.pop("pending_shuibao_compensation", None)
     st.session_state.pop("pending_fee_selection", None)
     # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -3773,6 +4228,13 @@ if prompt:
                             "custom_fees": [],
                             "fee_discounts": {fd["name"]: 1.0 for fd in fee_defs},
                             "preview": None,
+                            "shuibao_comp_params": {
+                                "calc_type": "general",
+                                "land_input": 0.0, "land_unit": "m²",
+                                "well_cnt": 0, "add_wells": 0,
+                                "extract_vol": 0.0, "material_vol": 0.0,
+                                "waste_vol": 0.0,
+                            },
                         }
                     else:
                         # 更新已有的 session：替换 fee_defs（保持用户已选状态）
@@ -3804,6 +4266,14 @@ if prompt:
                         discounts = ctx.setdefault("fee_discounts", {})
                         for fd in fee_defs:
                             discounts.setdefault(fd["name"], 1.0)
+                        # 补上可能缺失的 shuibao_comp_params
+                        ctx.setdefault("shuibao_comp_params", {
+                            "calc_type": "general",
+                            "land_input": 0.0, "land_unit": "m²",
+                            "well_cnt": 0, "add_wells": 0,
+                            "extract_vol": 0.0, "material_vol": 0.0,
+                            "waste_vol": 0.0,
+                        })
 
                     n_fees = len(st.session_state.pending_fee_selection["fee_defs"])
                     response = (
@@ -3882,6 +4352,24 @@ if prompt:
                             f"请滚动到页面下方 **📊 建设项目前期工作咨询费 — 服务类型选择** 区域，"
                             f"选择需要计算的服务类型并调整系数后点击确认。"
                         )
+                    elif fee_result.get("needs_shuibao_compensation_select"):
+                        # === 水土保持补偿费参数输入 ===
+                        st.session_state.pending_shuibao_compensation = {
+                            "calc_type": fee_result.get("calc_type", "general"),
+                            "query": prompt,
+                            "land_input": 0.0,
+                            "well_cnt": 0,
+                            "add_wells": 0,
+                            "extract_vol": 0.0,
+                            "material_vol": 0.0,
+                            "waste_vol": 0.0,
+                        }
+                        response = (
+                            f"## 水土保持补偿费\n\n"
+                            f"> 🏗️ 该费种需要输入物理参数\n\n"
+                            f"请滚动到页面下方 **🏗️ 水土保持补偿费 — 参数输入** 区域，"
+                            f"选择计征类型并输入参数后点击确认。"
+                        )
                     elif is_rate_selectable:
                         # === 交互式费率选择：存入 session state，在聊天区外渲染 ===
                         st.session_state.pending_rate_select = {
@@ -3915,7 +4403,7 @@ if prompt:
                         st.markdown("### 计算结果（程序精确计算）")
                         _render_engine_card(fee_result)
 
-                    if needs_dep or is_rate_selectable or is_coef_selectable or fee_result.get("needs_huanping_select") or fee_result.get("needs_keyan_select"):
+                    if needs_dep or is_rate_selectable or is_coef_selectable or fee_result.get("needs_huanping_select") or fee_result.get("needs_keyan_select") or fee_result.get("needs_shuibao_compensation_select"):
                         pass  # 已在上面通过 pending_* 处理完成
                     elif is_sheji:
                         st.divider()
