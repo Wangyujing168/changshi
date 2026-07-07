@@ -3130,6 +3130,10 @@ if "pending_fee_selection" in st.session_state:
                     # 费率格式如 "0.5%"，提取数字
                     rate_num = float(rate_val.replace("%", ""))
                     param_overrides[pk] = rate_num
+            # 预备费率：优先用户输入，否则默认 5%
+            _saved_yb = ctx.get("param_overrides", {}).get("预备费率")
+            if _saved_yb is not None:
+                param_overrides["预备费率"] = _saved_yb
 
             # 调用引擎计算（仅选中费种 + 系数覆盖 + 费率覆盖）
             preview_raw = _calc_all_fees(
@@ -3413,10 +3417,27 @@ if "pending_fee_selection" in st.session_state:
                             unsafe_allow_html=True,
                         )
 
-            # 预备费
+            # 预备费（含费率输入）
             yb_val = numerical.get("预备费(万元)")
             if yb_val is not None and yb_val > 0:
-                st.markdown(f"**预备费**：**{yb_val:.2f}** 万元")
+                yb_col1, yb_col2 = st.columns([3, 1])
+                with yb_col1:
+                    st.markdown(f"**预备费**：**{yb_val:.2f}** 万元")
+                with yb_col2:
+                    new_yb_rate = st.number_input(
+                        "预备费率(%)",
+                        min_value=0.0, max_value=20.0,
+                        value=float(param_overrides.get("预备费率", 5.0)),
+                        step=0.5, format="%.1f",
+                        key="cascade_yb_rate",
+                        help="(一类费+二类费)×预备费率",
+                        label_visibility="visible",
+                    )
+                    param_overrides["预备费率"] = new_yb_rate
+                    st.session_state.pending_fee_selection.setdefault("param_overrides", {})["预备费率"] = new_yb_rate
+            else:
+                # 预备费未选中，不显示
+                pass
 
             # 自定义费用
             custom_total = sum(cf["amount_wan"] for cf in ctx["custom_fees"])
