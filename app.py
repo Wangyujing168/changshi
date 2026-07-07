@@ -3130,10 +3130,10 @@ if "pending_fee_selection" in st.session_state:
                     # 费率格式如 "0.5%"，提取数字
                     rate_num = float(rate_val.replace("%", ""))
                     param_overrides[pk] = rate_num
-            # 预备费率：优先用户输入，否则默认 5%
-            _saved_yb = ctx.get("param_overrides", {}).get("预备费率")
-            if _saved_yb is not None:
-                param_overrides["预备费率"] = _saved_yb
+            # 预备费率：直接从 widget session key 读取（避免 lag）
+            _yb_rate_widget = st.session_state.get("cascade_yb_rate")
+            if _yb_rate_widget is not None:
+                param_overrides["预备费率"] = float(_yb_rate_widget)
 
             # 调用引擎计算（仅选中费种 + 系数覆盖 + 费率覆盖）
             preview_raw = _calc_all_fees(
@@ -3296,8 +3296,8 @@ if "pending_fee_selection" in st.session_state:
                         # 自定义费用应计入项目总投资（影响建设管理费和概算审核基数）
                         _custom_total = sum(
                             cf["amount_wan"] for cf in ctx.get("custom_fees", []))
-                        # 预备费率：优先从 param_overrides，否则默认 5%
-                        _yb_rate = param_overrides.get("预备费率", 5.0)
+                        # 预备费率：直接从 widget 读取
+                        _yb_rate = float(st.session_state.get("cascade_yb_rate", 5.0))
                         _prev_total = 0.0
                         _curr_total = round(
                             ctx["total_part1"] + new_t0 + t1_total
@@ -3424,17 +3424,17 @@ if "pending_fee_selection" in st.session_state:
                 with yb_col1:
                     st.markdown(f"**预备费**：**{yb_val:.2f}** 万元")
                 with yb_col2:
-                    new_yb_rate = st.number_input(
+                    # 从 widget key 读取当前值（首次默认 5.0）
+                    _current_yb = st.session_state.get("cascade_yb_rate", 5.0)
+                    st.number_input(
                         "预备费率(%)",
                         min_value=0.0, max_value=20.0,
-                        value=float(param_overrides.get("预备费率", 5.0)),
+                        value=float(_current_yb),
                         step=0.5, format="%.1f",
                         key="cascade_yb_rate",
                         help="(一类费+二类费)×预备费率",
                         label_visibility="visible",
                     )
-                    param_overrides["预备费率"] = new_yb_rate
-                    st.session_state.pending_fee_selection.setdefault("param_overrides", {})["预备费率"] = new_yb_rate
             else:
                 # 预备费未选中，不显示
                 pass
