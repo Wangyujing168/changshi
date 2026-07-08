@@ -2976,6 +2976,15 @@ if "pending_jiaoyi_party" in st.session_state:
 if "pending_fee_selection" in st.session_state:
     ctx = st.session_state.pending_fee_selection
 
+    # 安全检查：若最近一条用户消息并非当前 cascade 查询，说明用户已提新问题，
+    # pending_fee_selection 应已被新 prompt 的清理逻辑移除。若未移除说明是残留状态。
+    last_user_msgs = [m for m in st.session_state.messages if m.get("role") == "user"]
+    if last_user_msgs:
+        last_user_content = last_user_msgs[-1].get("content", "")
+        if last_user_content != ctx.get("query", ""):
+            del st.session_state.pending_fee_selection
+            st.rerun()
+
     st.divider()
 
     with st.container(border=True):
@@ -3641,6 +3650,217 @@ if "pending_fee_selection" in st.session_state:
 
         st.markdown("---")
 
+        # ── Contract Rate/Price Overrides ──
+        st.markdown("### 📝 合同费率/合同价覆盖")
+        st.caption(
+            "输入合同约定的费率或一口价，将替代对应费种的标准计算结果。"
+            "合同覆盖不影响其他费种的依赖计算。"
+        )
+
+        contract_overrides = ctx.setdefault("contract_overrides", {})
+
+        # 可被覆盖的费种：已选中且非预备费
+        overridable_fees = [
+            fd for fd in ctx["fee_defs"]
+            if fd["name"] in new_selected and fd["name"] != "预备费"
+        ]
+        overridable_names = [fd["name"] for fd in overridable_fees]
+        overridable_labels = [f"{fd['label']}（{fd['name']}）" for fd in overridable_fees]
+
+        if overridable_fees:
+            col_fee, col_type = st.columns([2, 1.5])
+            with col_fee:
+                selected_fee_idx = st.selectbox(
+                    "选择费种",
+                    range(len(overridable_fees)),
+                    format_func=lambda i: overridable_labels[i] if i < len(overridable_labels) else "",
+                    key="contract_fee_select",
+                    label_visibility="collapsed",
+                )
+                selected_fee_name = overridable_names[selected_fee_idx]
+            with col_type:
+                ov_type = st.radio(
+                    "覆盖类型",
+                    ["合同费率", "合同价"],
+                    key="contract_type_radio",
+                    horizontal=True,
+                    label_visibility="collapsed",
+                )
+
+            if ov_type == "合同费率":
+                col_rate, col_base = st.columns([1, 2])
+                with col_rate:
+                    ov_rate = st.number_input(
+                        "费率(%)",
+                        min_value=0.01, max_value=100.0,
+                        value=2.0, step=0.01, format="%.2f",
+                        key="contract_rate_input",
+                    )
+                with col_base:
+                    base_options = ["工程费", "建安费", "项目总投资", "自定义金额", "选定费种"]
+                    ov_base = st.selectbox(
+                        "计费基数",
+                        base_options,
+                        key="contract_base_select",
+                    )
+
+                ov_base_custom = 0.0
+                ov_base_fees: list[str] = []
+                if ov_base == "自定义金额":
+                    ov_base_custom = st.number_input(
+                        "自定义基数（万元）",
+                        min_value=0.0, step=1.0, format="%.2f",
+                        value=float(ctx["total_part1"]),
+                        key="contract_base_custom",
+                    )
+                elif ov_base == "选定费种":
+                    # 可选的基数费种：已选中的费种（排除被覆盖的费种自身）
+                    base_candidates = [
+                        fd for fd in overridable_fees
+                        if fd["name"] != selected_fee_name
+                    ]
+                    if base_candidates:
+                        base_candidate_names = [fd["name"] for fd in base_candidates]
+                        base_candidate_labels = [
+                            f"{fd['label']}（{fd['name']}）" for fd in base_candidates
+                        ]
+                        ov_base_fees = st.multiselect(
+                            "选择作为基数的费种",
+                            options=base_candidate_names,
+                            format_func=lambda n: next(
+                                (l for l, fdn in zip(base_candidate_labels, base_candidate_names)
+                                 if fdn == n), n),
+                            key="contract_base_fees",
+                            help="所选费种的标准计算值求和作为计费基数",
+                        )
+                    else:
+                        st.caption("无可选的基数费种")
+            else:
+                ov_amount = st.number_input(
+                    "合同价（万元）",
+                    min_value=0.0, step=0.1, format="%.2f",
+                    value=0.0,
+                    key="contract_amount_input",
+                )
+
+            # ── 预览覆盖效果 ──
+            if ov_type == "合同费率" and ov_rate > 0:
+                # 计算实时基数
+                _preview_base = 0.0
+                _base_desc = ""
+                if ov_base == "工程费":
+                    _preview_base = ctx["total_part1"]
+                    _base_desc = f"工程费({_preview_base:.0f}万元)"
+                elif ov_base == "建安费":
+                    _preview_base = ctx["jianan"]
+                    _base_desc = f"建安费({_preview_base:.0f}万元)"
+                elif ov_base == "项目总投资":
+                    _prev = ctx.get("preview", {})
+                    _raw = _prev.get("raw", {}) if _prev else {}
+                    _preview_base = _raw.get("项目总投资(万元)", ctx["total_part1"])
+                    _base_desc = f"项目总投资({_preview_base:.2f}万元)"
+                elif ov_base == "自定义金额":
+                    _preview_base = ov_base_custom
+                    _base_desc = f"自定义({_preview_base:.2f}万元)"
+                elif ov_base == "选定费种":
+                    _prev = ctx.get("preview", {})
+                    _prev_num = _prev.get("numerical", {}) if _prev else {}
+                    _preview_base = sum(
+                        _prev_num.get(f"{f}(万元)", 0) for f in ov_base_fees
+                    )
+                    _base_desc = f"选定费种({'、'.join(ov_base_fees) if ov_base_fees else '无'}，合计{_preview_base:.2f}万元)"
+                _preview_val = round(_preview_base * ov_rate / 100.0, 4)
+                st.caption(f"💡 预览：{ov_rate}% × {_base_desc} = **{_preview_val:.2f}** 万元")
+            elif ov_type == "合同价" and ov_amount > 0:
+                st.caption(f"💡 预览：合同价 **{ov_amount:.2f}** 万元")
+
+            # ── 添加按钮 ──
+            if st.button("➕ 添加合同覆盖", use_container_width=True,
+                         key="contract_add_btn"):
+                if ov_type == "合同费率":
+                    if ov_base in ("工程费", "建安费", "项目总投资") or \
+                       (ov_base == "自定义金额" and ov_base_custom > 0) or \
+                       (ov_base == "选定费种" and ov_base_fees):
+                        override_entry: dict = {
+                            "type": "rate",
+                            "rate": ov_rate,
+                            "base": ov_base,
+                        }
+                        if ov_base == "自定义金额":
+                            override_entry["base_custom"] = ov_base_custom
+                        elif ov_base == "选定费种":
+                            override_entry["base_fees"] = ov_base_fees
+                        contract_overrides[selected_fee_name] = override_entry
+                        ctx["contract_overrides"] = contract_overrides
+                        st.rerun()
+                    else:
+                        st.warning("请完成计费基数配置")
+                else:
+                    if ov_amount > 0:
+                        contract_overrides[selected_fee_name] = {
+                            "type": "price",
+                            "amount_wan": ov_amount,
+                        }
+                        ctx["contract_overrides"] = contract_overrides
+                        st.rerun()
+                    else:
+                        st.warning("请输入合同价金额")
+
+            # ── 已有的合同覆盖列表 ──
+            if contract_overrides:
+                st.markdown("---")
+                st.markdown("**已添加的合同覆盖**：")
+                preview = ctx.get("preview", {})
+                prev_num = preview.get("numerical", {}) if preview else {}
+                for ov_fn, ov_cfg in list(contract_overrides.items()):
+                    ov_label = _FEE_LABELS.get(ov_fn, ov_fn)
+                    col_info, col_del = st.columns([5, 1])
+                    with col_info:
+                        if ov_cfg.get("type") == "rate":
+                            _rt = ov_cfg["rate"]
+                            _bs = ov_cfg["base"]
+                            # 实时计算基数
+                            if _bs == "工程费":
+                                _bv = ctx["total_part1"]
+                            elif _bs == "建安费":
+                                _bv = ctx["jianan"]
+                            elif _bs == "项目总投资":
+                                _raw = preview.get("raw", {}) if preview else {}
+                                _bv = _raw.get("项目总投资(万元)", ctx["total_part1"])
+                            elif _bs == "自定义金额":
+                                _bv = ov_cfg.get("base_custom", 0)
+                            elif _bs == "选定费种":
+                                _bfs = ov_cfg.get("base_fees", [])
+                                _bv = sum(prev_num.get(f"{f}(万元)", 0) for f in _bfs)
+                            else:
+                                _bv = ctx["total_part1"]
+                            _val = round(_bv * _rt / 100.0, 4)
+                            if _bs == "选定费种":
+                                _bfs = ov_cfg.get("base_fees", [])
+                                st.caption(
+                                    f"**{ov_label}**：合同费率 {_rt}% × "
+                                    f"选定费种({'、'.join(_bfs)}，合计{_bv:.2f}万元) = **{_val:.2f}** 万元"
+                                )
+                            else:
+                                st.caption(
+                                    f"**{ov_label}**：合同费率 {_rt}% × "
+                                    f"{_bs}({_bv:.2f}万元) = **{_val:.2f}** 万元"
+                                )
+                        else:
+                            st.caption(
+                                f"**{ov_label}**：合同价 **{ov_cfg['amount_wan']:.2f}** 万元"
+                            )
+                    with col_del:
+                        if st.button("🗑", key=f"contract_del_{ov_fn}",
+                                     help=f"删除 {ov_label} 合同覆盖"):
+                            contract_overrides.pop(ov_fn, None)
+                            ctx["contract_overrides"] = contract_overrides
+                            st.rerun()
+        else:
+            st.caption("请先勾选至少一个费种（预备费除外）")
+
+        st.markdown("---")
+
         # ── Real-time Preview ──
         st.markdown("### 💡 实时预览")
 
@@ -3683,12 +3903,13 @@ if "pending_fee_selection" in st.session_state:
                 coef_overrides=ctx.get("coef_overrides") or None,
                 param_overrides=param_overrides or None,
                 jiaoyi_party=ctx.get("jiaoyi_party"),
+                contract_overrides=ctx.get("contract_overrides") or None,
             )
 
             numerical = preview_raw["_数值"]
 
             # ── 环评费多服务类型覆盖 ──
-            if "环境影响咨询费" in new_selected:
+            if "环境影响咨询费" in new_selected and "环境影响咨询费" not in ctx.get("contract_overrides", {}):
                 hp_svcs = ctx.get("service_selections", {}).get("环境影响咨询费", [])
                 if hp_svcs and hp_svcs != ["编制报告书"]:
                     # 用户选择了非默认的服务类型组合，用 calc_huanping_multi 覆盖
@@ -3735,7 +3956,7 @@ if "pending_fee_selection" in st.session_state:
                         pass  # 失败时保留原始值
 
             # ── 可行性研究费多服务类型计算 ──
-            if "可行性研究费" in new_selected:
+            if "可行性研究费" in new_selected and "可行性研究费" not in ctx.get("contract_overrides", {}):
                 ky_svcs = ctx.get("service_selections", {}).get("可行性研究费", [])
                 if ky_svcs and ky_svcs != ["编制可研报告"]:
                     from fee_engine import calc_keyan_multi
@@ -3776,7 +3997,7 @@ if "pending_fee_selection" in st.session_state:
                         pass  # 失败时保留原始值
 
             # ── 造价咨询费多服务类型计算 ──
-            if "造价咨询费" in new_selected:
+            if "造价咨询费" in new_selected and "造价咨询费" not in ctx.get("contract_overrides", {}):
                 cc_svcs = ctx.get("service_selections", {}).get("造价咨询费", [])
                 if cc_svcs:
                     try:
@@ -3851,19 +4072,23 @@ if "pending_fee_selection" in st.session_state:
                             _prev_total = _curr_total
 
                             # 1) 重算建设管理费 — 基数 = 项目总投资 − 建管费自身
-                            _gl_old = numerical.get("建设管理费(万元)", 0)
-                            _gl_base = _curr_total - _gl_old
-                            _gl_r = calc_jianshe_guanli(_gl_base)
-                            numerical["建设管理费(万元)"] = _ext_num(_gl_r)
+                            #    有合同覆盖的费种保持不变
+                            if "建设管理费" not in ctx.get("contract_overrides", {}):
+                                _gl_old = numerical.get("建设管理费(万元)", 0)
+                                _gl_base = _curr_total - _gl_old
+                                _gl_r = calc_jianshe_guanli(_gl_base)
+                                numerical["建设管理费(万元)"] = _ext_num(_gl_r)
 
                             # 2) 重算可行性研究费
-                            _keyan_ind, _keyan_coef = _detect_keyan_industry(ctx["query"])
-                            _amount_yi = _curr_total / 10000.0
-                            _keyan_r = calc_keyan(
-                                _amount_yi, service_type="编制可研报告",
-                                industry_coef=_keyan_coef, industry_name=_keyan_ind,
-                            )
-                            numerical["可行性研究费(万元)"] = _ext_num(_keyan_r)
+                            #    有合同覆盖的费种保持不变
+                            if "可行性研究费" not in ctx.get("contract_overrides", {}):
+                                _keyan_ind, _keyan_coef = _detect_keyan_industry(ctx["query"])
+                                _amount_yi = _curr_total / 10000.0
+                                _keyan_r = calc_keyan(
+                                    _amount_yi, service_type="编制可研报告",
+                                    industry_coef=_keyan_coef, industry_name=_keyan_ind,
+                                )
+                                numerical["可行性研究费(万元)"] = _ext_num(_keyan_r)
 
                             # 3) 更新 T2
                             _t2_keys = ["建设管理费", "可行性研究费", "环境影响咨询费"]
@@ -3871,21 +4096,23 @@ if "pending_fee_selection" in st.session_state:
                                 numerical.get(f"{k}(万元)", 0) for k in _t2_keys)
 
                             # 4) 用最新项目总投资重算造价咨询费（概算审核等依赖总投资）
-                            if _is_hebei_project(ctx["query"]):
-                                _cc_multi = calc_cost_consulting_multi_hebei(
-                                    cc_svcs, ctx["jianan"],
-                                    total_investment=_curr_total,
-                                    professional_coef=_cc_prof, discount_coef=1.0,
-                                )
-                            else:
-                                _cc_multi = calc_cost_consulting_multi(
-                                    cc_svcs, ctx["total_part1"],
-                                    jianan_only=ctx["jianan"],
-                                    total_investment=_curr_total,
-                                )
-                            _cc_total = _cc_multi.get("合计(万元)", 0)
-                            numerical["造价咨询费(万元)"] = _cc_total
-                            preview_raw["原始结果"]["造价咨询费"] = _cc_multi
+                            #    有合同覆盖的费种保持不变
+                            if "造价咨询费" not in ctx.get("contract_overrides", {}):
+                                if _is_hebei_project(ctx["query"]):
+                                    _cc_multi = calc_cost_consulting_multi_hebei(
+                                        cc_svcs, ctx["jianan"],
+                                        total_investment=_curr_total,
+                                        professional_coef=_cc_prof, discount_coef=1.0,
+                                    )
+                                else:
+                                    _cc_multi = calc_cost_consulting_multi(
+                                        cc_svcs, ctx["total_part1"],
+                                        jianan_only=ctx["jianan"],
+                                        total_investment=_curr_total,
+                                    )
+                                _cc_total = _cc_multi.get("合计(万元)", 0)
+                                numerical["造价咨询费(万元)"] = _cc_total
+                                preview_raw["原始结果"]["造价咨询费"] = _cc_multi
 
                             # 5) 更新 T0（CC 变了）
                             _new_t0 = sum(
@@ -3982,6 +4209,8 @@ if "pending_fee_selection" in st.session_state:
                             svcs = ctx["service_selections"][fn]
                             if svcs and svcs != ["编制报告书"]:
                                 note_parts.append(f"{len(svcs)}项服务")
+                        if fn in ctx.get("contract_overrides", {}):
+                            note_parts.append("合同")
                         note_str = ""
                         if note_parts:
                             note_str = f" <small style='color:#888;'>({'，'.join(note_parts)})</small>"
@@ -4086,20 +4315,30 @@ if "pending_fee_selection" in st.session_state:
             if val <= 0:
                 continue
             raw_total += val
+            is_contract = fn in ctx.get("contract_overrides", {})
             cur_discount = discounts.get(fn, 1.0)
             disc_col1, disc_col2 = st.columns([3, 1])
             with disc_col1:
-                st.caption(f"**{fd['label']}**（{val:.2f} 万元）")
+                label_text = f"**{fd['label']}**（{val:.2f} 万元）"
+                if is_contract:
+                    label_text += " 🔒"
+                st.caption(label_text)
             with disc_col2:
-                new_discount = st.number_input(
-                    f"系数",
-                    min_value=0.01, max_value=2.00,
-                    value=float(cur_discount), step=0.05,
-                    format="%.2f",
-                    key=f"discount_{fn}",
-                    label_visibility="collapsed",
-                )
-                discounts[fn] = new_discount
+                if is_contract:
+                    # 合同覆盖费种锁定为 1.0（不打折）
+                    st.caption("合同价不打折")
+                    discounts[fn] = 1.0
+                    new_discount = 1.0
+                else:
+                    new_discount = st.number_input(
+                        f"系数",
+                        min_value=0.01, max_value=2.00,
+                        value=float(cur_discount), step=0.05,
+                        format="%.2f",
+                        key=f"discount_{fn}",
+                        label_visibility="collapsed",
+                    )
+                    discounts[fn] = new_discount
             discounted_val = round(val * new_discount, 4)
             discounted_total += discounted_val
             if abs(new_discount - 1.0) >= 0.005:
@@ -4190,6 +4429,12 @@ if "pending_fee_selection" in st.session_state:
                                 svcs = ctx["service_selections"][fn]
                                 if svcs and svcs != ["编制报告书"]:
                                     note_parts.append(f"{'、'.join(svcs)}")
+                            if fn in ctx.get("contract_overrides", {}):
+                                ov_cfg = ctx["contract_overrides"][fn]
+                                if ov_cfg.get("type") == "rate":
+                                    note_parts.append(f"合同费率{ov_cfg['rate']}%")
+                                else:
+                                    note_parts.append("合同价")
                             if abs(disc - 1.0) >= 0.005:
                                 note_parts.append(f"打折={disc:.2f}")
                             if note_parts:
@@ -4367,6 +4612,7 @@ if prompt:
                                 ),
                             },
                             "custom_fees": [],
+                            "contract_overrides": {},
                             "fee_discounts": {fd["name"]: 1.0 for fd in fee_defs},
                             "preview": None,
                             "shuibao_comp_params": {
@@ -4407,6 +4653,8 @@ if prompt:
                         discounts = ctx.setdefault("fee_discounts", {})
                         for fd in fee_defs:
                             discounts.setdefault(fd["name"], 1.0)
+                        # 补上可能缺失的 contract_overrides
+                        ctx.setdefault("contract_overrides", {})
                         # 补上可能缺失的 shuibao_comp_params
                         ctx.setdefault("shuibao_comp_params", {
                             "calc_type": "general",

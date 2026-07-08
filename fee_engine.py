@@ -5071,6 +5071,7 @@ def _calc_all_fees(
     skip_fees: set | None = None,
     coef_overrides: dict | None = None,
     jiaoyi_party: str | None = None,
+    contract_overrides: dict | None = None,
 ) -> dict:
     """
     核心级联引擎：计算所有可自动计算的二类费，按依赖层级 T0→T1→T2。
@@ -5080,6 +5081,12 @@ def _calc_all_fees(
     jiaoyi_party: 交易服务费计费方 — None=双方合计, "招标方"=60%, "中标方"=40%
     coef_overrides: 用户调整的系数覆盖值，格式：
                    {"监理费": {"professional_coef": 0.8, ...}, ...}
+    contract_overrides: 合同费率/合同价覆盖，格式：
+        {"监理费": {"type": "rate", "rate": 2.5, "base": "工程费"},
+         "设计费": {"type": "price", "amount_wan": 150.0},
+         "招标代理费": {"type": "rate", "rate": 1.5, "base": "选定费种",
+                        "base_fees": ["监理费", "工程设计费", "勘察费"]}}
+        合同覆盖在 skip_fees 之后应用，不影响其他费种的依赖计算。
     """
     if param_overrides is None:
         param_overrides = {}
@@ -5379,17 +5386,64 @@ def _calc_all_fees(
             raw_results.pop(fn, None)
             if fn in _TIER_MAP:
                 skipped[fn] = "用户未选择"
-        # 重新计算汇总值
-        t0_keys = [k for k, v in _TIER_MAP.items() if v == 0]
-        t1_keys = [k for k, v in _TIER_MAP.items() if v == 1] + ["招标代理费"]
-        t2_keys = [k for k, v in _TIER_MAP.items() if v == 2]
-        t0_total = sum(numerical.get(f"{k}(万元)", 0) for k in t0_keys)
-        t1_total = sum(numerical.get(f"{k}(万元)", 0) for k in t1_keys)
-        t2_total = sum(numerical.get(f"{k}(万元)", 0) for k in t2_keys)
-        t3_total = numerical.get("预备费(万元)", 0)
-        fee_total = t0_total + t1_total + t2_total
-        project_total = total_part1 + fee_total + t3_total
-        static_investment = total_part1 + fee_total
+
+    # ── 合同费率/合同价覆盖：替换标准计算结果 ──
+    if contract_overrides:
+        for fee_name, override in contract_overrides.items():
+            key = f"{fee_name}(万元)"
+            if key not in numerical:
+                continue  # 已跳过的费种不覆盖
+            label = _FEE_LABELS.get(fee_name, fee_name)
+
+            if override.get("type") == "rate":
+                # 解析计费基数
+                base_type = override.get("base", "工程费")
+                if base_type == "工程费":
+                    base_val = total_part1
+                elif base_type == "建安费":
+                    base_val = jianan
+                elif base_type == "项目总投资":
+                    base_val = project_total
+                elif base_type == "自定义金额":
+                    base_val = override.get("base_custom", 0)
+                elif base_type == "选定费种":
+                    # 取各费种标准计算值求和（避免合同覆盖值之间的循环依赖）
+                    base_fees = override.get("base_fees", [])
+                    base_val = sum(
+                        numerical.get(f"{f}(万元)", 0) for f in base_fees
+                    )
+                else:
+                    base_val = total_part1
+
+                new_val = round(base_val * override["rate"] / 100.0, 4)
+                formula = (
+                    f"合同费率 {override['rate']}% × "
+                    f"{base_type}({base_val:.2f}万元)"
+                )
+            else:  # price
+                new_val = round(override["amount_wan"], 4)
+                formula = f"合同价 {new_val} 万元"
+
+            numerical[key] = new_val
+            raw_results[fee_name] = {
+                "费种": label + "（合同）",
+                "依据": "合同约定",
+                "计算公式": formula,
+                "结果(万元)": new_val,
+                "合同覆盖": True,
+            }
+
+    # ── 统一汇总重算（skip_fees 和 contract_overrides 后均需重算）──
+    _t0_keys = [k for k, v in _TIER_MAP.items() if v == 0]
+    _t1_keys = [k for k, v in _TIER_MAP.items() if v == 1] + ["招标代理费"]
+    _t2_keys = [k for k, v in _TIER_MAP.items() if v == 2]
+    t0_total = sum(numerical.get(f"{k}(万元)", 0) for k in _t0_keys)
+    t1_total = sum(numerical.get(f"{k}(万元)", 0) for k in _t1_keys)
+    t2_total = sum(numerical.get(f"{k}(万元)", 0) for k in _t2_keys)
+    t3_total = numerical.get("预备费(万元)", 0)
+    fee_total = t0_total + t1_total + t2_total
+    project_total = total_part1 + fee_total + t3_total
+    static_investment = total_part1 + fee_total
 
     return {
         "建安工程费(万元)": jianan,
