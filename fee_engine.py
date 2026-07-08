@@ -1429,6 +1429,7 @@ def calc_jiaoyi_fuwu(
     jianli_fee: float | None = None,
     sheji_fee: float | None = None,
     amount_wan: float | None = None,
+    party: str | None = None,
 ) -> dict:
     """
     工程建设交易服务费（津发改价管[2017]979号）
@@ -1441,6 +1442,8 @@ def calc_jiaoyi_fuwu(
 
     若仅提供单一金额 amount_wan，回退到简单按中标额查档模式。
     招标方承担 60%，中标方承担 40%。
+
+    party: None=显示双方分摊, "招标方"=仅显示60%, "中标方"=仅显示40%
     """
     categories: list[dict] = []
     total_fee = 0.0
@@ -1477,6 +1480,21 @@ def calc_jiaoyi_fuwu(
     total_fee = round(total_fee, 2)
     zhaobiao_share = round(total_fee * 0.6, 2)
     zhongbiao_share = round(total_fee * 0.4, 2)
+    total_fee_wan = round(total_fee / 10000.0, 4)
+
+    # 根据 party 参数确定返回的金额
+    if party == "招标方":
+        effective_fee = zhaobiao_share
+        effective_fee_wan = round(zhaobiao_share / 10000.0, 4)
+        party_label = "招标方（60%）"
+    elif party == "中标方":
+        effective_fee = zhongbiao_share
+        effective_fee_wan = round(zhongbiao_share / 10000.0, 4)
+        party_label = "中标方（40%）"
+    else:
+        effective_fee = total_fee
+        effective_fee_wan = total_fee_wan
+        party_label = ""
 
     if len(categories) > 1:
         desc_parts = [f"{c['类别']} {c['费用(元)']:.0f} 元" for c in categories]
@@ -1486,15 +1504,28 @@ def calc_jiaoyi_fuwu(
     else:
         desc = "未能确定任何基数，无法计算"
 
-    return {
+    if party_label:
+        desc += (
+            f"\n\n{party_label}应承担：**{effective_fee:.0f} 元**"
+            f"（{effective_fee_wan:.4f} 万元）"
+        )
+
+    result_dict = {
         "费种": "工程建设交易服务费",
         "依据": "《市发展改革委关于规范工程建设交易服务收费标准有关问题的通知》（津发改价管[2017]979号）",
         "计算公式": "分 4 类服务（施工/设备/监理/设计）分别按中标额分档定额，合计后招标方 60%、中标方 40%",
         "分项明细": categories,
-        "结果(元)": total_fee,
+        "结果(元)": effective_fee,
+        "结果(万元)": effective_fee_wan,
+        "合计(元)": total_fee,
+        "招标方(元)": zhaobiao_share,
+        "中标方(元)": zhongbiao_share,
         "分摊": f"招标方 60%: {zhaobiao_share:.0f} 元，中标方 40%: {zhongbiao_share:.0f} 元",
         "说明": desc,
     }
+    if party:
+        result_dict["计费方"] = party_label
+    return result_dict
 
 
 def _calc_jifei_from_components(jianan: float, shebei: float) -> tuple[float, dict]:
@@ -3910,9 +3941,18 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                 jianan=jianan, shebei=shebei,
                 jianli_fee=jianli_fee, sheji_fee=sheji_fee,
             )
+            # 标记需要交互式选择计费方
+            result["needs_jiaoyi_party_select"] = True
+            result["query"] = query
+            result["fee_type"] = "交易服务费"
+            result["has_amount"] = True
         else:
             # 回退：单一中标额模式
             result = calc_jiaoyi_fuwu(amount_wan=amount)
+            result["needs_jiaoyi_party_select"] = True
+            result["query"] = query
+            result["fee_type"] = "交易服务费"
+            result["has_amount"] = True
     elif fee_type == "监理费":
         jianan, shebei = _extract_jianli_components(query)
         prof = _extract_jianli_professional_coef(query)
@@ -5030,12 +5070,14 @@ def _calc_all_fees(
     param_overrides: dict | None = None,
     skip_fees: set | None = None,
     coef_overrides: dict | None = None,
+    jiaoyi_party: str | None = None,
 ) -> dict:
     """
     核心级联引擎：计算所有可自动计算的二类费，按依赖层级 T0→T1→T2。
 
     skip_fees: 用户取消选中的费种集合。这些费种仍正常计算（以维持依赖链），
                但在最终结果中会被移除，汇总值也会相应重新计算。
+    jiaoyi_party: 交易服务费计费方 — None=双方合计, "招标方"=60%, "中标方"=40%
     coef_overrides: 用户调整的系数覆盖值，格式：
                    {"监理费": {"professional_coef": 0.8, ...}, ...}
     """
@@ -5203,6 +5245,7 @@ def _calc_all_fees(
         jianan=jianan, shebei=shebei,
         jianli_fee=numerical["监理费(万元)"],
         sheji_fee=numerical["工程设计费(万元)"],
+        party=jiaoyi_party,
     )
     raw_results["交易服务费"] = jiaoyi_r
     numerical["交易服务费(万元)"] = _extract_numeric_value(jiaoyi_r)

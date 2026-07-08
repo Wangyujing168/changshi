@@ -2854,6 +2854,124 @@ if "pending_shuibao_compensation" in st.session_state:
                 del st.session_state.pending_shuibao_compensation
                 st.rerun()
 
+# ===== 交易服务费计费方选择 =====
+
+if "pending_jiaoyi_party" in st.session_state:
+    ctx = st.session_state.pending_jiaoyi_party
+    fee_result = ctx["fee_result"]
+
+    st.divider()
+
+    with st.container(border=True):
+        st.markdown("## 🏛️ 交易服务费 — 计费方选择")
+        st.caption(
+            "依据津发改价管[2017]979号，交易服务费由**招标方承担 60%**、"
+            "**中标方承担 40%**。请选择您的身份。"
+        )
+
+        # 显示费用明细
+        total_yuan = fee_result.get("合计(元)", fee_result.get("结果(元)", 0))
+        zb_yuan = fee_result.get("招标方(元)", round(total_yuan * 0.6, 2))
+        zb_wan = round(zb_yuan / 10000.0, 4)
+        zhongb_yuan = fee_result.get("中标方(元)", round(total_yuan * 0.4, 2))
+        zhongb_wan = round(zhongb_yuan / 10000.0, 4)
+
+        # 费用预览卡片
+        col_zb, col_zhongb = st.columns(2)
+        with col_zb:
+            st.markdown(
+                f"""<div style="
+                    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+                    border-radius: 12px; padding: 16px 20px; color: #333;
+                ">
+                    <div style="font-size: 0.85rem; opacity: 0.7;">🏢 招标方（60%）</div>
+                    <div style="font-size: 1.6rem; font-weight: 700;">{zb_yuan:,.0f} 元</div>
+                    <div style="font-size: 0.85rem; opacity: 0.7;">{zb_wan:.4f} 万元</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        with col_zhongb:
+            st.markdown(
+                f"""<div style="
+                    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                    border-radius: 12px; padding: 16px 20px; color: white;
+                ">
+                    <div style="font-size: 0.85rem; opacity: 0.85;">🎯 中标方（40%）</div>
+                    <div style="font-size: 1.6rem; font-weight: 700;">{zhongb_yuan:,.0f} 元</div>
+                    <div style="font-size: 0.85rem; opacity: 0.85;">{zhongb_wan:.4f} 万元</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+
+        # 计费方选择
+        party = st.radio(
+            "请选择您的身份",
+            ["招标方", "中标方"],
+            format_func=lambda x: f"{x}（{'60%' if x == '招标方' else '40%'}）",
+            key="jiaoyi_party_radio",
+        )
+
+        st.markdown("---")
+
+        # 确认按钮
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("✅ 确认结果", use_container_width=True, key="confirm_jiaoyi_party"):
+                chosen_fee = zb_yuan if party == "招标方" else zhongb_yuan
+                chosen_fee_wan = zb_wan if party == "招标方" else zhongb_wan
+                party_pct = "60%" if party == "招标方" else "40%"
+
+                # 重新调用 calc_jiaoyi_fuwu 以获得包含 party 的结果描述
+                from fee_engine import calc_jiaoyi_fuwu as _calc_jiaoyi
+                # 从原始结果中提取参数
+                categories = fee_result.get("分项明细", [])
+                jianan = None
+                shebei = None
+                for c in categories:
+                    if c["类别"] == "施工":
+                        jianan = c["基数(万元)"]
+                    elif c["类别"] == "设备":
+                        shebei = c["基数(万元)"]
+                if jianan is not None:
+                    # 重算以获得 party 特定的结果
+                    jianli_fee = None
+                    sheji_fee = None
+                    for c in categories:
+                        if c["类别"] == "监理":
+                            jianli_fee = c["基数(万元)"]
+                        elif c["类别"] == "设计":
+                            sheji_fee = c["基数(万元)"]
+                    party_result = _calc_jiaoyi(
+                        jianan=jianan, shebei=shebei,
+                        jianli_fee=jianli_fee, sheji_fee=sheji_fee,
+                        party=party,
+                    )
+                else:
+                    amt = categories[0]["基数(万元)"] if categories else 0
+                    party_result = _calc_jiaoyi(amount_wan=amt, party=party)
+
+                result_text = (
+                    f"## 工程建设交易服务费\n\n"
+                    f"**计费方**：{party}（{party_pct}）\n\n"
+                    f"**应承担费用**：**{chosen_fee:,.0f} 元**"
+                    f"（{chosen_fee_wan:.4f} 万元）\n\n"
+                    f"> 分摊规则：招标方 60%（{zb_yuan:,.0f} 元），"
+                    f"中标方 40%（{zhongb_yuan:,.0f} 元）\n\n"
+                    f"> 依据：津发改价管[2017]979号"
+                )
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": result_text,
+                })
+                del st.session_state.pending_jiaoyi_party
+                st.rerun()
+        with col_btn2:
+            if st.button("🗑 取消", use_container_width=True, key="cancel_jiaoyi_party"):
+                del st.session_state.pending_jiaoyi_party
+                st.rerun()
+
 # ===== 全费用交互式选择 =====
 if "pending_fee_selection" in st.session_state:
     ctx = st.session_state.pending_fee_selection
@@ -3460,6 +3578,27 @@ if "pending_fee_selection" in st.session_state:
 
             st.markdown("---")
 
+        # ── 交易服务费计费方选择 ──
+        if "交易服务费" in new_selected:
+            st.markdown("### 🏛️ 交易服务费 — 计费方")
+            st.caption("依据津发改价管[2017]979号，招标方承担60%，中标方承担40%。")
+            jiaoyi_party = ctx.setdefault("jiaoyi_party", None)
+            party_options = ["合计（不区分）", "招标方（60%）", "中标方（40%）"]
+            party_values = [None, "招标方", "中标方"]
+            cur_party_idx = party_values.index(jiaoyi_party) if jiaoyi_party in party_values else 0
+            chosen = st.radio(
+                "请选择计费方",
+                range(len(party_options)),
+                index=cur_party_idx,
+                format_func=lambda i: party_options[i],
+                key="cascade_jiaoyi_party",
+                horizontal=True,
+            )
+            ctx["jiaoyi_party"] = party_values[chosen]
+            st.session_state.pending_fee_selection["jiaoyi_party"] = party_values[chosen]
+
+            st.markdown("---")
+
         # ── Custom Fee Input ──
         st.markdown("### ➕ 自定义费用")
         st.caption("添加需要在汇总中额外计算的费用（如检测费、评估费、拆迁费等）。")
@@ -3543,6 +3682,7 @@ if "pending_fee_selection" in st.session_state:
                 skip_fees=skip_fees if skip_fees else None,
                 coef_overrides=ctx.get("coef_overrides") or None,
                 param_overrides=param_overrides or None,
+                jiaoyi_party=ctx.get("jiaoyi_party"),
             )
 
             numerical = preview_raw["_数值"]
@@ -4143,6 +4283,7 @@ if prompt:
     st.session_state.pop("pending_huanping", None)
     st.session_state.pop("pending_keyan", None)
     st.session_state.pop("pending_shuibao_compensation", None)
+    st.session_state.pop("pending_jiaoyi_party", None)
     st.session_state.pop("pending_fee_selection", None)
     # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -4352,6 +4493,19 @@ if prompt:
                             f"请滚动到页面下方 **📊 建设项目前期工作咨询费 — 服务类型选择** 区域，"
                             f"选择需要计算的服务类型并调整系数后点击确认。"
                         )
+                    elif fee_result.get("needs_jiaoyi_party_select"):
+                        # === 交易服务费计费方选择 ===
+                        jiaoyi_result = fee_result
+                        st.session_state.pending_jiaoyi_party = {
+                            "fee_result": jiaoyi_result,
+                            "query": prompt,
+                        }
+                        response = (
+                            f"## 工程建设交易服务费\n\n"
+                            f"> 🏛️ 请选择计费方\n\n"
+                            f"请滚动到页面下方 **🏛️ 交易服务费 — 计费方选择** 区域，"
+                            f"选择招标方或中标方后点击确认。"
+                        )
                     elif fee_result.get("needs_shuibao_compensation_select"):
                         # === 水土保持补偿费参数输入 ===
                         st.session_state.pending_shuibao_compensation = {
@@ -4403,7 +4557,7 @@ if prompt:
                         st.markdown("### 计算结果（程序精确计算）")
                         _render_engine_card(fee_result)
 
-                    if needs_dep or is_rate_selectable or is_coef_selectable or fee_result.get("needs_huanping_select") or fee_result.get("needs_keyan_select") or fee_result.get("needs_shuibao_compensation_select"):
+                    if needs_dep or is_rate_selectable or is_coef_selectable or fee_result.get("needs_huanping_select") or fee_result.get("needs_keyan_select") or fee_result.get("needs_shuibao_compensation_select") or fee_result.get("needs_jiaoyi_party_select"):
                         pass  # 已在上面通过 pending_* 处理完成
                     elif is_sheji:
                         st.divider()
