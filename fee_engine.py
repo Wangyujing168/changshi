@@ -1277,6 +1277,7 @@ def calc_zhaobiao_daili_all(
     project_type: str = "建筑",
     query: str = "",
     dependent_configs: dict | None = None,
+    dep_discounts: dict | None = None,
 ) -> dict:
     """招标代理服务费 — 全部 5 类自动计算汇总。
 
@@ -1289,6 +1290,7 @@ def calc_zhaobiao_daili_all(
 
     dependent_configs: 用户配置的依赖费种参数。不为 None 时使用用户参数，
     否则使用默认值（所有系数=1.0，勘察费取区间中值）。
+    dep_discounts: 依赖费种打折系数，在计算各子项基数前应用。
     """
     amount_wan = jianan + shebei
 
@@ -1300,42 +1302,54 @@ def calc_zhaobiao_daili_all(
         kc_cfg = dependent_configs.get("勘察费", {})
 
         # 监理费 — 传 jianan+shebei 分开以触发 40% 规则
-        jl_prof = jl_cfg.get("professional_coef", 1.0)
-        jl_comp = jl_cfg.get("complexity_coef", 1.0)
-        jl_elev = jl_cfg.get("elevation_coef", 1.0)
-        if jianan > 0 or shebei > 0:
-            jianli_result = calc_jianli(
-                jianan=jianan, shebei=shebei,
-                professional_coef=jl_prof, complexity_coef=jl_comp,
-                elevation_coef=jl_elev,
-            )
+        jl_custom = jl_cfg.get("_custom_amount")
+        if jl_custom is not None and jl_custom > 0:
+            jianli_fee = jl_custom
         else:
-            jianli_result = calc_jianli(
-                amount_wan=amount_wan,
-                professional_coef=jl_prof, complexity_coef=jl_comp,
-                elevation_coef=jl_elev,
-            )
-        jianli_fee = jianli_result["结果(万元)"]
+            jl_prof = jl_cfg.get("professional_coef", 1.0)
+            jl_comp = jl_cfg.get("complexity_coef", 1.0)
+            jl_elev = jl_cfg.get("elevation_coef", 1.0)
+            if jianan > 0 or shebei > 0:
+                jianli_result = calc_jianli(
+                    jianan=jianan, shebei=shebei,
+                    professional_coef=jl_prof, complexity_coef=jl_comp,
+                    elevation_coef=jl_elev,
+                )
+            else:
+                jianli_result = calc_jianli(
+                    amount_wan=amount_wan,
+                    professional_coef=jl_prof, complexity_coef=jl_comp,
+                    elevation_coef=jl_elev,
+                )
+            jianli_fee = jianli_result["结果(万元)"]
 
         # 设计费
-        sj_prof = sj_cfg.get("professional_coef", 1.0)
-        sj_comp = sj_cfg.get("complexity_coef", 1.0)
-        sj_addi = sj_cfg.get("additional_coef", 1.0)
-        sj_addi_list = [sj_addi] if abs(sj_addi - 1.0) > 0.005 else None
-        sheji_result = calc_sheji(amount_wan, sj_prof, sj_comp, additional_coefs=sj_addi_list)
-        sheji_fee = sheji_result["结果(万元)"]
+        sj_custom = sj_cfg.get("_custom_amount")
+        if sj_custom is not None and sj_custom > 0:
+            sheji_fee = sj_custom
+        else:
+            sj_prof = sj_cfg.get("professional_coef", 1.0)
+            sj_comp = sj_cfg.get("complexity_coef", 1.0)
+            sj_addi = sj_cfg.get("additional_coef", 1.0)
+            sj_addi_list = [sj_addi] if abs(sj_addi - 1.0) > 0.005 else None
+            sheji_result = calc_sheji(amount_wan, sj_prof, sj_comp, additional_coefs=sj_addi_list)
+            sheji_fee = sheji_result["结果(万元)"]
 
         # 勘察费
-        kc_rate = kc_cfg.get("rate")
-        kc_ptype = kc_cfg.get("project_type", project_type)
-        if kc_rate is not None:
-            kancha_fee = round((jianan + shebei) * kc_rate / 100.0, 2)
-            kancha_result = {"结果中值(万元)": kancha_fee, "结果(万元)": kancha_fee}
+        kc_custom = kc_cfg.get("_custom_amount")
+        if kc_custom is not None and kc_custom > 0:
+            kancha_fee = kc_custom
         else:
-            kancha_result = calc_kancha_rough(jianan, shebei, kc_ptype)
-            kancha_fee = kancha_result["结果中值(万元)"]
-            if kancha_fee is None:
-                kancha_fee = kancha_result.get("结果(万元)", 0) or 0
+            kc_rate = kc_cfg.get("rate")
+            kc_ptype = kc_cfg.get("project_type", project_type)
+            if kc_rate is not None:
+                kancha_fee = round((jianan + shebei) * kc_rate / 100.0, 2)
+                kancha_result = {"结果中值(万元)": kancha_fee, "结果(万元)": kancha_fee}
+            else:
+                kancha_result = calc_kancha_rough(jianan, shebei, kc_ptype)
+                kancha_fee = kancha_result["结果中值(万元)"]
+                if kancha_fee is None:
+                    kancha_fee = kancha_result.get("结果(万元)", 0) or 0
     else:
         # ── 默认参数（原有行为，所有系数=1.0）──
         # 修复：传 jianan+shebei 分开以触发 40% 规则，而非合并 amount_wan
@@ -1353,7 +1367,19 @@ def calc_zhaobiao_daili_all(
         if kancha_fee is None:
             kancha_fee = kancha_result.get("结果(万元)", 0) or 0
 
-    # 2. 各子类型基数
+    # 2. 应用依赖费种打折系数
+    if dep_discounts:
+        _disc = dep_discounts.get("监理费", 1.0)
+        if abs(_disc - 1.0) >= 0.005:
+            jianli_fee = round(jianli_fee * _disc, 4)
+        _disc = dep_discounts.get("工程设计费", 1.0)
+        if abs(_disc - 1.0) >= 0.005:
+            sheji_fee = round(sheji_fee * _disc, 4)
+        _disc = dep_discounts.get("勘察费", 1.0)
+        if abs(_disc - 1.0) >= 0.005:
+            kancha_fee = round(kancha_fee * _disc, 4)
+
+    # 3. 各子类型基数
     bases = {
         "货物招标": shebei,
         "工程招标": jianan,
@@ -1510,6 +1536,13 @@ def calc_jiaoyi_fuwu(
             f"（{effective_fee_wan:.4f} 万元）"
         )
 
+    # 依赖费种（监理费、设计费作为计算基数）
+    dep_fees = {}
+    if jianli_fee is not None:
+        dep_fees["监理费(万元)"] = round(jianli_fee, 4)
+    if sheji_fee is not None:
+        dep_fees["设计费(万元)"] = round(sheji_fee, 4)
+
     result_dict = {
         "费种": "工程建设交易服务费",
         "依据": "《市发展改革委关于规范工程建设交易服务收费标准有关问题的通知》（津发改价管[2017]979号）",
@@ -1523,6 +1556,8 @@ def calc_jiaoyi_fuwu(
         "分摊": f"招标方 60%: {zhaobiao_share:.0f} 元，中标方 40%: {zhongbiao_share:.0f} 元",
         "说明": desc,
     }
+    if dep_fees:
+        result_dict["依赖费种"] = dep_fees
     if party:
         result_dict["计费方"] = party_label
     return result_dict
@@ -1937,6 +1972,7 @@ def calc_shigong_shencha(
     kancha_fee_mid: float | None = None,
     kancha_rate_desc: str = "区间中值",
     query: str = "",
+    rate_override: float | None = None,
 ) -> dict:
     """
     施工图审查费。
@@ -2018,8 +2054,11 @@ def calc_shigong_shencha(
         }
 
     # 默认：津价管[2011]46 号 公建/工业/市政
-    rates = SHIGONG_SHENCHA_RATES.get(project_type, SHIGONG_SHENCHA_RATES["公建"])
-    rate_pct = rates.get(size, 3.0)
+    if rate_override is not None:
+        rate_pct = rate_override
+    else:
+        rates = SHIGONG_SHENCHA_RATES.get(project_type, SHIGONG_SHENCHA_RATES["公建"])
+        rate_pct = rates.get(size, 3.0)
 
     if sheji_fee is not None:
         fee = round(sheji_fee * rate_pct / 100.0, 4)
@@ -2213,7 +2252,7 @@ def calc_shuibao_compensation(
 
     central_fee = round(fee_yuan * CENTRAL_SHARE, 2)
     local_fee = round(fee_yuan - central_fee, 2)
-    fee_wan = round(fee_yuan / 10000.0, 4)
+    fee_wan = round(fee_yuan / 10000.0, 2)
 
     type_label = type_labels.get(calc_type, calc_type)
 
@@ -2252,7 +2291,7 @@ def calc_shuibao_compensation(
         "说明": (
             f"**{type_label}**\n\n"
             f"水土保持补偿费 = {calc_detail} = **{fee_yuan:.2f} 元**"
-            f"（{fee_wan:.4f} 万元）\n\n"
+            f"（{fee_wan:.2f} 万元）\n\n"
             f"其中：中央收入 {central_fee:.2f} 元（{CENTRAL_SHARE*100:.0f}%），"
             f"地方收入 {local_fee:.2f} 元（{(1-CENTRAL_SHARE)*100:.0f}%）。"
             f"{no_double_note}"
@@ -3626,6 +3665,7 @@ def resolve_dependent_calc(
     target_fee: str,
     configs: dict,
     base_params: dict,
+    dep_discounts: dict | None = None,
 ) -> dict:
     """用用户选择的参数计算依赖费种，再汇总计算目标费种。
 
@@ -3633,6 +3673,9 @@ def resolve_dependent_calc(
         {"监理费": {"professional_coef": 1.0, ...},
          "工程设计费": {"professional_coef": 1.0, ...},
          "勘察费": {"rate": 0.8, "project_type": "建筑"}}
+        若某个费种包含 "_custom_amount"，则直接使用该金额，跳过标准计算。
+    dep_discounts: 各依赖费种的打折系数 {"监理费": 0.85, ...}，打折后在 dep_fee_values
+                   中体现折后值，目标费计算也使用折后值。
 
     返回：目标费种的完整计算结果 dict，附加 _dependent_details 和 _dependent_configs。
     """
@@ -3648,57 +3691,90 @@ def resolve_dependent_calc(
 
     if "监理费" in configs:
         cfg = configs["监理费"]
-        prof = cfg.get("professional_coef", 1.0)
-        comp = cfg.get("complexity_coef", 1.0)
-        elev = cfg.get("elevation_coef", 1.0)
-        if jianan > 0 or shebei > 0:
-            r = calc_jianli(jianan=jianan, shebei=shebei,
-                            professional_coef=prof, complexity_coef=comp,
-                            elevation_coef=elev)
+        custom_amt = cfg.get("_custom_amount")
+        if custom_amt is not None and custom_amt > 0:
+            r = {
+                "费种": "施工监理服务费（自定义金额）",
+                "依据": "用户自定义金额",
+                "计算公式": f"自定义金额 {custom_amt} 万元",
+                "结果(万元)": custom_amt,
+            }
         else:
-            r = calc_jianli(amount_wan=amount_wan,
-                            professional_coef=prof, complexity_coef=comp,
-                            elevation_coef=elev)
+            prof = cfg.get("professional_coef", 1.0)
+            comp = cfg.get("complexity_coef", 1.0)
+            elev = cfg.get("elevation_coef", 1.0)
+            if jianan > 0 or shebei > 0:
+                r = calc_jianli(jianan=jianan, shebei=shebei,
+                                professional_coef=prof, complexity_coef=comp,
+                                elevation_coef=elev)
+            else:
+                r = calc_jianli(amount_wan=amount_wan,
+                                professional_coef=prof, complexity_coef=comp,
+                                elevation_coef=elev)
         dep_results["监理费"] = r
         dep_fee_values["监理费"] = r["结果(万元)"]
 
     if "工程设计费" in configs:
         cfg = configs["工程设计费"]
-        prof = cfg.get("professional_coef", 1.0)
-        comp = cfg.get("complexity_coef", 1.0)
-        addi = cfg.get("additional_coef", 1.0)
-        addi_list = [addi] if abs(addi - 1.0) > 0.005 else None
-        r = calc_sheji(amount_wan, prof, comp, additional_coefs=addi_list)
+        custom_amt = cfg.get("_custom_amount")
+        if custom_amt is not None and custom_amt > 0:
+            r = {
+                "费种": "工程设计费（自定义金额）",
+                "依据": "用户自定义金额",
+                "计算公式": f"自定义金额 {custom_amt} 万元",
+                "结果(万元)": custom_amt,
+            }
+        else:
+            prof = cfg.get("professional_coef", 1.0)
+            comp = cfg.get("complexity_coef", 1.0)
+            addi = cfg.get("additional_coef", 1.0)
+            addi_list = [addi] if abs(addi - 1.0) > 0.005 else None
+            r = calc_sheji(amount_wan, prof, comp, additional_coefs=addi_list)
         dep_results["工程设计费"] = r
         dep_fee_values["工程设计费"] = r["结果(万元)"]
 
     if "勘察费" in configs:
         cfg = configs["勘察费"]
-        rate = cfg.get("rate")
-        pt = cfg.get("project_type", project_type)
-        if rate is not None:
-            total = jianan + shebei
-            fee = round(total * rate / 100.0, 4)
-            rates_map = {"建筑": (0.3, 0.5), "通用": (0.8, 1.1)}
-            lo, hi = rates_map.get(pt, (0.8, 1.1))
+        custom_amt = cfg.get("_custom_amount")
+        if custom_amt is not None and custom_amt > 0:
             r = {
-                "费种": "工程勘察费（粗略估算）",
-                "依据": (
-                    "粗略估算依据《市政工程设计概算编制办法》（中国计划出版社）；"
-                    "精确计算依据《工程勘察设计收费管理规定》（计价格[2002]10号）工程勘察收费标准"
-                ),
-                "计算公式": f"第一部分工程费 × {rate}%（{pt}项目，用户选择）",
-                "结果(万元)": fee,
-                "结果中值(万元)": fee,
-                "说明": f"{pt}项目，费率 {rate}%，费用 {fee:.2f} 万元",
+                "费种": "工程勘察费（自定义金额）",
+                "依据": "用户自定义金额",
+                "计算公式": f"自定义金额 {custom_amt} 万元",
+                "结果(万元)": custom_amt,
             }
         else:
-            r = calc_kancha_rough(jianan, shebei, pt)
-            fee = r["结果中值(万元)"]
-            if fee is None:
-                fee = r.get("结果(万元)", 0) or 0
+            rate = cfg.get("rate")
+            pt = cfg.get("project_type", project_type)
+            if rate is not None:
+                total = jianan + shebei
+                fee = round(total * rate / 100.0, 4)
+                rates_map = {"建筑": (0.3, 0.5), "通用": (0.8, 1.1)}
+                lo, hi = rates_map.get(pt, (0.8, 1.1))
+                r = {
+                    "费种": "工程勘察费（粗略估算）",
+                    "依据": (
+                        "粗略估算依据《市政工程设计概算编制办法》（中国计划出版社）；"
+                        "精确计算依据《工程勘察设计收费管理规定》（计价格[2002]10号）工程勘察收费标准"
+                    ),
+                    "计算公式": f"第一部分工程费 × {rate}%（{pt}项目，用户选择）",
+                    "结果(万元)": fee,
+                    "结果中值(万元)": fee,
+                    "说明": f"{pt}项目，费率 {rate}%，费用 {fee:.2f} 万元",
+                }
+            else:
+                r = calc_kancha_rough(jianan, shebei, pt)
+                fee = r["结果中值(万元)"]
+                if fee is None:
+                    fee = r.get("结果(万元)", 0) or 0
         dep_results["勘察费"] = r
         dep_fee_values["勘察费"] = r.get("结果(万元)", r.get("结果中值(万元)", 0))
+
+    # ── 应用依赖费种打折系数 ──
+    if dep_discounts:
+        for dk, ddisc in dep_discounts.items():
+            if dk in dep_fee_values and abs(ddisc - 1.0) >= 0.005:
+                dep_fee_values[dk] = round(dep_fee_values[dk] * ddisc, 4)
 
     # Step 2: 计算目标费种
     if target_fee == "招标代理费":
@@ -3708,6 +3784,7 @@ def resolve_dependent_calc(
             project_type=project_type,
             query=query,
             dependent_configs=configs,
+            dep_discounts=dep_discounts,
         )
         result["_dependent_details"] = dep_results
         result["_dependent_configs"] = configs
@@ -3719,9 +3796,16 @@ def resolve_dependent_calc(
         kancha_fee_mid = dep_fee_values.get("勘察费", 0)
         sheji_fee = round(sheji_fee_only + kancha_fee_mid, 4)
 
-        ptype = base_params.get("project_type_shencha", "公建")
-        size = base_params.get("size", "中型")
-        amount = base_params.get("amount", amount_wan)
+        # 用户可通过下拉菜单覆盖费率/类型/规模
+        rate_override = base_params.get("shencha_rate_override")
+        ptype = base_params.get("shencha_pt_override") or base_params.get("project_type_shencha", "公建")
+        size = base_params.get("shencha_size_override") or base_params.get("size", "中型")
+
+        # 住宅类：按建筑面积计费，amount = 建筑面积（m²）；否则 amount = 万元
+        if ptype == "住宅":
+            amount = base_params.get("shencha_area_override") or 0
+        else:
+            amount = base_params.get("amount", amount_wan)
 
         # 勘察费费率描述
         kc_cfg = configs.get("勘察费", {})
@@ -3733,11 +3817,12 @@ def resolve_dependent_calc(
 
         result = calc_shigong_shencha(
             amount, ptype, size,
-            sheji_fee=sheji_fee,
-            sheji_fee_only=sheji_fee_only,
-            kancha_fee_mid=kancha_fee_mid,
+            sheji_fee=sheji_fee if ptype != "住宅" else None,
+            sheji_fee_only=sheji_fee_only if ptype != "住宅" else None,
+            kancha_fee_mid=kancha_fee_mid if ptype != "住宅" else None,
             kancha_rate_desc=kancha_rate_desc,
             query=base_params.get("query", ""),
+            rate_override=rate_override if ptype != "住宅" else None,
         )
         result["_dependent_details"] = dep_results
         result["_dependent_configs"] = configs
@@ -3941,6 +4026,24 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                 jianan=jianan, shebei=shebei,
                 jianli_fee=jianli_fee, sheji_fee=sheji_fee,
             )
+            # 丰富依赖费种信息：附加各费种的详细计算参数
+            deps = result.get("依赖费种", {})
+            if jianli_r:
+                jl_params = jianli_r.get("参数", {})
+                deps["监理费_参数"] = {
+                    "专业调整系数": jl_params.get("专业调整系数", 1.0),
+                    "复杂程度系数": jl_params.get("复杂程度系数", 1.0),
+                    "高程调整系数": jl_params.get("高程调整系数", 1.0),
+                }
+            if sheji_r:
+                sj_params = sheji_r.get("参数", {})
+                deps["设计费_参数"] = {
+                    "专业调整系数": sj_params.get("专业调整系数", 1.0),
+                    "复杂程度系数": sj_params.get("复杂程度系数", 1.0),
+                    "附加调整系数": sj_params.get("附加调整系数", 0),
+                }
+            if deps:
+                result["依赖费种"] = deps
             # 标记需要交互式选择计费方
             result["needs_jiaoyi_party_select"] = True
             result["query"] = query
@@ -5072,6 +5175,7 @@ def _calc_all_fees(
     coef_overrides: dict | None = None,
     jiaoyi_party: str | None = None,
     contract_overrides: dict | None = None,
+    fee_discounts: dict | None = None,
 ) -> dict:
     """
     核心级联引擎：计算所有可自动计算的二类费，按依赖层级 T0→T1→T2。
@@ -5087,6 +5191,8 @@ def _calc_all_fees(
          "招标代理费": {"type": "rate", "rate": 1.5, "base": "选定费种",
                         "base_fees": ["监理费", "工程设计费", "勘察费"]}}
         合同覆盖在 skip_fees 之后应用，不影响其他费种的依赖计算。
+    fee_discounts: 各费种打折系数 {"监理费": 0.85, ...}。Tier 0 费种打折后将影响
+                   Tier 1 依赖费种的计算基数（如交易服务费、招标代理费）。
     """
     if param_overrides is None:
         param_overrides = {}
@@ -5210,6 +5316,71 @@ def _calc_all_fees(
 
     t0_total = sum(numerical.values())
 
+    # ── 应用费种打折系数（T0 折后值影响 T1 依赖费种基数）──
+    if fee_discounts:
+        for fname, fdisc in fee_discounts.items():
+            key = f"{fname}(万元)"
+            if key in numerical and abs(fdisc - 1.0) >= 0.005:
+                numerical[key] = round(numerical[key] * fdisc, 4)
+        t0_total = sum(numerical.values())
+
+    # ── 合同费率/合同价覆盖 · 阶段 1（Tier 0）──
+    # 必须在依赖费种计算之前应用，以便施工图审查费/交易服务费/招标代理费
+    # 使用合同覆盖后的 Tier 0 值作为计算基数。
+    # Tier 1/2 的覆盖在全部计算完成后（阶段 2）应用，避免被标准计算覆写。
+    if contract_overrides:
+        # 预估算项目总投资（T1/T2 尚未计算，使用当前累计值）
+        _running_total = total_part1 + t0_total
+        _project_total_est = (
+            total_investment_override
+            if total_investment_override is not None
+            else _running_total
+        )
+        for fee_name, override in contract_overrides.items():
+            # 阶段 1：仅处理 Tier 0 费种（其值影响 T1 依赖费种）
+            if _TIER_MAP.get(fee_name) != 0:
+                continue
+            key = f"{fee_name}(万元)"
+            if key not in numerical:
+                continue
+            label = _FEE_LABELS.get(fee_name, fee_name)
+
+            if override.get("type") == "rate":
+                base_type = override.get("base", "工程费")
+                if base_type == "工程费":
+                    base_val = total_part1
+                elif base_type == "建安费":
+                    base_val = jianan
+                elif base_type == "项目总投资":
+                    base_val = _project_total_est
+                elif base_type == "自定义金额":
+                    base_val = override.get("base_custom", 0)
+                elif base_type == "选定费种":
+                    base_fees = override.get("base_fees", [])
+                    base_val = sum(
+                        numerical.get(f"{f}(万元)", 0) for f in base_fees
+                    )
+                else:
+                    base_val = total_part1
+
+                new_val = round(base_val * override["rate"] / 100.0, 4)
+                formula = (
+                    f"合同费率 {override['rate']}% × "
+                    f"{base_type}({base_val:.2f}万元)"
+                )
+            else:  # price
+                new_val = round(override["amount_wan"], 4)
+                formula = f"合同价 {new_val} 万元"
+
+            numerical[key] = new_val
+            raw_results[fee_name] = {
+                "费种": label + "（合同）",
+                "依据": "合同约定",
+                "计算公式": formula,
+                "结果(万元)": new_val,
+                "合同覆盖": True,
+            }
+
     # ── 招标代理费（依赖 T0：监理费 + 设计费 + 勘察费）──
     # 该费种在 _SKIP_FEES 中，但当选中的依赖费种都有时，可以在联算中自动计算
     if skip_fees is None or "招标代理费" not in skip_fees:
@@ -5218,15 +5389,17 @@ def _calc_all_fees(
         kc_fee_zb = numerical.get("勘察费(万元)", 0)
         if jl_fee_zb > 0 and sj_fee_zb > 0 and kc_fee_zb > 0:
             # 使用已经计算的依赖费种值（含用户系数调整），构建 dependent_configs
+            # 合同覆盖的费种：直接注入 _custom_amount 跳过重算，折扣已含在合同价中
+            # 系数默认使用引擎已检测的值（而非 1.0），确保与原始计算一致
             _zb_dep_configs = {
                 "监理费": {
-                    "professional_coef": (coef_overrides or {}).get("监理费", {}).get("professional_coef", 1.0),
-                    "complexity_coef": (coef_overrides or {}).get("监理费", {}).get("complexity_coef", 1.0),
-                    "elevation_coef": (coef_overrides or {}).get("监理费", {}).get("elevation_coef", 1.0),
+                    "professional_coef": (coef_overrides or {}).get("监理费", {}).get("professional_coef", prof),
+                    "complexity_coef": (coef_overrides or {}).get("监理费", {}).get("complexity_coef", comp),
+                    "elevation_coef": (coef_overrides or {}).get("监理费", {}).get("elevation_coef", elev),
                 },
                 "工程设计费": {
-                    "professional_coef": (coef_overrides or {}).get("工程设计费", {}).get("professional_coef", 1.0),
-                    "complexity_coef": (coef_overrides or {}).get("工程设计费", {}).get("complexity_coef", 1.0),
+                    "professional_coef": (coef_overrides or {}).get("工程设计费", {}).get("professional_coef", sheji_prof),
+                    "complexity_coef": (coef_overrides or {}).get("工程设计费", {}).get("complexity_coef", sheji_comp),
                     "additional_coef": (coef_overrides or {}).get("工程设计费", {}).get("additional_coef", 1.0),
                 },
                 "勘察费": {
@@ -5234,11 +5407,24 @@ def _calc_all_fees(
                     "project_type": project_type,
                 },
             }
+            # 合同覆盖/打折：将已生效的数值注入 config，避免重算时丢失
+            _zb_dep_discounts = dict(fee_discounts) if fee_discounts else {}
+            _zb_contract_keys = {
+                "监理费": "监理费", "工程设计费": "工程设计费", "勘察费": "勘察费",
+            }
+            for _dep_name, _cfg_key in _zb_contract_keys.items():
+                if contract_overrides and _cfg_key in contract_overrides:
+                    # 合同覆盖值已含折扣，直接注入跳过重算
+                    _cv = numerical.get(f"{_dep_name}(万元)", 0)
+                    if _cv > 0:
+                        _zb_dep_configs[_dep_name]["_custom_amount"] = _cv
+                        _zb_dep_discounts.pop(_dep_name, None)  # 合同价不再打折
             try:
                 zhaobiao_r = calc_zhaobiao_daili_all(
                     jianan=jianan, shebei=shebei,
                     project_type=project_type, query=query,
                     dependent_configs=_zb_dep_configs,
+                    dep_discounts=_zb_dep_discounts or None,
                 )
                 raw_results["招标代理费"] = zhaobiao_r
                 numerical["招标代理费(万元)"] = zhaobiao_r.get("合计(万元)", 0)
@@ -5257,9 +5443,14 @@ def _calc_all_fees(
     raw_results["交易服务费"] = jiaoyi_r
     numerical["交易服务费(万元)"] = _extract_numeric_value(jiaoyi_r)
 
-    # 施工图审查费（需要 设计费 + 勘察费）
+    # 施工图审查费（需要 设计费 + 勘察费，住宅类按建筑面积计费）
     _shencha_query = query
-    if re.search(r"住宅", _shencha_query):
+    # ── 接受用户覆盖的项目类型/规模 ──
+    shencha_pt_override = param_overrides.get("施工图审查费项目类型")
+    shencha_size_override = param_overrides.get("施工图审查费项目规模")
+    if shencha_pt_override:
+        shencha_ptype = shencha_pt_override
+    elif re.search(r"住宅", _shencha_query):
         shencha_ptype = "住宅"
     elif re.search(r"工业", _shencha_query):
         shencha_ptype = "工业"
@@ -5270,9 +5461,38 @@ def _calc_all_fees(
     else:
         shencha_ptype = "公建"
 
-    if shencha_ptype != "住宅":
-        sheji_kancha_sum = numerical["工程设计费(万元)"] + numerical["勘察费(万元)"]
+    if shencha_size_override:
+        size = shencha_size_override
+    else:
         size = _detect_project_size_86(_shencha_query, shencha_ptype)
+
+    # 费率覆盖（百分比类解析；住宅类从参数表自动匹配，不受此影响）
+    shencha_rate_override = param_overrides.get("施工图审查费费率")
+    if shencha_rate_override is not None:
+        # 去除可能的单位后缀（如 "3.2%" → 3.2）
+        _rate_str = str(shencha_rate_override).replace("%", "").replace("元/m²", "").strip()
+        try:
+            shencha_rate_override = float(_rate_str)
+        except ValueError:
+            shencha_rate_override = None
+
+    if shencha_ptype == "住宅":
+        # 住宅类：按建筑面积 × 单价（元/m²），基数为建筑面积
+        shencha_area = param_overrides.get("施工图审查费建筑面积")
+        if shencha_area is not None and shencha_area > 0:
+            shencha_amount = float(shencha_area)
+        else:
+            # 用户未输入面积时，无法计算，跳过
+            shencha_amount = 0
+        shencha_r = calc_shigong_shencha(
+            amount=shencha_amount,
+            project_type="住宅",
+            size=size,
+            query=_shencha_query,
+        )
+    else:
+        # 公建/工业/市政：按（设计费+勘察费）× 费率
+        sheji_kancha_sum = numerical["工程设计费(万元)"] + numerical["勘察费(万元)"]
         shencha_r = calc_shigong_shencha(
             amount=total_part1,
             project_type=shencha_ptype,
@@ -5281,9 +5501,10 @@ def _calc_all_fees(
             sheji_fee_only=numerical["工程设计费(万元)"],
             kancha_fee_mid=numerical["勘察费(万元)"],
             query=_shencha_query,
+            rate_override=shencha_rate_override,
         )
-        raw_results["施工图审查费"] = shencha_r
-        numerical["施工图审查费(万元)"] = _extract_numeric_value(shencha_r)
+    raw_results["施工图审查费"] = shencha_r
+    numerical["施工图审查费(万元)"] = _extract_numeric_value(shencha_r)
 
     t1_total = sum(
         v for k, v in numerical.items()
@@ -5376,27 +5597,19 @@ def _calc_all_fees(
     # 静态总投资（不含预备费）
     static_investment = total_part1 + fee_total
 
-    # ── skip_fees 过滤：移除用户取消选中的费种 ──
-    skipped = dict(_SKIP_FEES)
-    if skip_fees:
-        for fn in skip_fees:
-            key = f"{fn}(万元)"
-            if key in numerical:
-                del numerical[key]
-            raw_results.pop(fn, None)
-            if fn in _TIER_MAP:
-                skipped[fn] = "用户未选择"
-
-    # ── 合同费率/合同价覆盖：替换标准计算结果 ──
+    # ── 合同费率/合同价覆盖 · 阶段 2（Tier 1/2）──
+    # Tier 1/2 费种在全部标准计算完成后覆盖，避免被重算覆写。
     if contract_overrides:
         for fee_name, override in contract_overrides.items():
+            # 阶段 2：仅处理非 Tier 0 费种（Tier 0 已在阶段 1 处理）
+            if _TIER_MAP.get(fee_name) == 0:
+                continue
             key = f"{fee_name}(万元)"
             if key not in numerical:
-                continue  # 已跳过的费种不覆盖
+                continue
             label = _FEE_LABELS.get(fee_name, fee_name)
 
             if override.get("type") == "rate":
-                # 解析计费基数
                 base_type = override.get("base", "工程费")
                 if base_type == "工程费":
                     base_val = total_part1
@@ -5407,7 +5620,6 @@ def _calc_all_fees(
                 elif base_type == "自定义金额":
                     base_val = override.get("base_custom", 0)
                 elif base_type == "选定费种":
-                    # 取各费种标准计算值求和（避免合同覆盖值之间的循环依赖）
                     base_fees = override.get("base_fees", [])
                     base_val = sum(
                         numerical.get(f"{f}(万元)", 0) for f in base_fees
@@ -5433,7 +5645,18 @@ def _calc_all_fees(
                 "合同覆盖": True,
             }
 
-    # ── 统一汇总重算（skip_fees 和 contract_overrides 后均需重算）──
+    # ── skip_fees 过滤：移除用户取消选中的费种 ──
+    skipped = dict(_SKIP_FEES)
+    if skip_fees:
+        for fn in skip_fees:
+            key = f"{fn}(万元)"
+            if key in numerical:
+                del numerical[key]
+            raw_results.pop(fn, None)
+            if fn in _TIER_MAP:
+                skipped[fn] = "用户未选择"
+
+    # ── 统一汇总重算（skip_fees 后重算）──
     _t0_keys = [k for k, v in _TIER_MAP.items() if v == 0]
     _t1_keys = [k for k, v in _TIER_MAP.items() if v == 1] + ["招标代理费"]
     _t2_keys = [k for k, v in _TIER_MAP.items() if v == 2]
@@ -5496,7 +5719,7 @@ def _build_fee_selection_meta(
         has_coefs = fee_name in ("监理费", "工程设计费", "环境影响咨询费",
                                  "可行性研究费")
         has_rates = fee_name in ("勘察费", "劳动安全卫生评审费",
-                                 "场地准备费及临时设施费", "工程保险费")
+                                 "场地准备费及临时设施费", "工程保险费", "施工图审查费")
         has_services = fee_name in ("环境影响咨询费", "可行性研究费")
 
         entry: dict = {
@@ -5521,6 +5744,39 @@ def _build_fee_selection_meta(
         if has_rates:
             entry["rate_config"] = _get_rate_config_simple(
                 fee_name, engine_result, query)
+            # 施工图审查费：自定义费率下拉（含公建/工业/市政 + 住宅按面积计费）
+            if fee_name == "施工图审查费" and entry["rate_config"] is None:
+                rate_opts = []
+                # 公建/工业/市政 — 按勘察设计费百分比
+                for r_pt, sizes in SHIGONG_SHENCHA_RATES.items():
+                    for r_sz, r_val in sizes.items():
+                        rate_opts.append({
+                            "key": f"{r_pt}|{r_sz}|{r_val}",
+                            "rate": f"{r_val}%",
+                            "fee_wan": 0,  # 预览时根据基数动态计算
+                            "label": f"{r_pt} · {r_sz} — {r_val}%",
+                            "ptype": r_pt,
+                            "size": r_sz,
+                            "billing": "rate",  # 按费率计费
+                        })
+                # 住宅 — 按建筑面积 × 单价（元/m²）
+                for r_sz, r_val in SHIGONG_SHENCHA_ZHUZHAI.items():
+                    rate_opts.append({
+                        "key": f"住宅|{r_sz}|{r_val}",
+                        "rate": f"{r_val} 元/m²",
+                        "fee_wan": 0,
+                        "label": f"住宅 · {r_sz} — {r_val} 元/m²",
+                        "ptype": "住宅",
+                        "size": r_sz,
+                        "billing": "area",  # 按面积计费
+                    })
+                entry["rate_config"] = {
+                    "param_key": "施工图审查费费率",
+                    "rate_options": rate_opts,
+                    "default_key": "公建|中型|2.9",  # 默认公建中型 2.9%
+                    "use_composite_key": True,  # 使用复合键（费率值不唯一）
+                    "basis": "津价管[2011]46号",
+                }
 
         # 为环评费 / 可行性研究费构建服务类型选项
         if has_services:

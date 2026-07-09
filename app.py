@@ -12,6 +12,9 @@ from fee_engine import (
     resolve_dependent_calc, calc_huanping_multi,
     _build_fee_selection_meta, _TIER_DEPS, _calc_all_fees,
     _FEE_LABELS, _is_hebei_project,
+    JIANLI_PROFESSIONAL_OPTIONS, JIANLI_COMPLEXITY_OPTIONS,
+    JIANLI_ELEVATION_OPTIONS,
+    SHEJI_PROFESSIONAL_OPTIONS, SHEJI_COMPLEXITY_OPTIONS,
 )
 
 # ===== 政策依据可点击链接 =====
@@ -1874,6 +1877,68 @@ if "pending_dependent_fee" in st.session_state:
                 f"请为每个依赖费种选择合适的系数或费率，然后点击「确认并计算」。"
             )
 
+            # ── 施工图审查费：审查费率下拉选择 ──
+            if ctx.get("target_fee") == "施工图审查费":
+                from fee_engine import SHIGONG_SHENCHA_RATES, SHIGONG_SHENCHA_ZHUZHAI
+                pt = base_params.get("project_type_shencha", "公建")
+                size = base_params.get("size", "中型")
+
+                # 构建所有可选费率（公建/工业/市政百分比 + 住宅元/m²）
+                rate_options: list[tuple[str, str, str, str, str]] = []
+                for r_pt, sizes in SHIGONG_SHENCHA_RATES.items():
+                    for r_sz, r_val in sizes.items():
+                        label = f"{r_pt} · {r_sz} — {r_val}%"
+                        key = f"{r_pt}|{r_sz}|{r_val}"
+                        rate_options.append((label, key, str(r_val), r_pt, r_sz))
+                # 住宅类：按建筑面积 × 单价（元/m²）
+                for r_sz, r_val in SHIGONG_SHENCHA_ZHUZHAI.items():
+                    label = f"住宅 · {r_sz} — {r_val} 元/m²"
+                    key = f"住宅|{r_sz}|{r_val}"
+                    rate_options.append((label, key, str(r_val), "住宅", r_sz))
+
+                # 默认选中当前检测到的项目和规模
+                default_key = f"{pt}|{size}|{SHIGONG_SHENCHA_RATES.get(pt, {}).get(size, SHIGONG_SHENCHA_ZHUZHAI.get(size, 1.7))}"
+                default_idx = 0
+                for i, (_, rk, _, _, _) in enumerate(rate_options):
+                    if rk == default_key:
+                        default_idx = i
+                        break
+
+                st.markdown("#### 📊 审查费率")
+                st.caption("选择项目类型和规模对应的审查费率：")
+                selected_label = st.selectbox(
+                    "审查费率",
+                    range(len(rate_options)),
+                    index=default_idx,
+                    format_func=lambda i: rate_options[i][0] if i < len(rate_options) else "",
+                    key="shencha_rate_select",
+                    label_visibility="collapsed",
+                )
+                _, sel_key, sel_rate, sel_pt, sel_sz = rate_options[selected_label]
+                # 将选中的费率和类型/规模存入 ctx
+                ctx["shencha_rate_override"] = float(sel_rate)
+                ctx["shencha_pt_override"] = sel_pt
+                ctx["shencha_size_override"] = sel_sz
+
+                if sel_pt == "住宅":
+                    st.info(f"当前选择：**住宅 · {sel_sz}** → **{sel_rate} 元/m²**\n\n"
+                            f"住宅类审查费按建筑面积计费。请在下方输入建筑面积。")
+                    prev_area_sf = ctx.get("shencha_area_override") or 0.0
+                    shencha_area_sf = st.number_input(
+                        "建筑面积（m²）",
+                        min_value=0.0,
+                        value=float(prev_area_sf) if prev_area_sf else 0.0,
+                        step=100.0,
+                        format="%.0f",
+                        key="shencha_area_input",
+                        help="住宅类施工图审查费 = 建筑面积 × 单价\n"
+                             "大型 1.9 元/m² / 中型 1.7 元/m² / 小型 1.3 元/m²",
+                    )
+                    ctx["shencha_area_override"] = shencha_area_sf
+                else:
+                    st.info(f"当前选择：**{sel_pt} · {sel_sz}** → **{sel_rate}%**")
+                st.markdown("---")
+
             # 收集各依赖费种的配置
             all_configs: dict = {}
             dep_previews: dict = {}
@@ -1886,7 +1951,47 @@ if "pending_dependent_fee" in st.session_state:
                 st.markdown("---")
                 st.markdown(f"### 📋 依赖费种 {i + 1}：{dep_label}")
 
-                if config_type == "coef":
+                # ── 自定义金额选项 ──
+                dep_custom_amounts = ctx.setdefault("dep_custom_amounts", {})
+                use_custom = st.checkbox(
+                    f"✏️ 使用自定义金额（覆盖标准计算）",
+                    value=dep_type in dep_custom_amounts,
+                    key=f"dep_use_custom_{dep_type}",
+                    help=f"勾选后将直接输入 {dep_label} 的金额，跳过系数/费率计算",
+                )
+
+                if use_custom:
+                    custom_val = st.number_input(
+                        f"{dep_label} 自定义金额（万元）",
+                        min_value=0.0, step=0.1,
+                        value=float(dep_custom_amounts.get(dep_type, 0.0)),
+                        format="%.2f",
+                        key=f"dep_custom_val_{dep_type}",
+                    )
+                    if custom_val > 0:
+                        dep_custom_amounts[dep_type] = custom_val
+                        dep_previews[dep_type] = custom_val
+                        all_configs[dep_type] = {"_custom_amount": custom_val}
+                        st.info(f"💡 自定义金额：**{custom_val:.2f} 万元**")
+
+                        # 自定义金额也可打折
+                        dep_discounts = ctx.setdefault("dep_discounts", {})
+                        cur_dep_disc = dep_discounts.get(dep_type, 1.0)
+                        dep_disc = st.number_input(
+                            f"{dep_label} 打折系数",
+                            min_value=0.01, max_value=2.00,
+                            value=float(cur_dep_disc), step=0.05,
+                            format="%.2f",
+                            key=f"dep_discount_{dep_type}",
+                            help=f"1.0 = 不打折，将对 {dep_label} 的金额打折",
+                        )
+                        dep_discounts[dep_type] = dep_disc
+                        if abs(dep_disc - 1.0) >= 0.005:
+                            disc_preview = round(custom_val * dep_disc, 4)
+                            st.caption(f"  打折后：{custom_val:.2f} × {dep_disc:.2f} = **{disc_preview:.2f}** 万元")
+                    else:
+                        dep_custom_amounts.pop(dep_type, None)
+                elif config_type == "coef":
                     # ── 系数下拉选择 ──
                     coef_meta = dep.get("coef_metadata", {})
                     coefs = coef_meta.get("coefs", [])
@@ -1977,6 +2082,21 @@ if "pending_dependent_fee" in st.session_state:
                         st.warning(f"⚠️ 预览计算失败：{e}")
                         dep_previews[dep_type] = 0
 
+                    dep_discounts = ctx.setdefault("dep_discounts", {})
+                    cur_dep_disc = dep_discounts.get(dep_type, 1.0)
+                    dep_disc = st.number_input(
+                        f"{dep_label} 打折系数",
+                        min_value=0.01, max_value=2.00,
+                        value=float(cur_dep_disc), step=0.05,
+                        format="%.2f",
+                        key=f"dep_discount_{dep_type}",
+                        help=f"1.0 = 不打折，将对 {dep_label} 的计算结果打折",
+                    )
+                    dep_discounts[dep_type] = dep_disc
+                    if abs(dep_disc - 1.0) >= 0.005 and dep_type in dep_previews:
+                        disc_preview = round(dep_previews[dep_type] * dep_disc, 4)
+                        st.caption(f"  打折后：{dep_previews[dep_type]:.2f} × {dep_disc:.2f} = **{disc_preview:.2f}** 万元")
+
                 elif config_type == "rate":
                     # ── 费率单选 ──
                     rate_options = dep.get("rate_options", [])
@@ -2008,6 +2128,21 @@ if "pending_dependent_fee" in st.session_state:
                     st.info(f"💡 预览：勘察费 = **{chosen_fee:.2f} 万元**"
                             f"（费率 {chosen_rate}%）")
 
+                    dep_discounts = ctx.setdefault("dep_discounts", {})
+                    cur_dep_disc = dep_discounts.get(dep_type, 1.0)
+                    dep_disc = st.number_input(
+                        f"{dep_label} 打折系数",
+                        min_value=0.01, max_value=2.00,
+                        value=float(cur_dep_disc), step=0.05,
+                        format="%.2f",
+                        key=f"dep_discount_{dep_type}",
+                        help=f"1.0 = 不打折，将对 {dep_label} 的计算结果打折",
+                    )
+                    dep_discounts[dep_type] = dep_disc
+                    if abs(dep_disc - 1.0) >= 0.005:
+                        disc_preview = round(chosen_fee * dep_disc, 4)
+                        st.caption(f"  打折后：{chosen_fee:.2f} × {dep_disc:.2f} = **{disc_preview:.2f}** 万元")
+
             # ── 底部按钮 ──
             st.markdown("---")
             col_btn1, col_btn2 = st.columns(2)
@@ -2019,10 +2154,20 @@ if "pending_dependent_fee" in st.session_state:
                     ctx["step"] = "result"
                     # 调用引擎计算最终结果
                     try:
+                        # 施工图审查费：传入用户选择的费率/类型/规模
+                        if ctx.get("target_fee") == "施工图审查费":
+                            base_params = dict(base_params)
+                            base_params["shencha_rate_override"] = ctx.get("shencha_rate_override")
+                            base_params["shencha_pt_override"] = ctx.get("shencha_pt_override")
+                            base_params["shencha_size_override"] = ctx.get("shencha_size_override")
+                            if ctx.get("shencha_pt_override") == "住宅":
+                                base_params["shencha_area_override"] = ctx.get("shencha_area_override")
+
                         final = resolve_dependent_calc(
                             ctx["target_fee"],
                             all_configs,
                             base_params,
+                            dep_discounts=ctx.get("dep_discounts"),
                         )
                         ctx["final_result"] = final
                     except Exception as e:
@@ -2052,16 +2197,26 @@ if "pending_dependent_fee" in st.session_state:
                 # 依赖费种回顾
                 st.markdown("### 依赖费种（用户配置）")
                 dep_detail = final.get("_dependent_details", {})
+                dep_discounts = ctx.get("dep_discounts", {})
                 dep_cols = st.columns(len(dep_detail) if dep_detail else 1)
+                dep_discounted: dict = {}
                 for idx, (dtype, dr) in enumerate(dep_detail.items()):
                     fee_val = dr.get("结果(万元)", dr.get("结果中值(万元)", 0))
+                    ddisc = dep_discounts.get(dtype, 1.0)
+                    ddisc_val = round(fee_val * ddisc, 4)
+                    dep_discounted[dtype] = ddisc_val
                     label_map = {
                         "监理费": "施工监理服务费",
                         "工程设计费": "工程设计费",
                         "勘察费": "工程勘察费",
                     }
                     with dep_cols[idx]:
-                        st.metric(label=label_map.get(dtype, dtype), value=f"{fee_val} 万元")
+                        if abs(ddisc - 1.0) >= 0.005:
+                            st.metric(label=label_map.get(dtype, dtype),
+                                      value=f"{ddisc_val} 万元",
+                                      delta=f"折前 {fee_val:.2f}")
+                        else:
+                            st.metric(label=label_map.get(dtype, dtype), value=f"{fee_val} 万元")
 
                 st.markdown("---")
 
@@ -2161,8 +2316,9 @@ if "pending_dependent_fee" in st.session_state:
                         basis = final.get("依据", "")
                         desc = final.get("说明", "")
 
-                        # 添加依赖费种信息
+                        # 添加依赖费种信息（含自定义金额和各自打折）
                         dep_parts = []
+                        dep_custom_amounts = ctx.get("dep_custom_amounts", {})
                         for dtype, dr in dep_detail.items():
                             label_map = {
                                 "监理费": "施工监理服务费",
@@ -2171,13 +2327,27 @@ if "pending_dependent_fee" in st.session_state:
                             }
                             dl = label_map.get(dtype, dtype)
                             fv = dr.get("结果(万元)", dr.get("结果中值(万元)", 0))
-                            dep_parts.append(f"- {dl}：**{fv} 万元**")
+                            ddisc = dep_discounts.get(dtype, 1.0)
+
+                            if dtype in dep_custom_amounts:
+                                base_note = f"自定义 {dep_custom_amounts[dtype]:.2f} 万"
+                            else:
+                                base_note = f"{fv:.2f} 万"
+
+                            if abs(ddisc - 1.0) >= 0.005:
+                                ddisc_val = round(fv * ddisc, 4)
+                                dep_parts.append(
+                                    f"- {dl}：**{ddisc_val} 万元**"
+                                    f"（{base_note} × {ddisc:.2f}）"
+                                )
+                            else:
+                                dep_parts.append(f"- {dl}：**{fv}** 万元 ({base_note})")
 
                         discount_text = ""
                         if abs(discount_coef - 1.0) >= 0.005:
                             discount_text = (
-                                f"\n\n**打折系数**：{discount_coef:.2f}\n\n"
-                                f"**打折后费用**：{discounted_fee} 万元"
+                                f"\n\n**目标费打折系数**：{discount_coef:.2f}\n\n"
+                                f"**打折后目标费**：{round(base_fee * discount_coef, 4)} 万元"
                                 f"（{base_fee:.2f} 万 × {discount_coef:.2f}）"
                             )
 
@@ -2189,6 +2359,7 @@ if "pending_dependent_fee" in st.session_state:
                             f"\n\n---\n\n"
                             f"{desc}"
                             f"{discount_text}"
+                            f"\n\n**最终费用**：**{discounted_fee} 万元**"
                         )
                         st.session_state.messages.append({
                             "role": "assistant",
@@ -2809,7 +2980,7 @@ if "pending_shuibao_compensation" in st.session_state:
             calc_formula = preview.get("计算公式", "")
 
             st.markdown(f"**计算公式**：{calc_formula}")
-            st.markdown(f"**补偿费合计**：**{fee_yuan:,.2f} 元**（{fee_wan:.4f} 万元）")
+            st.markdown(f"**补偿费合计**：**{fee_yuan:,.2f} 元**（{fee_wan:.2f} 万元）")
             st.markdown(f"- 中央收入（10%）：{central:,.2f} 元")
             st.markdown(f"- 地方收入（90%）：{local:,.2f} 元")
 
@@ -2854,6 +3025,64 @@ if "pending_shuibao_compensation" in st.session_state:
                 del st.session_state.pending_shuibao_compensation
                 st.rerun()
 
+def _recalc_jiaoyi_with_deps(fee_result, jianli_fee_new, sheji_fee_new):
+    """根据调整后的依赖费种值重新计算交易服务费各项金额。"""
+    from fee_engine import calc_jiaoyi_fuwu as _calc_jiaoyi
+    categories = fee_result.get("分项明细", [])
+    jianan = None
+    shebei = None
+    for c in categories:
+        if c["类别"] == "施工":
+            jianan = c["基数(万元)"]
+        elif c["类别"] == "设备":
+            shebei = c["基数(万元)"]
+    if jianan is not None:
+        return _calc_jiaoyi(
+            jianan=jianan, shebei=shebei,
+            jianli_fee=jianli_fee_new, sheji_fee=sheji_fee_new,
+        )
+    elif categories:
+        amt = categories[0]["基数(万元)"]
+        return _calc_jiaoyi(amount_wan=amt)
+    return {}
+
+
+def _render_coef_select(label, options, current_val, key_prefix, help_text=""):
+    """渲染一个系数选择器（selectbox + 自定义输入）。"""
+    option_labels = [f"{lbl}（{val}）" for lbl, val in options]
+    option_values = [val for _, val in options]
+
+    # 找到当前值的索引
+    try:
+        idx = option_values.index(current_val)
+    except ValueError:
+        idx = len(option_values)  # 指向"自定义"
+
+    # 添加"自定义"选项
+    option_labels.append("✏️ 自定义…")
+    option_values.append(-1.0)
+
+    selected_idx = st.selectbox(
+        label,
+        range(len(option_labels)),
+        index=min(idx, len(option_labels) - 1),
+        format_func=lambda i, labels=option_labels: labels[i],
+        key=f"{key_prefix}_{label}",
+        help=help_text,
+    )
+
+    chosen_val = option_values[selected_idx]
+    if chosen_val == -1.0:
+        chosen_val = st.number_input(
+            f"自定义{label}的值",
+            min_value=0.10, max_value=5.00,
+            value=float(current_val) if current_val > 0.1 else 1.0,
+            step=0.05, format="%.2f",
+            key=f"{key_prefix}_{label}_cust",
+        )
+    return float(chosen_val)
+
+
 # ===== 交易服务费计费方选择 =====
 
 if "pending_jiaoyi_party" in st.session_state:
@@ -2875,6 +3104,220 @@ if "pending_jiaoyi_party" in st.session_state:
         zb_wan = round(zb_yuan / 10000.0, 4)
         zhongb_yuan = fee_result.get("中标方(元)", round(total_yuan * 0.4, 2))
         zhongb_wan = round(zhongb_yuan / 10000.0, 4)
+
+        # 依赖费种展示（监理费、设计费作为计算基数）
+        deps = fee_result.get("依赖费种", {})
+        # 初始化 per-fee 系数、自定义金额和打折状态
+        ctx.setdefault("dep_coefs", {})
+        ctx.setdefault("dep_custom_amounts", {})
+        ctx.setdefault("dep_discounts", {})
+        dep_coefs = ctx["dep_coefs"]
+        dep_custom_amounts = ctx["dep_custom_amounts"]
+        dep_discounts = ctx["dep_discounts"]
+
+        # 从 fee_result 提取建安/设备费用于重算监理费
+        categories = fee_result.get("分项明细", [])
+        _jianan = None
+        _shebei = None
+        for c in categories:
+            if c["类别"] == "施工":
+                _jianan = c["基数(万元)"]
+            elif c["类别"] == "设备":
+                _shebei = c["基数(万元)"]
+
+        if deps:
+            st.markdown("### 📎 依赖费种")
+
+            # ========== 监理费 ==========
+            jl_params = deps.get("监理费_参数", {})
+            jl_custom_key = "监理费"
+            # 初始化监理费系数
+            jl_coefs = dep_coefs.setdefault("监理费", {
+                "professional_coef": jl_params.get("专业调整系数", 1.0),
+                "complexity_coef": jl_params.get("复杂程度系数", 1.0),
+                "elevation_coef": jl_params.get("高程调整系数", 1.0),
+            })
+
+            with st.expander("#### 监理费 — 系数调整", expanded=True):
+                # 系数选择器
+                jl_prof = _render_coef_select(
+                    "专业调整系数", JIANLI_PROFESSIONAL_OPTIONS,
+                    jl_coefs["professional_coef"],
+                    key_prefix="jiaoyi_dep_jl",
+                    help_text="发改价格[2007]670号 附表三",
+                )
+                jl_comp = _render_coef_select(
+                    "复杂程度系数", JIANLI_COMPLEXITY_OPTIONS,
+                    jl_coefs["complexity_coef"],
+                    key_prefix="jiaoyi_dep_jl_comp",
+                    help_text="发改价格[2007]670号 1.0.9条",
+                )
+                jl_elev = _render_coef_select(
+                    "高程调整系数", JIANLI_ELEVATION_OPTIONS,
+                    jl_coefs["elevation_coef"],
+                    key_prefix="jiaoyi_dep_jl_elev",
+                    help_text="发改价格[2007]670号 1.0.9条",
+                )
+                jl_coefs["professional_coef"] = jl_prof
+                jl_coefs["complexity_coef"] = jl_comp
+                jl_coefs["elevation_coef"] = jl_elev
+
+                # 用当前系数重算监理费
+                try:
+                    if _jianan is not None:
+                        jl_r = calc_jianli(
+                            jianan=_jianan, shebei=_shebei,
+                            professional_coef=jl_prof,
+                            complexity_coef=jl_comp,
+                            elevation_coef=jl_elev,
+                        )
+                    else:
+                        jl_r = calc_jianli(
+                            amount_wan=deps.get("监理费(万元)", 0),
+                            professional_coef=jl_prof,
+                            complexity_coef=jl_comp,
+                            elevation_coef=jl_elev,
+                        )
+                    jl_val = jl_r["结果(万元)"]
+                except Exception:
+                    jl_val = deps.get("监理费(万元)", 0)
+
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    use_custom_jl = st.checkbox("使用自定义金额", key="jiaoyi_dep_cust_jl",
+                                                value=jl_custom_key in dep_custom_amounts)
+                    if use_custom_jl:
+                        custom_jl = st.number_input(
+                            "自定义金额（万元）", min_value=0.0, step=0.1,
+                            value=float(dep_custom_amounts.get(jl_custom_key, jl_val)),
+                            format="%.4f", key="jiaoyi_dep_cust_jl_val",
+                        )
+                        dep_custom_amounts[jl_custom_key] = custom_jl
+                        jl_effective = custom_jl
+                    else:
+                        dep_custom_amounts.pop(jl_custom_key, None)
+                        jl_effective = jl_val
+                    jl_disc = st.number_input(
+                        "打折系数", min_value=0.01, max_value=2.00,
+                        value=float(dep_discounts.get(jl_custom_key, 1.0)),
+                        step=0.05, format="%.2f", key="jiaoyi_dep_disc_jl",
+                    )
+                    dep_discounts[jl_custom_key] = jl_disc
+                with col_b:
+                    jl_final = round(jl_effective * jl_disc, 4)
+                    st.metric("监理费", f"{jl_final} 万元")
+                    if abs(jl_disc - 1.0) >= 0.005:
+                        st.caption(f"= {jl_effective:.2f} × {jl_disc:.2f}")
+                    elif use_custom_jl:
+                        st.caption(f"= 自定义 {jl_effective} 万元")
+                    else:
+                        st.caption(f"= {jl_val:.2f} 万元")
+
+            # ========== 设计费 ==========
+            sj_params = deps.get("设计费_参数", {})
+            sj_custom_key = "设计费"
+            sj_coefs = dep_coefs.setdefault("设计费", {
+                "professional_coef": sj_params.get("专业调整系数", 1.0),
+                "complexity_coef": sj_params.get("复杂程度系数", 1.0),
+                "additional_coef": sj_params.get("附加调整系数", 0.0),
+            })
+
+            with st.expander("#### 设计费 — 系数调整", expanded=True):
+                sj_prof = _render_coef_select(
+                    "专业调整系数", SHEJI_PROFESSIONAL_OPTIONS,
+                    sj_coefs["professional_coef"],
+                    key_prefix="jiaoyi_dep_sj",
+                    help_text="计价格[2002]10号 附表二",
+                )
+                sj_comp = _render_coef_select(
+                    "复杂程度系数", SHEJI_COMPLEXITY_OPTIONS,
+                    sj_coefs["complexity_coef"],
+                    key_prefix="jiaoyi_dep_sj_comp",
+                    help_text="计价格[2002]10号 1.0.9.2",
+                )
+                sj_addi = st.number_input(
+                    "附加调整系数",
+                    min_value=0.10, max_value=5.00,
+                    value=float(sj_coefs.get("additional_coef", 1.0)),
+                    step=0.05, format="%.2f",
+                    key="jiaoyi_dep_sj_addi",
+                    help="计价格[2002]10号 1.0.9.3（多个系数合并 = 相加 − 个数 + 1）",
+                )
+                sj_coefs["professional_coef"] = sj_prof
+                sj_coefs["complexity_coef"] = sj_comp
+                sj_coefs["additional_coef"] = sj_addi
+
+                # 用当前系数重算设计费
+                try:
+                    if _jianan is not None:
+                        sj_r = calc_sheji(
+                            _jianan + (_shebei or 0),
+                            professional_coef=sj_prof,
+                            complexity_coef=sj_comp,
+                            additional_coefs=[sj_addi] if abs(sj_addi - 1.0) >= 0.005 else None,
+                        )
+                    else:
+                        sj_r = calc_sheji(
+                            deps.get("设计费(万元)", 0),
+                            professional_coef=sj_prof,
+                            complexity_coef=sj_comp,
+                            additional_coefs=[sj_addi] if abs(sj_addi - 1.0) >= 0.005 else None,
+                        )
+                    sj_val = sj_r["结果(万元)"]
+                except Exception:
+                    sj_val = deps.get("设计费(万元)", 0)
+
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    use_custom_sj = st.checkbox("使用自定义金额", key="jiaoyi_dep_cust_sj",
+                                                value=sj_custom_key in dep_custom_amounts)
+                    if use_custom_sj:
+                        custom_sj = st.number_input(
+                            "自定义金额（万元）", min_value=0.0, step=0.1,
+                            value=float(dep_custom_amounts.get(sj_custom_key, sj_val)),
+                            format="%.4f", key="jiaoyi_dep_cust_sj_val",
+                        )
+                        dep_custom_amounts[sj_custom_key] = custom_sj
+                        sj_effective = custom_sj
+                    else:
+                        dep_custom_amounts.pop(sj_custom_key, None)
+                        sj_effective = sj_val
+                    sj_disc = st.number_input(
+                        "打折系数", min_value=0.01, max_value=2.00,
+                        value=float(dep_discounts.get(sj_custom_key, 1.0)),
+                        step=0.05, format="%.2f", key="jiaoyi_dep_disc_sj",
+                    )
+                    dep_discounts[sj_custom_key] = sj_disc
+                with col_b:
+                    sj_final = round(sj_effective * sj_disc, 4)
+                    st.metric("设计费", f"{sj_final} 万元")
+                    if abs(sj_disc - 1.0) >= 0.005:
+                        st.caption(f"= {sj_effective:.2f} × {sj_disc:.2f}")
+                    elif use_custom_sj:
+                        st.caption(f"= 自定义 {sj_effective} 万元")
+                    else:
+                        st.caption(f"= {sj_val:.2f} 万元")
+
+            st.markdown("---")
+
+            # 根据依赖费种调整值重新计算交易服务费
+            _recalc_jiaoyi = _recalc_jiaoyi_with_deps(
+                fee_result, jl_final, sj_final
+            )
+            total_yuan = _recalc_jiaoyi.get("合计(元)", fee_result.get("合计(元)", total_yuan))
+            zb_yuan = _recalc_jiaoyi.get("招标方(元)", round(total_yuan * 0.6, 2))
+            zb_wan = round(zb_yuan / 10000.0, 4)
+            zhongb_yuan = _recalc_jiaoyi.get("中标方(元)", round(total_yuan * 0.4, 2))
+            zhongb_wan = round(zhongb_yuan / 10000.0, 4)
+            # 更新 fee_result 供确认按钮使用
+            fee_result["_adjusted_total_yuan"] = total_yuan
+            fee_result["_adjusted_zb_yuan"] = zb_yuan
+            fee_result["_adjusted_zhongb_yuan"] = zhongb_yuan
+            fee_result["_adjusted_dep_fees"] = {"监理费": jl_final, "设计费": sj_final}
+            # 更新依赖费种参数（供确认响应使用）
+            fee_result["_dep_coefs"] = dict(dep_coefs)
+            fee_result["_dep_discounts"] = dict(dep_discounts)
+            fee_result["_dep_custom_amounts"] = dict(dep_custom_amounts)
 
         # 费用预览卡片
         col_zb, col_zhongb = st.columns(2)
@@ -2929,31 +3372,104 @@ if "pending_jiaoyi_party" in st.session_state:
                 categories = fee_result.get("分项明细", [])
                 jianan = None
                 shebei = None
+                jianli_fee_orig = None
+                sheji_fee_orig = None
                 for c in categories:
                     if c["类别"] == "施工":
                         jianan = c["基数(万元)"]
                     elif c["类别"] == "设备":
                         shebei = c["基数(万元)"]
+                    elif c["类别"] == "监理":
+                        jianli_fee_orig = c["基数(万元)"]
+                    elif c["类别"] == "设计":
+                        sheji_fee_orig = c["基数(万元)"]
+                # 使用调整后的依赖费种值（如果用户自定义了）
+                adjusted_deps = fee_result.get("_adjusted_dep_fees", {})
+                if adjusted_deps:
+                    jianli_fee_for_calc = adjusted_deps.get("监理费", jianli_fee_orig or 0)
+                    sheji_fee_for_calc = adjusted_deps.get("设计费", sheji_fee_orig or 0)
+                else:
+                    jianli_fee_for_calc = jianli_fee_orig
+                    sheji_fee_for_calc = sheji_fee_orig
+
                 if jianan is not None:
                     # 重算以获得 party 特定的结果
-                    jianli_fee = None
-                    sheji_fee = None
-                    for c in categories:
-                        if c["类别"] == "监理":
-                            jianli_fee = c["基数(万元)"]
-                        elif c["类别"] == "设计":
-                            sheji_fee = c["基数(万元)"]
                     party_result = _calc_jiaoyi(
                         jianan=jianan, shebei=shebei,
-                        jianli_fee=jianli_fee, sheji_fee=sheji_fee,
+                        jianli_fee=jianli_fee_for_calc, sheji_fee=sheji_fee_for_calc,
                         party=party,
                     )
                 else:
                     amt = categories[0]["基数(万元)"] if categories else 0
                     party_result = _calc_jiaoyi(amount_wan=amt, party=party)
 
+                # 使用调整后的金额（如果存在）
+                adjusted_zb = fee_result.get("_adjusted_zb_yuan")
+                adjusted_zhongb = fee_result.get("_adjusted_zhongb_yuan")
+                if adjusted_zb is not None:
+                    chosen_fee = adjusted_zb if party == "招标方" else adjusted_zhongb
+                    chosen_fee_wan = round(chosen_fee / 10000.0, 4)
+
+                # 依赖费种详细文本（使用用户实际选择的系数/折扣/自定义）
+                user_dep_coefs = fee_result.get("_dep_coefs", {})
+                user_dep_discs = fee_result.get("_dep_discounts", {})
+                user_dep_custs = fee_result.get("_dep_custom_amounts", {})
+                deps_info = fee_result.get("依赖费种", {})
+                dep_text = ""
+                if adjusted_deps:
+                    dep_lines = []
+                    # 监理费
+                    jl_final_val = adjusted_deps.get("监理费", 0)
+                    jl_coefs = user_dep_coefs.get("监理费", {})
+                    jl_cust = user_dep_custs.get("监理费")
+                    jl_disc = user_dep_discs.get("监理费", 1.0)
+                    jl_line = f"- 监理费：**{jl_final_val} 万元**"
+                    jl_notes = []
+                    if jl_cust is not None:
+                        jl_notes.append(f"自定义={jl_cust}")
+                    elif jl_coefs:
+                        for cn, ckey in [("专业系数", "professional_coef"), ("复杂系数", "complexity_coef"), ("高程系数", "elevation_coef")]:
+                            cv = jl_coefs.get(ckey, 1.0)
+                            if cv is not None and abs(cv - 1.0) >= 0.005:
+                                jl_notes.append(f"{cn}={cv}")
+                    if abs(jl_disc - 1.0) >= 0.005:
+                        jl_notes.append(f"打折={jl_disc:.2f}")
+                    if jl_notes:
+                        jl_line += f"（{'，'.join(jl_notes)}）"
+                    dep_lines.append(jl_line)
+                    # 设计费
+                    sj_final_val = adjusted_deps.get("设计费", 0)
+                    sj_coefs = user_dep_coefs.get("设计费", {})
+                    sj_cust = user_dep_custs.get("设计费")
+                    sj_disc = user_dep_discs.get("设计费", 1.0)
+                    sj_line = f"- 设计费：**{sj_final_val} 万元**"
+                    sj_notes = []
+                    if sj_cust is not None:
+                        sj_notes.append(f"自定义={sj_cust}")
+                    elif sj_coefs:
+                        for cn, ckey in [("专业系数", "professional_coef"), ("复杂系数", "complexity_coef"), ("附加系数", "additional_coef")]:
+                            cv = sj_coefs.get(ckey, 1.0)
+                            if cv is not None and abs(cv) >= 0.005:
+                                sj_notes.append(f"{cn}={cv}")
+                    if abs(sj_disc - 1.0) >= 0.005:
+                        sj_notes.append(f"打折={sj_disc:.2f}")
+                    if sj_notes:
+                        sj_line += f"（{'，'.join(sj_notes)}）"
+                    dep_lines.append(sj_line)
+                    dep_text = "### 📎 依赖费种（计算基数）\n\n" + "\n".join(dep_lines) + "\n\n"
+                elif deps_info:
+                    # 没有调整时使用原始值
+                    dep_lines = []
+                    if deps_info.get("监理费(万元)"):
+                        dep_lines.append(f"- 监理费：**{deps_info['监理费(万元)']} 万元**")
+                    if deps_info.get("设计费(万元)"):
+                        dep_lines.append(f"- 设计费：**{deps_info['设计费(万元)']} 万元**")
+                    if dep_lines:
+                        dep_text = "### 📎 依赖费种（计算基数）\n\n" + "\n".join(dep_lines) + "\n\n"
+
                 result_text = (
                     f"## 工程建设交易服务费\n\n"
+                    f"{dep_text}"
                     f"**计费方**：{party}（{party_pct}）\n\n"
                     f"**应承担费用**：**{chosen_fee:,.0f} 元**"
                     f"（{chosen_fee_wan:.4f} 万元）\n\n"
@@ -3260,6 +3776,18 @@ if "pending_fee_selection" in st.session_state:
                             _pk = _rate_map.get(_fn)
                             if _pk:
                                 _svc_param[_pk] = float(_rv.replace("%", ""))
+                        # 施工图审查费：使用复合键（如 "公建|中型|2.9"）
+                        _shencha_rv2 = ctx.get("rate_overrides", {}).get("施工图审查费", "")
+                        if _shencha_rv2 and "|" in str(_shencha_rv2):
+                            _parts2 = str(_shencha_rv2).split("|")
+                            if len(_parts2) >= 3:
+                                _svc_param["施工图审查费项目类型"] = _parts2[0]
+                                _svc_param["施工图审查费项目规模"] = _parts2[1]
+                                _svc_param["施工图审查费费率"] = float(
+                                    _parts2[2].replace("%", "").replace("元/m²", "").strip())
+                                _shencha_area2 = ctx.get("_shencha_area")
+                                if _shencha_area2:
+                                    _svc_param["施工图审查费建筑面积"] = float(_shencha_area2)
                         _svc_raw = _calc_all_fees(
                             jianan=ctx["jianan"], shebei=ctx["shebei"],
                             project_type=ctx["project_type"], query=ctx["query"],
@@ -3398,67 +3926,197 @@ if "pending_fee_selection" in st.session_state:
                 if not config:
                     continue
 
-                rate_options = config["rate_options"]  # [{"rate": "0.3%", "fee_wan": 15.0}, ...]
-                default_rate = config["default_rate"]
-                param_key = config["param_key"]
+                rate_options = config["rate_options"]
+                use_composite = config.get("use_composite_key", False)
 
-                # 当前选中的费率
-                current_rate = rate_overrides.get(fee_name, default_rate)
+                if use_composite:
+                    # ── 施工图审查费：两级选择（项目类型 → 规模），费率值不唯一 ──
+                    default_key = config.get("default_key", "")
+                    current_key = rate_overrides.get(fee_name, default_key)
 
-                # 构建费率标签列表
-                rate_labels = [f"{ro['rate']} → {ro['fee_wan']:.2f} 万元" for ro in rate_options]
-                rate_values = [ro["rate"] for ro in rate_options]
+                    # 解析当前 key 获得 ptype/size
+                    _cur_parts = str(current_key).split("|") if current_key else []
+                    _cur_ptype = _cur_parts[0] if len(_cur_parts) >= 1 else "公建"
+                    _cur_size = _cur_parts[1] if len(_cur_parts) >= 2 else "中型"
 
-                # 找到当前选中费率的索引
-                try:
-                    rate_idx = rate_values.index(current_rate)
-                except ValueError:
-                    rate_idx = len(rate_values) // 2  # 默认中值
+                    # 按项目类型分组
+                    from fee_engine import SHIGONG_SHENCHA_RATES, SHIGONG_SHENCHA_ZHUZHAI
+                    _all_ptypes = list(SHIGONG_SHENCHA_RATES.keys()) + ["住宅"]
+                    _size_map: dict[str, dict[str, dict]] = {}
+                    for ro in rate_options:
+                        _size_map.setdefault(ro["ptype"], {})[ro["size"]] = ro
 
-                with st.expander(
-                    f"{fd['label']} — 费率选择",
-                    expanded=False,
-                ):
-                    st.markdown(f"<small>📜 依据：{_basis_with_links(config.get('basis', ''))}</small>", unsafe_allow_html=True)
-                    st.caption(
-                        f"计费基数：{ctx['total_part1']:.0f} 万元"
-                    )
+                    with st.expander(
+                        f"{fd['label']} — 费率选择",
+                        expanded=True,
+                    ):
+                        st.markdown(
+                            f"<small>📜 依据：{_basis_with_links(config.get('basis', ''))}</small>",
+                            unsafe_allow_html=True,
+                        )
+                        st.info("💡 请选择项目类型和规模，费率将自动匹配。")
 
-                    selected_rate = st.radio(
-                        "选择费率",
-                        rate_values,
-                        index=rate_idx,
-                        format_func=lambda r, opts=rate_options: next(
-                            (f"{o['rate']}  →  {o['fee_wan']:.2f} 万元"
-                             for o in opts if o['rate'] == r), r),
-                        key=f"cascade_rate_{fee_name}",
-                        horizontal=False,
-                        label_visibility="collapsed",
-                    )
+                        # Step 1: 选择项目类型
+                        _ptype_labels = {
+                            "公建": "公建类（公共建筑）",
+                            "工业": "工业类",
+                            "市政": "市政类（道路/桥梁/管网等）",
+                            "住宅": "住宅类（按建筑面积计费）",
+                        }
+                        try:
+                            _ptype_idx = _all_ptypes.index(_cur_ptype)
+                        except ValueError:
+                            _ptype_idx = 0
+                        sel_ptype = st.selectbox(
+                            "项目类型",
+                            _all_ptypes,
+                            index=_ptype_idx,
+                            format_func=lambda x: _ptype_labels.get(x, x),
+                            key=f"cascade_shencha_ptype",
+                        )
 
-                    rate_overrides[fee_name] = selected_rate
+                        # Step 2: 选择规模（根据类型过滤）
+                        _sizes = list(_size_map.get(sel_ptype, {}).keys())
+                        if _cur_ptype != sel_ptype:
+                            _cur_size = _sizes[1] if len(_sizes) > 1 else _sizes[0]  # 默认中型
+                        try:
+                            _size_idx = _sizes.index(_cur_size)
+                        except ValueError:
+                            _size_idx = 1 if len(_sizes) > 1 else 0
+                        sel_size = st.selectbox(
+                            "项目规模",
+                            _sizes,
+                            index=_size_idx,
+                            key=f"cascade_shencha_size",
+                        )
 
-                    # 显示选中费率的卡片
-                    selected_fee = next(
-                        (ro["fee_wan"] for ro in rate_options if ro["rate"] == selected_rate),
-                        0,
-                    )
-                    st.markdown(
-                        f"""<div style="
-                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                            border-radius: 12px;
-                            padding: 16px 24px;
-                            margin: 8px 0;
-                            color: white;
-                        ">
-                            <span style="font-size: 0.85rem; opacity: 0.85;">✅ {fee_name}</span><br>
-                            <span style="font-size: 1.1rem;">费率</span>
-                            <span style="font-size: 1.8rem; font-weight: 700;">{selected_rate}</span>
-                            <span style="font-size: 1.1rem; opacity: 0.7;">→ 费用</span>
-                            <span style="font-size: 1.8rem; font-weight: 700;">{selected_fee:.2f} 万</span>
-                        </div>""",
-                        unsafe_allow_html=True,
-                    )
+                        # 构建选中项
+                        sel_ro = _size_map.get(sel_ptype, {}).get(sel_size)
+                        if sel_ro:
+                            selected_key = sel_ro["key"]
+                            selected_label = sel_ro["label"]
+                            rate_overrides[fee_name] = selected_key
+                            ctx["_shencha_sel"] = {
+                                "ptype": sel_ro["ptype"],
+                                "size": sel_ro["size"],
+                                "rate": sel_ro["rate"],
+                                "billing": sel_ro.get("billing", "rate"),
+                            }
+
+                            # 住宅类：显示建筑面积输入
+                            if sel_ro.get("billing") == "area":
+                                prev_area = ctx.get("_shencha_area") or 0.0
+                                shencha_area = st.number_input(
+                                    "建筑面积（m²）",
+                                    min_value=0.0,
+                                    value=float(prev_area) if prev_area else 0.0,
+                                    step=100.0,
+                                    format="%.0f",
+                                    key="cascade_shencha_area",
+                                    help="住宅类施工图审查费按建筑面积 × 单价计费。\n"
+                                         "大型 1.9 元/m² / 中型 1.7 元/m² / 小型 1.3 元/m²",
+                                )
+                                ctx["_shencha_area"] = shencha_area
+                                if shencha_area > 0:
+                                    rate_val = sel_ro["rate"].replace(" 元/m²", "")
+                                    est = shencha_area * float(rate_val)
+                                    st.caption(
+                                        f"预计审查费：{shencha_area:.0f} m² "
+                                        f"× {rate_val} 元/m² = **{est:.2f} 元**"
+                                        f"（{est/10000:.4f} 万元）"
+                                    )
+
+                            # 显示选中费率的卡片
+                            st.markdown(
+                                f"""<div style="
+                                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                                    border-radius: 12px;
+                                    padding: 16px 24px;
+                                    margin: 8px 0;
+                                    color: white;
+                                ">
+                                    <span style="font-size: 0.85rem; opacity: 0.85;">✅ {fee_name}</span><br>
+                                    <span style="font-size: 1.1rem;">{selected_label}</span>
+                                </div>""",
+                                unsafe_allow_html=True,
+                            )
+                else:
+                    # ── 原有逻辑：简单费率（费率值唯一）──
+                    default_rate = config["default_rate"]
+                    param_key = config["param_key"]
+
+                    # 当前选中的费率
+                    current_rate = rate_overrides.get(fee_name, default_rate)
+
+                    # 构建费率标签列表
+                    rate_values = [ro["rate"] for ro in rate_options]
+
+                    # 找到当前选中费率的索引
+                    try:
+                        rate_idx = rate_values.index(current_rate)
+                    except ValueError:
+                        rate_idx = len(rate_values) // 2  # 默认中值
+
+                    with st.expander(
+                        f"{fd['label']} — 费率选择",
+                        expanded=False,
+                    ):
+                        st.markdown(
+                            f"<small>📜 依据：{_basis_with_links(config.get('basis', ''))}</small>",
+                            unsafe_allow_html=True,
+                        )
+                        st.caption(
+                            f"计费基数：{ctx['total_part1']:.0f} 万元"
+                        )
+
+                        selected_rate = st.radio(
+                            "选择费率",
+                            rate_values,
+                            index=rate_idx,
+                            format_func=lambda r, opts=rate_options: next(
+                                (o.get("label") or f"{o['rate']}  →  {o['fee_wan']:.2f} 万元"
+                                 for o in opts if o['rate'] == r), r),
+                            key=f"cascade_rate_{fee_name}",
+                            horizontal=False,
+                            label_visibility="collapsed",
+                        )
+
+                        rate_overrides[fee_name] = selected_rate
+
+                        # 显示选中费率的卡片
+                        selected_opt = next(
+                            (ro for ro in rate_options if ro["rate"] == selected_rate), None)
+                        selected_fee = selected_opt["fee_wan"] if selected_opt else 0
+                        selected_label = selected_opt.get("label", "") if selected_opt else ""
+
+                        if selected_fee > 0:
+                            fee_line = (
+                                f'<span style="font-size: 1.1rem; opacity: 0.7;">→ 费用</span>'
+                                f'<span style="font-size: 1.8rem; font-weight: 700;">{selected_fee:.2f} 万</span>'
+                            )
+                        elif selected_label:
+                            fee_line = (
+                                f'<span style="font-size: 1.1rem; opacity: 0.7;">→ </span>'
+                                f'<span style="font-size: 1.2rem; font-weight: 700;">{selected_label}</span>'
+                            )
+                        else:
+                            fee_line = ""
+
+                        st.markdown(
+                            f"""<div style="
+                                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                                border-radius: 12px;
+                                padding: 16px 24px;
+                                margin: 8px 0;
+                                color: white;
+                            ">
+                                <span style="font-size: 0.85rem; opacity: 0.85;">✅ {fee_name}</span><br>
+                                <span style="font-size: 1.1rem;">费率</span>
+                                <span style="font-size: 1.8rem; font-weight: 700;">{selected_rate}</span>
+                                {fee_line}
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
 
             ctx["rate_overrides"] = rate_overrides
             st.session_state.pending_fee_selection["rate_overrides"] = rate_overrides
@@ -3605,6 +4263,58 @@ if "pending_fee_selection" in st.session_state:
             )
             ctx["jiaoyi_party"] = party_values[chosen]
             st.session_state.pending_fee_selection["jiaoyi_party"] = party_values[chosen]
+
+            # 依赖费种展示（监理费、设计费作为计算基数）
+            jianli_coefs = ctx.get("coef_overrides", {}).get("监理费", {})
+            sheji_coefs = ctx.get("coef_overrides", {}).get("工程设计费", {})
+            jianli_r = None
+            sheji_r = None
+            try:
+                jianli_r = calc_jianli(
+                    jianan=ctx["jianan"], shebei=ctx["shebei"],
+                    professional_coef=jianli_coefs.get("professional_coef", 1.0),
+                    complexity_coef=jianli_coefs.get("complexity_coef", 0.85),
+                    elevation_coef=jianli_coefs.get("elevation_coef", 1.0),
+                )
+                jianli_val = jianli_r["结果(万元)"]
+            except Exception:
+                jianli_val = 0
+            try:
+                sheji_r = calc_sheji(
+                    ctx["total_part1"],
+                    professional_coef=sheji_coefs.get("professional_coef", 1.0),
+                    complexity_coef=sheji_coefs.get("complexity_coef", 1.0),
+                )
+                sheji_val = sheji_r["结果(万元)"]
+            except Exception:
+                sheji_val = 0
+
+            st.markdown("#### 📎 依赖费种（计算基数）")
+            # 监理费
+            jl_col1, jl_col2 = st.columns([2, 1])
+            with jl_col1:
+                jl_params = jianli_r.get("参数", {}) if jianli_r else {}
+                coef_strs = []
+                for cn, ckey in [("专业系数", "专业调整系数"), ("复杂系数", "复杂程度系数"), ("高程系数", "高程调整系数")]:
+                    cv = jl_params.get(ckey, 1.0)
+                    if cv is not None:
+                        coef_strs.append(f"{cn}={cv}")
+                st.caption("监理费" + ("：`" + "，".join(coef_strs) + "`" if coef_strs else ""))
+            with jl_col2:
+                st.metric(label="监理费", value=f"{jianli_val} 万元")
+
+            # 设计费
+            sj_col1, sj_col2 = st.columns([2, 1])
+            with sj_col1:
+                sj_params = sheji_r.get("参数", {}) if sheji_r else {}
+                coef_strs = []
+                for cn, ckey in [("专业系数", "专业调整系数"), ("复杂系数", "复杂程度系数"), ("附加系数", "附加调整系数")]:
+                    cv = sj_params.get(ckey, 1.0)
+                    if cv is not None and abs(cv) >= 0.005:
+                        coef_strs.append(f"{cn}={cv}")
+                st.caption("设计费" + ("：`" + "，".join(coef_strs) + "`" if coef_strs else ""))
+            with sj_col2:
+                st.metric(label="设计费", value=f"{sheji_val} 万元")
 
             st.markdown("---")
 
@@ -3861,6 +4571,114 @@ if "pending_fee_selection" in st.session_state:
 
         st.markdown("---")
 
+        # ── 按费种独立打折 ──
+        st.markdown("### 💰 费用打折")
+        st.caption("为每个选中的费种单独设置打折系数（1.0 = 不打折），实时预览将反映折后金额。")
+
+        discounts = ctx.setdefault("fee_discounts", {})
+
+        # 用当前参数快速计算近似值供打折区参考（预览区会做完整后处理并应用折扣）
+        _disc_skip = set(fd["name"] for fd in ctx["fee_defs"]) - new_selected
+        _disc_param = {}
+        _disc_rate_map = {
+            "勘察费": "勘察费费率", "劳动安全卫生评审费": "劳动安全卫生评审费费率",
+            "场地准备费及临时设施费": "场地准备费费率", "工程保险费": "工程保险费费率",
+        }
+        for _fn, _rv in ctx.get("rate_overrides", {}).items():
+            _pk = _disc_rate_map.get(_fn)
+            if _pk:
+                _disc_param[_pk] = float(_rv.replace("%", ""))
+        # 施工图审查费：使用复合键（如 "公建|中型|2.9"）
+        _shencha_rv = ctx.get("rate_overrides", {}).get("施工图审查费", "")
+        if _shencha_rv and "|" in str(_shencha_rv):
+            _parts = str(_shencha_rv).split("|")
+            if len(_parts) >= 3:
+                _disc_param["施工图审查费费率"] = float(_parts[2].replace("%", "").replace("元/m²", ""))
+                _disc_param["施工图审查费项目类型"] = _parts[0]
+                _disc_param["施工图审查费项目规模"] = _parts[1]
+                _shencha_area = ctx.get("_shencha_area")
+                if _shencha_area:
+                    _disc_param["施工图审查费建筑面积"] = float(_shencha_area)
+        _yb_rate = st.session_state.get("cascade_yb_rate")
+        if _yb_rate is not None:
+            _disc_param["预备费率"] = float(_yb_rate)
+
+        try:
+            _disc_raw = _calc_all_fees(
+                jianan=ctx["jianan"], shebei=ctx["shebei"],
+                project_type=ctx["project_type"], query=ctx["query"],
+                skip_fees=_disc_skip if _disc_skip else None,
+                coef_overrides=ctx.get("coef_overrides") or None,
+                param_overrides=_disc_param or None,
+                jiaoyi_party=ctx.get("jiaoyi_party"),
+                contract_overrides=ctx.get("contract_overrides") or None,
+            )
+            _disc_numerical = _disc_raw["_数值"]
+        except Exception:
+            _disc_numerical = {}
+
+        discounted_total = 0.0
+        raw_total = 0.0
+
+        selected_fee_list = sorted(
+            [fd for fd in ctx["fee_defs"]
+             if fd["name"] in new_selected and fd["name"] != "预备费"],
+            key=lambda fd: (fd["tier"], fd["name"]),
+        )
+
+        for fd in selected_fee_list:
+            fn = fd["name"]
+            val = _disc_numerical.get(f"{fn}(万元)", 0)
+            if val <= 0:
+                continue
+            raw_total += val
+            is_contract = fn in ctx.get("contract_overrides", {})
+            cur_discount = discounts.get(fn, 1.0)
+            disc_col1, disc_col2 = st.columns([3, 1])
+            with disc_col1:
+                label_text = f"**{fd['label']}**（{val:.2f} 万元）"
+                if is_contract:
+                    label_text += " 🔒"
+                st.caption(label_text)
+            with disc_col2:
+                if is_contract:
+                    st.caption("合同价不打折")
+                    discounts[fn] = 1.0
+                    new_discount = 1.0
+                else:
+                    new_discount = st.number_input(
+                        f"打折系数",
+                        min_value=0.01, max_value=2.00,
+                        value=float(cur_discount), step=0.05,
+                        format="%.2f",
+                        key=f"discount_{fn}",
+                        label_visibility="collapsed",
+                    )
+                    discounts[fn] = new_discount
+            discounted_val = round(val * new_discount, 4)
+            discounted_total += discounted_val
+            if abs(new_discount - 1.0) >= 0.005:
+                st.caption(f"  → {discounted_val:.2f} 万元")
+
+        # 自定义费用不打折
+        custom_total = sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
+        discounted_total += custom_total
+        raw_total += custom_total
+
+        if abs(discounted_total - raw_total) > 0.005:
+            st.markdown(f"**打折前二类费合计**：{raw_total:.2f} 万元")
+            st.markdown(f"**打折后二类费合计**：**{discounted_total:.2f} 万元**")
+            if discounted_total < raw_total:
+                st.success(f"节省 **{round(raw_total - discounted_total, 2)}** 万元")
+            else:
+                st.warning(f"增加 **{round(discounted_total - raw_total, 2)}** 万元")
+        else:
+            st.info(f"二类费合计（未打折）：**{raw_total:.2f} 万元**")
+
+        st.session_state.pending_fee_selection["fee_discounts"] = discounts
+
+        st.markdown("---")
+
         # ── Real-time Preview ──
         st.markdown("### 💡 实时预览")
 
@@ -3888,6 +4706,20 @@ if "pending_fee_selection" in st.session_state:
                     # 费率格式如 "0.5%"，提取数字
                     rate_num = float(rate_val.replace("%", ""))
                     param_overrides[pk] = rate_num
+            # 施工图审查费：使用复合键（如 "公建|中型|2.9"），需拆分传递
+            _shencha_rv = ctx.get("rate_overrides", {}).get("施工图审查费", "")
+            if _shencha_rv and "|" in str(_shencha_rv):
+                _parts = str(_shencha_rv).split("|")
+                if len(_parts) >= 3:
+                    param_overrides["施工图审查费项目类型"] = _parts[0]
+                    param_overrides["施工图审查费项目规模"] = _parts[1]
+                    # 费率：去除 % 和 元/m² 后缀
+                    _rate_raw = _parts[2].replace("%", "").replace("元/m²", "").strip()
+                    param_overrides["施工图审查费费率"] = float(_rate_raw)
+                    # 住宅类建筑面积
+                    _shencha_area = ctx.get("_shencha_area")
+                    if _shencha_area:
+                        param_overrides["施工图审查费建筑面积"] = float(_shencha_area)
             # 预备费率：直接从 widget session key 读取（避免 lag）
             _yb_rate_widget = st.session_state.get("cascade_yb_rate")
             if _yb_rate_widget is not None:
@@ -3904,6 +4736,7 @@ if "pending_fee_selection" in st.session_state:
                 param_overrides=param_overrides or None,
                 jiaoyi_party=ctx.get("jiaoyi_party"),
                 contract_overrides=ctx.get("contract_overrides") or None,
+                fee_discounts=ctx.get("fee_discounts") or None,
             )
 
             numerical = preview_raw["_数值"]
@@ -4178,6 +5011,11 @@ if "pending_fee_selection" in st.session_state:
                 except Exception:
                     pass  # 参数不全则跳过
 
+            # ── 存储计算结果供打折区和预览区共用 ──
+            ctx["_computed_raw"] = preview_raw
+            ctx["_computed_numerical"] = dict(numerical)
+            ctx["_computed_sb_fee_wan"] = sb_fee_wan
+
             # 按层级显示
             for tier in [0, 1, 2, 4]:
                 tier_fees = [
@@ -4186,8 +5024,8 @@ if "pending_fee_selection" in st.session_state:
                 ]
                 if not tier_fees:
                     continue
-                subtotal = preview_raw.get(f'T{tier}小计(万元)', 0)
-                subtotal_str = f"<small style='color:#888;'>{subtotal:.2f} 万元</small>" if subtotal > 0 else ""
+                subtotal_raw = preview_raw.get(f'T{tier}小计(万元)', 0)
+                subtotal_str = f"<small style='color:#888;'>{subtotal_raw:.2f} 万元</small>" if subtotal_raw > 0 else ""
                 st.markdown(
                     f"**{tier_labels.get(tier, '')}**  {subtotal_str}",
                     unsafe_allow_html=True,
@@ -4211,6 +5049,10 @@ if "pending_fee_selection" in st.session_state:
                                 note_parts.append(f"{len(svcs)}项服务")
                         if fn in ctx.get("contract_overrides", {}):
                             note_parts.append("合同")
+                        # 打折标注（T0 折扣已由引擎应用，此处仅标注不重复乘）
+                        disc = ctx.get("fee_discounts", {}).get(fn, 1.0)
+                        if abs(disc - 1.0) >= 0.005:
+                            note_parts.append(f"打折={disc:.2f}")
                         note_str = ""
                         if note_parts:
                             note_str = f" <small style='color:#888;'>({'，'.join(note_parts)})</small>"
@@ -4243,7 +5085,7 @@ if "pending_fee_selection" in st.session_state:
 
             # 水土保持补偿费（独立于投资额的费种）
             if sb_fee_wan > 0:
-                st.markdown(f"**🏗️ 水土保持补偿费**：**{sb_fee_wan:.4f}** 万元"
+                st.markdown(f"**🏗️ 水土保持补偿费**：**{sb_fee_wan:.2f}** 万元"
                             f" <small style='color:#888;'>({sb_fee_wan * 10000:,.0f} 元，含10%中央收入)</small>",
                             unsafe_allow_html=True)
 
@@ -4260,11 +5102,11 @@ if "pending_fee_selection" in st.session_state:
             yb_total = preview_raw.get("预备费小计(万元)", 0)
             pt = preview_raw.get("项目总投资(万元)", 0)
 
-            # 加上自定义费用 + 水土保持补偿费
+            # 引擎已应用 fee_discounts 到 Tier 0 并级联影响依赖费种
             fee_total_with_custom = round(fee_total_raw + custom_total + sb_fee_wan, 4)
             project_total_with_custom = round(pt + custom_total + sb_fee_wan, 4)
 
-            n_cols = 4 if sb_fee_wan > 0 else 4
+            n_cols = 4
             col1, col2, col3, col4 = st.columns(n_cols)
             col1.metric("二类费合计", f"{fee_total_with_custom:.2f} 万元")
             col2.metric("预备费", f"{yb_total:.2f} 万元")
@@ -4293,73 +5135,6 @@ if "pending_fee_selection" in st.session_state:
             st.session_state.pending_fee_selection["preview"] = None
 
         st.markdown("---")
-
-        # ── 按费种独立打折 ──
-        st.markdown("### 💰 费用打折")
-        st.caption("为每个选中的费种单独设置打折系数（1.0 = 不打折）")
-        discounts = ctx.setdefault("fee_discounts", {})
-        preview = ctx.get("preview")
-        numerical = preview["numerical"] if preview else {}
-        discounted_total = 0.0
-        raw_total = 0.0
-
-        selected_fee_list = sorted(
-            [fd for fd in ctx["fee_defs"]
-             if fd["name"] in new_selected and fd["name"] != "预备费"],
-            key=lambda fd: (fd["tier"], fd["name"]),
-        )
-
-        for fd in selected_fee_list:
-            fn = fd["name"]
-            val = numerical.get(f"{fn}(万元)", 0)
-            if val <= 0:
-                continue
-            raw_total += val
-            is_contract = fn in ctx.get("contract_overrides", {})
-            cur_discount = discounts.get(fn, 1.0)
-            disc_col1, disc_col2 = st.columns([3, 1])
-            with disc_col1:
-                label_text = f"**{fd['label']}**（{val:.2f} 万元）"
-                if is_contract:
-                    label_text += " 🔒"
-                st.caption(label_text)
-            with disc_col2:
-                if is_contract:
-                    # 合同覆盖费种锁定为 1.0（不打折）
-                    st.caption("合同价不打折")
-                    discounts[fn] = 1.0
-                    new_discount = 1.0
-                else:
-                    new_discount = st.number_input(
-                        f"系数",
-                        min_value=0.01, max_value=2.00,
-                        value=float(cur_discount), step=0.05,
-                        format="%.2f",
-                        key=f"discount_{fn}",
-                        label_visibility="collapsed",
-                    )
-                    discounts[fn] = new_discount
-            discounted_val = round(val * new_discount, 4)
-            discounted_total += discounted_val
-            if abs(new_discount - 1.0) >= 0.005:
-                st.caption(f"  → {discounted_val:.2f} 万元")
-
-        # 自定义费用不打折
-        custom_total = sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
-        discounted_total += custom_total
-        raw_total += custom_total
-
-        if abs(discounted_total - raw_total) > 0.005:
-            st.markdown(f"**打折前二类费合计**：{raw_total:.2f} 万元")
-            st.markdown(f"**打折后二类费合计**：**{discounted_total:.2f} 万元**")
-            if discounted_total < raw_total:
-                st.success(f"节省 **{round(raw_total - discounted_total, 2)}** 万元")
-            else:
-                st.warning(f"增加 **{round(discounted_total - raw_total, 2)}** 万元")
-        else:
-            st.info(f"二类费合计（未打折）：**{raw_total:.2f} 万元**")
-
-        st.session_state.pending_fee_selection["fee_discounts"] = discounts
 
         # ── 导出 Excel ──
         st.markdown("---")
@@ -4459,7 +5234,7 @@ if "pending_fee_selection" in st.session_state:
                     sb_params = ctx.get("shuibao_comp_params", {})
                     sb_detail = numerical.get("水土保持补偿费(万元)", sb_fee_wan)
                     sb_lines.append("")
-                    sb_lines.append(f"**🏗️ 水土保持补偿费**：{sb_detail:.4f} 万元"
+                    sb_lines.append(f"**🏗️ 水土保持补偿费**：{sb_detail:.2f} 万元"
                                     f"（{sb_detail * 10000:,.0f} 元，含10%中央收入）")
 
                 # 打折文本
@@ -4694,6 +5469,8 @@ if prompt:
                             "step": "config",
                             "final_result": None,
                             "discount_coef": 1.0,
+                            "dep_discounts": {},
+                            "dep_custom_amounts": {},
                         }
                         fee_name = fee_result.get("费种", "")
                         n_deps = len(fee_result.get("dependent_fees", []))
@@ -4748,8 +5525,41 @@ if prompt:
                             "fee_result": jiaoyi_result,
                             "query": prompt,
                         }
+                        # 依赖费种文本（含系数详情）
+                        deps_info = fee_result.get("依赖费种", {})
+                        dep_lines = []
+                        # 监理费
+                        if deps_info.get("监理费(万元)"):
+                            jl_line = f"- 监理费：**{deps_info['监理费(万元)']} 万元**"
+                            jl_params = deps_info.get("监理费_参数", {})
+                            if jl_params:
+                                coef_strs = []
+                                for cn in ["专业调整系数", "复杂程度系数", "高程调整系数"]:
+                                    cv = jl_params.get(cn, 1.0)
+                                    if cv is not None and abs(cv - 1.0) >= 0.005:
+                                        coef_strs.append(f"{cn}={cv}")
+                                if coef_strs:
+                                    jl_line += f"（{'，'.join(coef_strs)}）"
+                            dep_lines.append(jl_line)
+                        # 设计费
+                        if deps_info.get("设计费(万元)"):
+                            sj_line = f"- 设计费：**{deps_info['设计费(万元)']} 万元**"
+                            sj_params = deps_info.get("设计费_参数", {})
+                            if sj_params:
+                                coef_strs = []
+                                for cn in ["专业调整系数", "复杂程度系数", "附加调整系数"]:
+                                    cv = sj_params.get(cn, 1.0)
+                                    if cv is not None and abs(cv) >= 0.005:
+                                        coef_strs.append(f"{cn}={cv}")
+                                if coef_strs:
+                                    sj_line += f"（{'，'.join(coef_strs)}）"
+                            dep_lines.append(sj_line)
+                        dep_section = ""
+                        if dep_lines:
+                            dep_section = "### 📎 依赖费种（计算基数）\n\n" + "\n".join(dep_lines) + "\n\n"
                         response = (
                             f"## 工程建设交易服务费\n\n"
+                            f"{dep_section}"
                             f"> 🏛️ 请选择计费方\n\n"
                             f"请滚动到页面下方 **🏛️ 交易服务费 — 计费方选择** 区域，"
                             f"选择招标方或中标方后点击确认。"
