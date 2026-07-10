@@ -5074,6 +5074,35 @@ if "pending_fee_selection" in st.session_state:
                 except Exception:
                     pass  # 参数不全则跳过
 
+            # ── 对非 T0 费种统一补应用折扣（T0 已由引擎应用）──
+            _final_disc = ctx.get("fee_discounts", {})
+            _T0_NAMES = {"监理费", "工程设计费", "勘察费",
+                         "劳动安全卫生评审费", "场地准备费及临时设施费", "工程保险费"}
+            _any_disc_applied = False
+            if _final_disc:
+                for _fn, _fd in _final_disc.items():
+                    if _fn in _T0_NAMES or _fn == "预备费" or abs(_fd - 1.0) < 0.005:
+                        continue
+                    _key = f"{_fn}(万元)"
+                    if _key in numerical and numerical[_key] > 0:
+                        numerical[_key] = round(numerical[_key] * _fd, 4)
+                        _any_disc_applied = True
+            # 重算层级小计以反映折扣变动（含自定义费用）
+            if _any_disc_applied:
+                _tk0 = ["监理费", "工程设计费", "勘察费",
+                        "劳动安全卫生评审费", "场地准备费及临时设施费",
+                        "工程保险费", "造价咨询费"]
+                _tk1 = ["交易服务费", "施工图审查费", "招标代理费"]
+                _tk2 = ["建设管理费", "可行性研究费", "环境影响咨询费"]
+                _nt0 = sum(numerical.get(f"{k}(万元)", 0) for k in _tk0)
+                _nt1 = sum(numerical.get(f"{k}(万元)", 0) for k in _tk1)
+                _nt2 = sum(numerical.get(f"{k}(万元)", 0) for k in _tk2)
+                _nt_custom = sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
+                preview_raw["T0小计(万元)"] = round(_nt0, 4)
+                preview_raw["T1小计(万元)"] = round(_nt1, 4)
+                preview_raw["T2小计(万元)"] = round(_nt2, 4)
+                preview_raw["二类费合计(万元)"] = round(_nt0 + _nt1 + _nt2 + _nt_custom, 4)
+
             # ── 存储计算结果供打折区和预览区共用 ──
             ctx["_computed_raw"] = preview_raw
             ctx["_computed_numerical"] = dict(numerical)
