@@ -5124,8 +5124,15 @@ if "pending_fee_selection" in st.session_state:
                             unsafe_allow_html=True,
                         )
 
-            # 预备费（含费率输入）
-            yb_val = numerical.get("预备费(万元)")
+            # 预备费（含费率输入）——先同步引擎值为含sb费的完整预备费
+            _yb_rate_disp = float(st.session_state.get("cascade_yb_rate", 5.0))
+            _yb_ctr_disp = (ctx.get("contract_overrides") or {}).get("预备费", {})
+            _fee_for_yb = round(preview_raw.get("二类费合计(万元)", 0) + sb_fee_wan, 4)
+            if _yb_ctr_disp and _yb_ctr_disp.get("type") == "price":
+                yb_val = numerical.get("预备费(万元)")
+            else:
+                yb_val = round((ctx["total_part1"] + _fee_for_yb) * _yb_rate_disp / 100.0, 4)
+                numerical["预备费(万元)"] = yb_val
             if yb_val is not None and yb_val > 0:
                 yb_col1, yb_col2 = st.columns([3, 1])
                 with yb_col1:
@@ -5166,15 +5173,8 @@ if "pending_fee_selection" in st.session_state:
 
             # 二类费合计 = 引擎二类费（含自定义）+ 水土保持补偿费
             fee_total_with_custom = round(fee_total_raw + sb_fee_wan, 4)
-
-            # 预备费重算：基数含水土保持补偿费（属于二类费）
-            _yb_rate = float(st.session_state.get("cascade_yb_rate", 5.0))
-            _yb_ctr = (ctx.get("contract_overrides") or {}).get("预备费", {})
-            if _yb_ctr and _yb_ctr.get("type") == "price":
-                yb_total = preview_raw.get("预备费小计(万元)", 0)
-            else:
-                yb_total = round((ctx["total_part1"] + fee_total_with_custom) * _yb_rate / 100.0, 4)
-
+            # 预备费已在上方统一计算（yb_val），直接复用
+            yb_total = yb_val if yb_val is not None else preview_raw.get("预备费小计(万元)", 0)
             # 项目总投资 = 一类费 + 二类费 + 预备费
             project_total_with_custom = round(ctx["total_part1"] + fee_total_with_custom + yb_total, 4)
 
