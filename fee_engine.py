@@ -5164,6 +5164,28 @@ _FEE_LABELS: dict[str, str] = {
 }
 
 
+def _match_custom_fee_deductions(custom_fees: list[dict] | None) -> dict[str, float]:
+    """从自定义费用中模糊识别「管线切改费」和「建设用地费」."""
+    import re
+    qg_total = 0.0
+    js_total = 0.0
+    qg_pattern = re.compile(r'切改|迁改|迁移')
+    js_pattern = re.compile(r'征地|拆迁|建设用地|土地征用|用地费')
+    for cf in (custom_fees or []):
+        name = cf.get("name", cf.get("名称", ""))
+        amount = cf.get("amount_wan", cf.get("金额(万元)", 0))
+        if qg_pattern.search(name):
+            qg_total += amount
+        elif js_pattern.search(name):
+            js_total += amount
+    result: dict[str, float] = {}
+    if qg_total > 0:
+        result["管线切改费"] = round(qg_total, 4)
+    if js_total > 0:
+        result["建设用地费"] = round(js_total, 4)
+    return result
+
+
 def _calc_all_fees(
     jianan: float,
     shebei: float,
@@ -5176,6 +5198,7 @@ def _calc_all_fees(
     jiaoyi_party: str | None = None,
     contract_overrides: dict | None = None,
     fee_discounts: dict | None = None,
+    custom_fees: list[dict] | None = None,
 ) -> dict:
     """
     核心级联引擎：计算所有可自动计算的二类费，按依赖层级 T0→T1→T2。
@@ -5512,7 +5535,12 @@ def _calc_all_fees(
     )
 
     # ============ 总投资 ============
-    initial_total = total_part1 + t0_total + t1_total
+    # 自定义费用合计（影响建管费、预备费基数）
+    _custom_total_all = sum(
+        cf.get("amount_wan", cf.get("金额(万元)", 0))
+        for cf in (custom_fees or [])
+    )
+    initial_total = total_part1 + t0_total + t1_total + _custom_total_all
     total_investment = (
         total_investment_override
         if total_investment_override is not None
@@ -5521,11 +5549,14 @@ def _calc_all_fees(
 
     # ============ Tier 2：需要总投资 ============
 
-    # 建设管理费 — 基数 = 项目总投资 − 建管费自身（财建[2016]504号）
-    # 迭代求解：建管费 = f(总投 − 建管费)
+    # 建设管理费 — 基数 = 项目总投资 − 建管费自身 − 管线切改费 − 建设用地费（财建[2016]504号）
+    # 迭代求解：建管费 = f(总投 − 建管费 − 切改费 − 用地费)
+    _gl_deductions = _match_custom_fee_deductions(custom_fees)
+    _gl_qg = _gl_deductions.get("管线切改费", 0.0)
+    _gl_js = _gl_deductions.get("建设用地费", 0.0)
     _gl_guess = 0.0
     for __ in range(10):
-        _gl_base = total_investment - _gl_guess
+        _gl_base = total_investment - _gl_guess - _gl_qg - _gl_js
         _gl_r = calc_jianshe_guanli(_gl_base)
         _gl_new = _extract_numeric_value(_gl_r)
         if abs(_gl_new - _gl_guess) < 0.001:
@@ -5577,12 +5608,12 @@ def _calc_all_fees(
             yubei_rate = float(yb_rate_match.group(1) or yb_rate_match.group(2))
     if yubei_rate is None:
         yubei_rate = 5.0  # 默认 5%
-    yubei_fee = round((total_part1 + fee_total) * yubei_rate / 100.0, 4)
+    yubei_fee = round((total_part1 + fee_total + _custom_total_all) * yubei_rate / 100.0, 4)
     yubei_rate_source = "用户指定" if (param_overrides.get("预备费率") or re.search(r"预备费.*?(\d+\.?\d*)\s*%|预备费率.*?(\d+\.?\d*)", query)) else "默认"
     yubei_r = {
         "费种": "预备费（基本预备费）",
         "依据": "一类费（工程费用）+ 二类费（工程建设其他费）",
-        "计算公式": f"（{total_part1} + {round(fee_total, 4)}）× {yubei_rate}%（{yubei_rate_source}）",
+        "计算公式": f"（{total_part1} + {round(fee_total + _custom_total_all, 4)}）× {yubei_rate}%（{yubei_rate_source}）",
         "结果(万元)": yubei_fee,
         "预备费率(%)": yubei_rate,
         "预备费率来源": yubei_rate_source,
@@ -5592,10 +5623,10 @@ def _calc_all_fees(
 
     t3_total = yubei_fee
 
-    # 项目总投资 = 一类费 + 二类费 + 预备费
-    project_total = total_part1 + fee_total + yubei_fee
+    # 项目总投资 = 一类费 + 二类费 + 自定义费用 + 预备费
+    project_total = total_part1 + fee_total + _custom_total_all + yubei_fee
     # 静态总投资（不含预备费）
-    static_investment = total_part1 + fee_total
+    static_investment = total_part1 + fee_total + _custom_total_all
 
     # ── 合同费率/合同价覆盖 · 阶段 2（Tier 1/2）──
     # Tier 1/2 费种在全部标准计算完成后覆盖，避免被重算覆写。
@@ -5645,6 +5676,98 @@ def _calc_all_fees(
                 "合同覆盖": True,
             }
 
+    # ── Tier 2 收敛迭代：建管费/可研费/环评费依赖完整项目总投资 ──
+    # 初算时 total_investment 仅含 T0+T1+custom，
+    # 而实际基数应为完整项目总投资（含 T2+预备费），需迭代至稳定。
+    _gl_contracted = "建设管理费" in (contract_overrides or {})
+    _ky_contracted = "可行性研究费" in (contract_overrides or {})
+    _hp_contracted = "环境影响咨询费" in (contract_overrides or {})
+
+    _prev_gl = numerical.get("建设管理费(万元)", 0)
+    for _iter in range(15):
+        # 1) 重算建管费 — base = project_total - 建管费 - 切改费 - 用地费
+        if not _gl_contracted:
+            _gl_base = project_total - _prev_gl - _gl_qg - _gl_js
+            _gl_r2 = calc_jianshe_guanli(_gl_base)
+            _gl_new2 = _extract_numeric_value(_gl_r2)
+        else:
+            _gl_new2 = _prev_gl
+
+        # 2) 重算可行性研究费（base = project_total，已含自定义）
+        if not _ky_contracted:
+            _ky_amount_yi2 = project_total / 10000.0
+            _ky_r2 = calc_keyan(_ky_amount_yi2, service_type="编制可研报告",
+                                industry_coef=keyan_coef, industry_name=keyan_ind)
+            _ky_new2 = _extract_numeric_value(_ky_r2)
+        else:
+            _ky_new2 = numerical.get("可行性研究费(万元)", 0)
+
+        # 3) 重算环境影响咨询费
+        if not _hp_contracted:
+            _hp_r2 = calc_huanping(project_total, service_type="编制报告书",
+                                   industry_coef=hp_ind_coef, industry_name=huanping_ind,
+                                   sensitivity_coef=hp_sens_coef)
+            _hp_new2 = _extract_numeric_value(_hp_r2)
+        else:
+            _hp_new2 = numerical.get("环境影响咨询费(万元)", 0)
+
+        # 4) 更新 T2 / fee_total
+        _t2_new = _gl_new2 + _ky_new2 + _hp_new2
+        _fee_new = t0_total + t1_total + _t2_new
+
+        # 5) 重算预备费（含自定义）
+        _yb_new = round((total_part1 + _fee_new + _custom_total_all) * yubei_rate / 100.0, 4)
+        _project_new = round(total_part1 + _fee_new + _custom_total_all + _yb_new, 4)
+
+        # 6) 检查收敛
+        _gl_conv = _gl_contracted or abs(_gl_new2 - _prev_gl) < 0.001
+        _proj_conv = abs(_project_new - project_total) < 0.005
+        if _gl_conv and _proj_conv:
+            numerical["建设管理费(万元)"] = _gl_new2
+            if not _gl_contracted:
+                raw_results["建设管理费"] = _gl_r2
+            numerical["可行性研究费(万元)"] = _ky_new2
+            if not _ky_contracted:
+                raw_results["可行性研究费"] = _ky_r2
+            numerical["环境影响咨询费(万元)"] = _hp_new2
+            if not _hp_contracted:
+                raw_results["环境影响咨询费"] = _hp_r2
+            numerical["预备费(万元)"] = _yb_new
+            raw_results["预备费"]["结果(万元)"] = _yb_new
+            raw_results["预备费"]["计算公式"] = (
+                f"（{total_part1} + {round(_fee_new + _custom_total_all, 4)}）× "
+                f"{yubei_rate}%（{yubei_rate_source}）"
+            )
+            t2_total = _t2_new
+            t3_total = _yb_new
+            fee_total = _fee_new
+            project_total = _project_new
+            static_investment = total_part1 + _fee_new + _custom_total_all
+            yubei_fee = _yb_new
+            break
+
+        _prev_gl = _gl_new2
+        project_total = _project_new
+    else:
+        # 未收敛（罕见），使用最后一轮的值
+        numerical["建设管理费(万元)"] = _gl_new2
+        if not _gl_contracted:
+            raw_results["建设管理费"] = _gl_r2
+        numerical["可行性研究费(万元)"] = _ky_new2
+        if not _ky_contracted:
+            raw_results["可行性研究费"] = _ky_r2
+        numerical["环境影响咨询费(万元)"] = _hp_new2
+        if not _hp_contracted:
+            raw_results["环境影响咨询费"] = _hp_r2
+        numerical["预备费(万元)"] = _yb_new
+        raw_results["预备费"]["结果(万元)"] = _yb_new
+        t2_total = _t2_new
+        t3_total = _yb_new
+        fee_total = _fee_new
+        project_total = _project_new
+        static_investment = total_part1 + _fee_new + _custom_total_all
+        yubei_fee = _yb_new
+
     # ── skip_fees 过滤：移除用户取消选中的费种 ──
     skipped = dict(_SKIP_FEES)
     if skip_fees:
@@ -5665,8 +5788,8 @@ def _calc_all_fees(
     t2_total = sum(numerical.get(f"{k}(万元)", 0) for k in _t2_keys)
     t3_total = numerical.get("预备费(万元)", 0)
     fee_total = t0_total + t1_total + t2_total
-    project_total = total_part1 + fee_total + t3_total
-    static_investment = total_part1 + fee_total
+    project_total = total_part1 + fee_total + _custom_total_all + t3_total
+    static_investment = total_part1 + fee_total + _custom_total_all
 
     return {
         "建安工程费(万元)": jianan,
@@ -5681,7 +5804,8 @@ def _calc_all_fees(
         "预备费小计(万元)": round(t3_total, 4),
         "总投资(万元)": round(static_investment, 4),
         "项目总投资(万元)": round(project_total, 4),
-        "二类费合计(万元)": round(fee_total, 4),
+        "二类费合计(万元)": round(fee_total + _custom_total_all, 4),
+        "自定义费用合计(万元)": round(_custom_total_all, 4),
         "_层级": dict(_TIER_MAP),
         "_跳过的费种": skipped,
     }

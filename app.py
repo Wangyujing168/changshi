@@ -4577,45 +4577,97 @@ if "pending_fee_selection" in st.session_state:
 
         discounts = ctx.setdefault("fee_discounts", {})
 
-        # 用当前参数快速计算近似值供打折区参考（预览区会做完整后处理并应用折扣）
-        _disc_skip = set(fd["name"] for fd in ctx["fee_defs"]) - new_selected
-        _disc_param = {}
-        _disc_rate_map = {
-            "勘察费": "勘察费费率", "劳动安全卫生评审费": "劳动安全卫生评审费费率",
-            "场地准备费及临时设施费": "场地准备费费率", "工程保险费": "工程保险费费率",
-        }
-        for _fn, _rv in ctx.get("rate_overrides", {}).items():
-            _pk = _disc_rate_map.get(_fn)
-            if _pk:
-                _disc_param[_pk] = float(_rv.replace("%", ""))
-        # 施工图审查费：使用复合键（如 "公建|中型|2.9"）
-        _shencha_rv = ctx.get("rate_overrides", {}).get("施工图审查费", "")
-        if _shencha_rv and "|" in str(_shencha_rv):
-            _parts = str(_shencha_rv).split("|")
-            if len(_parts) >= 3:
-                _disc_param["施工图审查费费率"] = float(_parts[2].replace("%", "").replace("元/m²", ""))
-                _disc_param["施工图审查费项目类型"] = _parts[0]
-                _disc_param["施工图审查费项目规模"] = _parts[1]
-                _shencha_area = ctx.get("_shencha_area")
-                if _shencha_area:
-                    _disc_param["施工图审查费建筑面积"] = float(_shencha_area)
-        _yb_rate = st.session_state.get("cascade_yb_rate")
-        if _yb_rate is not None:
-            _disc_param["预备费率"] = float(_yb_rate)
+        # 优先复用预览区存储的上次计算结果（已含折扣），与预览完全一致
+        _stored_num = ctx.get("_computed_numerical", {})
+        if _stored_num:
+            _disc_numerical = dict(_stored_num)
+        else:
+            # 首次加载：调引擎获取（参数与预览区一致）
+            _disc_skip = set(fd["name"] for fd in ctx["fee_defs"]) - new_selected
+            _disc_param = {}
+            _disc_rate_map = {
+                "勘察费": "勘察费费率", "劳动安全卫生评审费": "劳动安全卫生评审费费率",
+                "场地准备费及临时设施费": "场地准备费费率", "工程保险费": "工程保险费费率",
+            }
+            for _fn, _rv in ctx.get("rate_overrides", {}).items():
+                _pk = _disc_rate_map.get(_fn)
+                if _pk:
+                    _disc_param[_pk] = float(_rv.replace("%", ""))
+            _shencha_rv = ctx.get("rate_overrides", {}).get("施工图审查费", "")
+            if _shencha_rv and "|" in str(_shencha_rv):
+                _parts = str(_shencha_rv).split("|")
+                if len(_parts) >= 3:
+                    _disc_param["施工图审查费费率"] = float(_parts[2].replace("%", "").replace("元/m²", ""))
+                    _disc_param["施工图审查费项目类型"] = _parts[0]
+                    _disc_param["施工图审查费项目规模"] = _parts[1]
+                    _shencha_area = ctx.get("_shencha_area")
+                    if _shencha_area:
+                        _disc_param["施工图审查费建筑面积"] = float(_shencha_area)
+            _yb_rate = st.session_state.get("cascade_yb_rate")
+            if _yb_rate is not None:
+                _disc_param["预备费率"] = float(_yb_rate)
 
-        try:
-            _disc_raw = _calc_all_fees(
-                jianan=ctx["jianan"], shebei=ctx["shebei"],
-                project_type=ctx["project_type"], query=ctx["query"],
-                skip_fees=_disc_skip if _disc_skip else None,
-                coef_overrides=ctx.get("coef_overrides") or None,
-                param_overrides=_disc_param or None,
-                jiaoyi_party=ctx.get("jiaoyi_party"),
-                contract_overrides=ctx.get("contract_overrides") or None,
-            )
-            _disc_numerical = _disc_raw["_数值"]
-        except Exception:
-            _disc_numerical = {}
+            _disc_raw = {}
+            try:
+                _disc_raw = _calc_all_fees(
+                    jianan=ctx["jianan"], shebei=ctx["shebei"],
+                    project_type=ctx["project_type"], query=ctx["query"],
+                    skip_fees=_disc_skip if _disc_skip else None,
+                    coef_overrides=ctx.get("coef_overrides") or None,
+                    param_overrides=_disc_param or None,
+                    jiaoyi_party=ctx.get("jiaoyi_party"),
+                    contract_overrides=ctx.get("contract_overrides") or None,
+                    fee_discounts=ctx.get("fee_discounts") or None,
+                    custom_fees=ctx.get("custom_fees") or None,
+                )
+                _disc_numerical = _disc_raw["_数值"]
+            except Exception:
+                _disc_numerical = {}
+            # 引擎不计算造价咨询费/水土保持补偿费，内联计算
+            if "造价咨询费" in new_selected and "造价咨询费(万元)" not in _disc_numerical:
+                try:
+                    _cc_svcs = ctx.get("service_selections", {}).get("造价咨询费", [])
+                    if _cc_svcs:
+                        _cc_cascade_total = (
+                            _disc_raw.get("项目总投资(万元)", 0) + sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
+                        )
+                        if _is_hebei_project(ctx["query"]):
+                            from fee_engine import calc_cost_consulting_multi_hebei
+                            _cc_prof = (ctx.get("coef_overrides", {}).get("造价咨询费", {}).get("professional_coef", 1.0))
+                            _cc_multi = calc_cost_consulting_multi_hebei(
+                                _cc_svcs, ctx["jianan"], total_investment=_cc_cascade_total if _cc_cascade_total > 0 else None,
+                                professional_coef=_cc_prof, discount_coef=1.0)
+                        else:
+                            from fee_engine import calc_cost_consulting_multi
+                            _cc_multi = calc_cost_consulting_multi(
+                                _cc_svcs, ctx["total_part1"], jianan_only=ctx["jianan"],
+                                total_investment=_cc_cascade_total if _cc_cascade_total > 0 else None)
+                        _disc_numerical["造价咨询费(万元)"] = _cc_multi.get("合计(万元)", 0)
+                except Exception:
+                    pass
+            if "水土保持补偿费" in new_selected and "水土保持补偿费(万元)" not in _disc_numerical:
+                try:
+                    _sb_params = ctx.get("shuibao_comp_params", {})
+                    _sb_land_m2 = 0.0
+                    _sb_unit = _sb_params.get("land_unit", "m²")
+                    _sb_land_input = float(_sb_params.get("land_input", 0.0))
+                    if _sb_unit == "亩":
+                        _sb_land_m2 = round(_sb_land_input * 666.67, 2)
+                    elif _sb_unit == "公顷":
+                        _sb_land_m2 = _sb_land_input * 10000
+                    else:
+                        _sb_land_m2 = _sb_land_input
+                    from fee_engine import calc_shuibao_compensation
+                    _sb_result = calc_shuibao_compensation(
+                        calc_type=_sb_params.get("calc_type", "general"), land_area_m2=_sb_land_m2,
+                        well_count=int(_sb_params.get("well_cnt", 0)),
+                        additional_wells=int(_sb_params.get("add_wells", 0)),
+                        extraction_volume_m3=float(_sb_params.get("extract_vol", 0.0)),
+                        material_volume_m3=float(_sb_params.get("material_vol", 0.0)),
+                        waste_volume_m3=float(_sb_params.get("waste_vol", 0.0)))
+                    _disc_numerical["水土保持补偿费(万元)"] = _sb_result.get("结果(万元)", 0)
+                except Exception:
+                    pass
 
         discounted_total = 0.0
         raw_total = 0.0
@@ -4628,15 +4680,20 @@ if "pending_fee_selection" in st.session_state:
 
         for fd in selected_fee_list:
             fn = fd["name"]
-            val = _disc_numerical.get(f"{fn}(万元)", 0)
-            if val <= 0:
+            _stored_val = _disc_numerical.get(f"{fn}(万元)", 0)
+            if _stored_val <= 0:
                 continue
-            raw_total += val
             is_contract = fn in ctx.get("contract_overrides", {})
             cur_discount = discounts.get(fn, 1.0)
+            # 若使用存储值（已含预览区折扣），反除得到原始值显示
+            if _stored_num and abs(cur_discount - 1.0) >= 0.005 and cur_discount > 0.001:
+                raw_val = round(_stored_val / cur_discount, 4)
+            else:
+                raw_val = _stored_val
+            raw_total += raw_val
             disc_col1, disc_col2 = st.columns([3, 1])
             with disc_col1:
-                label_text = f"**{fd['label']}**（{val:.2f} 万元）"
+                label_text = f"**{fd['label']}**（{raw_val:.2f} 万元）"
                 if is_contract:
                     label_text += " 🔒"
                 st.caption(label_text)
@@ -4655,7 +4712,7 @@ if "pending_fee_selection" in st.session_state:
                         label_visibility="collapsed",
                     )
                     discounts[fn] = new_discount
-            discounted_val = round(val * new_discount, 4)
+            discounted_val = round(raw_val * new_discount, 4)
             discounted_total += discounted_val
             if abs(new_discount - 1.0) >= 0.005:
                 st.caption(f"  → {discounted_val:.2f} 万元")
@@ -4737,6 +4794,7 @@ if "pending_fee_selection" in st.session_state:
                 jiaoyi_party=ctx.get("jiaoyi_party"),
                 contract_overrides=ctx.get("contract_overrides") or None,
                 fee_discounts=ctx.get("fee_discounts") or None,
+                custom_fees=ctx.get("custom_fees") or None,
             )
 
             numerical = preview_raw["_数值"]
@@ -4751,12 +4809,8 @@ if "pending_fee_selection" in st.session_state:
                     hp_ind_coef = hp_coefs.get("industry_coef", 1.0)
                     hp_sens_coef = hp_coefs.get("sensitivity_coef", 1.0)
                     try:
-                        # 环评费基数为项目总投资（已包含自定义费用）
-                        _hp_base = (
-                            preview_raw.get("项目总投资(万元)", 0)
-                            + sum(cf["amount_wan"]
-                                  for cf in ctx.get("custom_fees", []))
-                        )
+                        # 环评费基数为项目总投资（引擎已含自定义费用）
+                        _hp_base = preview_raw.get("项目总投资(万元)", 0)
                         hp_multi = calc_huanping_multi(
                             _hp_base if _hp_base > 0 else ctx["total_part1"],
                             hp_svcs,
@@ -4773,18 +4827,20 @@ if "pending_fee_selection" in st.session_state:
                                    if f"{k}(万元)" in numerical]
                         new_t2 = sum(numerical.get(f"{k}(万元)", 0) for k in t2_keys)
                         preview_raw["T2小计(万元)"] = round(new_t2, 4)
-                        # 重新计算二类费合计
+                        # 重新计算二类费合计（含自定义费用）
+                        _custom_all = sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
                         fee_total_raw = (
                             preview_raw.get("T0小计(万元)", 0)
                             + preview_raw.get("T1小计(万元)", 0)
                             + new_t2
                         )
-                        preview_raw["二类费合计(万元)"] = round(fee_total_raw, 4)
-                        # 重新计算总投资
+                        preview_raw["二类费合计(万元)"] = round(fee_total_raw + _custom_all, 4)
+                        # 重新计算总投资（含自定义费用）
                         preview_raw["总投资(万元)"] = round(
-                            ctx["total_part1"] + fee_total_raw, 4)
+                            ctx["total_part1"] + fee_total_raw + _custom_all, 4)
                         preview_raw["项目总投资(万元)"] = round(
-                            ctx["total_part1"] + fee_total_raw + preview_raw.get("预备费小计(万元)", 0), 4)
+                            ctx["total_part1"] + fee_total_raw + _custom_all
+                            + preview_raw.get("预备费小计(万元)", 0), 4)
                     except Exception:
                         pass  # 失败时保留原始值
 
@@ -4820,12 +4876,14 @@ if "pending_fee_selection" in st.session_state:
                             + preview_raw.get("T1小计(万元)", 0)
                             + new_t2
                         )
-                        preview_raw["二类费合计(万元)"] = round(fee_total_raw, 4)
-                        # 重新计算总投资
+                        _custom_all = sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
+                        preview_raw["二类费合计(万元)"] = round(fee_total_raw + _custom_all, 4)
+                        # 重新计算总投资（含自定义费用）
                         preview_raw["总投资(万元)"] = round(
-                            ctx["total_part1"] + fee_total_raw, 4)
+                            ctx["total_part1"] + fee_total_raw + _custom_all, 4)
                         preview_raw["项目总投资(万元)"] = round(
-                            ctx["total_part1"] + fee_total_raw + preview_raw.get("预备费小计(万元)", 0), 4)
+                            ctx["total_part1"] + fee_total_raw + _custom_all
+                            + preview_raw.get("预备费小计(万元)", 0), 4)
                     except Exception:
                         pass  # 失败时保留原始值
 
@@ -4883,12 +4941,17 @@ if "pending_fee_selection" in st.session_state:
                         from fee_engine import (
                             calc_jianshe_guanli, _extract_numeric_value as _ext_num,
                             _detect_keyan_industry, calc_keyan, JIANSHE_GUANLI_RATES,
-                            _cumulative_tiered,
+                            _cumulative_tiered, _match_custom_fee_deductions,
                         )
                         t1_total = preview_raw.get("T1小计(万元)", 0)
                         # 自定义费用应计入项目总投资（影响建设管理费和概算审核基数）
                         _custom_total = sum(
                             cf["amount_wan"] for cf in ctx.get("custom_fees", []))
+                        # 识别管线切改费/建设用地费，在建设管理费基数中扣除
+                        _gl_deductions = _match_custom_fee_deductions(
+                            ctx.get("custom_fees", []))
+                        _gl_qg = _gl_deductions.get("管线切改费", 0.0)
+                        _gl_js = _gl_deductions.get("建设用地费", 0.0)
                         # 预备费率：直接从 widget 读取
                         _yb_rate = float(st.session_state.get("cascade_yb_rate", 5.0))
                         _prev_total = 0.0
@@ -4904,11 +4967,11 @@ if "pending_fee_selection" in st.session_state:
                                 break
                             _prev_total = _curr_total
 
-                            # 1) 重算建设管理费 — 基数 = 项目总投资 − 建管费自身
+                            # 1) 重算建设管理费 — 基数 = 项目总投资 − 建管费自身 − 切改费 − 用地费
                             #    有合同覆盖的费种保持不变
                             if "建设管理费" not in ctx.get("contract_overrides", {}):
                                 _gl_old = numerical.get("建设管理费(万元)", 0)
-                                _gl_base = _curr_total - _gl_old
+                                _gl_base = _curr_total - _gl_old - _gl_qg - _gl_js
                                 _gl_r = calc_jianshe_guanli(_gl_base)
                                 numerical["建设管理费(万元)"] = _ext_num(_gl_r)
 
@@ -4960,18 +5023,18 @@ if "pending_fee_selection" in st.session_state:
                                 ctx["total_part1"] + _fee_total + _yb
                                 + _custom_total, 4)
 
-                        # 收敛后写入汇总值（不含自定义费用——展示层单独添加）
+                        # 收敛后写入汇总值（含自定义费用）
                         cc_multi = preview_raw["原始结果"]["造价咨询费"]
                         cc_total = numerical["造价咨询费(万元)"]
                         preview_raw["T0小计(万元)"] = round(_new_t0, 4)
                         preview_raw["T2小计(万元)"] = round(_new_t2, 4)
-                        preview_raw["二类费合计(万元)"] = round(_fee_total, 4)
+                        preview_raw["二类费合计(万元)"] = round(_fee_total + _custom_total, 4)
                         preview_raw["总投资(万元)"] = round(
-                            ctx["total_part1"] + _fee_total, 4)
+                            ctx["total_part1"] + _fee_total + _custom_total, 4)
                         preview_raw["预备费小计(万元)"] = round(_yb, 4)
                         numerical["预备费(万元)"] = _yb
                         preview_raw["项目总投资(万元)"] = round(
-                            ctx["total_part1"] + _fee_total + _yb, 4)
+                            ctx["total_part1"] + _fee_total + _custom_total + _yb, 4)
                     except Exception as _e:
                         import traceback
                         print(f"[CC convergence ERROR] {type(_e).__name__}: {_e}", flush=True)
@@ -5099,12 +5162,21 @@ if "pending_fee_selection" in st.session_state:
             # ── 汇总指标 ──
             st.markdown("---")
             fee_total_raw = preview_raw.get("二类费合计(万元)", 0)
-            yb_total = preview_raw.get("预备费小计(万元)", 0)
             pt = preview_raw.get("项目总投资(万元)", 0)
 
-            # 引擎已应用 fee_discounts 到 Tier 0 并级联影响依赖费种
-            fee_total_with_custom = round(fee_total_raw + custom_total + sb_fee_wan, 4)
-            project_total_with_custom = round(pt + custom_total + sb_fee_wan, 4)
+            # 二类费合计 = 引擎二类费（含自定义）+ 水土保持补偿费
+            fee_total_with_custom = round(fee_total_raw + sb_fee_wan, 4)
+
+            # 预备费重算：基数含水土保持补偿费（属于二类费）
+            _yb_rate = float(st.session_state.get("cascade_yb_rate", 5.0))
+            _yb_ctr = (ctx.get("contract_overrides") or {}).get("预备费", {})
+            if _yb_ctr and _yb_ctr.get("type") == "price":
+                yb_total = preview_raw.get("预备费小计(万元)", 0)
+            else:
+                yb_total = round((ctx["total_part1"] + fee_total_with_custom) * _yb_rate / 100.0, 4)
+
+            # 项目总投资 = 一类费 + 二类费 + 预备费
+            project_total_with_custom = round(ctx["total_part1"] + fee_total_with_custom + yb_total, 4)
 
             n_cols = 4
             col1, col2, col3, col4 = st.columns(n_cols)
@@ -5254,7 +5326,7 @@ if "pending_fee_selection" in st.session_state:
                 if yb_val > 0:
                     yb_text = f"\n\n**预备费（基本预备费）**：{yb_val:.2f} 万元"
 
-                project_total_val = (preview["project_total_with_custom"] if preview else 0) + sb_fee_wan
+                project_total_val = preview["project_total_with_custom"] if preview else 0
 
                 final_response = (
                     f"## 多费种联算结果\n\n"
