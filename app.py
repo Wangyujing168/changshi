@@ -5178,14 +5178,11 @@ if "pending_fee_selection" in st.session_state:
             # 项目总投资 = 一类费 + 二类费 + 预备费
             project_total_with_custom = round(ctx["total_part1"] + fee_total_with_custom + yb_total, 4)
 
-            n_cols = 4
-            col1, col2, col3, col4 = st.columns(n_cols)
+            n_cols = 3
+            col1, col2, col3 = st.columns(n_cols)
             col1.metric("二类费合计", f"{fee_total_with_custom:.2f} 万元")
             col2.metric("预备费", f"{yb_total:.2f} 万元")
             col3.metric("项目总投资", f"{project_total_with_custom:.2f} 万元")
-            extra_label = "水保补偿费" if sb_fee_wan > 0 else "自定义费小计"
-            extra_val = f"{sb_fee_wan:.4f}" if sb_fee_wan > 0 else f"{custom_total:.2f}"
-            col4.metric(extra_label, f"{extra_val} 万元")
 
             # 存储预览结果供确认按钮使用
             ctx["preview"] = {
