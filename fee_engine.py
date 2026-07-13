@@ -310,7 +310,7 @@ SHIGONG_SHENCHA_RATES: dict[str, dict[str, float]] = {
     "工业": {"大型": 3.2, "中型": 3.0, "小型": 2.8},
     "市政": {"大型": 4.8, "中型": 4.0, "小型": 3.2},
 }
-# 河北省施工图审查费（冀价行费[2018]57号 / 冀建质[2017]1号）
+# 河北省施工图审查费（发改价格〔2011〕534号 / 冀建质[2017]1号）
 # 除有特殊规定外，按（勘察费+设计费）× 6.5%
 HEBEI_SHENCHA_RATE = 6.5
 # 幕墙/深基坑等单项：1.6‰，最低 1000 元
@@ -1978,7 +1978,7 @@ def calc_shigong_shencha(
     施工图审查费。
 
     默认依据：津价管[2011]46号 + 建市[2007]86号
-    河北省项目：冀价行费[2018]57号 / 冀建质[2017]1号
+    河北省项目：发改价格〔2011〕534号 / 冀建质[2017]1号
       —（勘察费+设计费）× 6.5%
 
     住宅类：按建筑面积 × 单价（元/m²）
@@ -2021,14 +2021,14 @@ def calc_shigong_shencha(
                     {"步骤": "计算设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee_only:.2f} 万元"},
                     {"步骤": "计算勘察费", "公式": f"《市政工程设计概算编制办法》百分比法（{kancha_rate_desc}）", "结果": f"{kancha_fee_mid:.2f} 万元"},
                     {"步骤": "计算勘察设计费基数", "公式": f"设计费 + 勘察费 = {sheji_fee_only:.2f} + {kancha_fee_mid:.2f}", "结果": f"{sheji_fee:.2f} 万元"},
-                    {"步骤": "应用河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
+                    {"步骤": "应用河北省费率", "公式": f"发改价格〔2011〕534号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
                     {"步骤": "计算审查费", "公式": f"{sheji_fee:.2f} 万元 × {hebei_rate}%", "结果": f"{fee:.2f} 万元"},
                 ]
             else:
                 steps = [
                     {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
                     {"步骤": "计算勘察设计费", "公式": "设计费（计价格[2002]10号）+ 勘察费（概算编制办法百分比法）", "结果": f"{sheji_fee:.2f} 万元"},
-                    {"步骤": "应用河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
+                    {"步骤": "应用河北省费率", "公式": f"发改价格〔2011〕534号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
                     {"步骤": "计算审查费", "公式": f"{sheji_fee:.2f} 万元 × {hebei_rate}%", "结果": f"{fee:.2f} 万元"},
                 ]
         else:
@@ -2037,13 +2037,13 @@ def calc_shigong_shencha(
             params = {"计费基数(万元)": amount, "费率(%)": hebei_rate, "适用地区": "河北省"}
             steps = [
                 {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
-                {"步骤": "查找河北省费率", "公式": f"冀价行费[2018]57号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
+                {"步骤": "查找河北省费率", "公式": f"发改价格〔2011〕534号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
                 {"步骤": "计算审查费", "公式": f"{amount:.0f} 万元 × {hebei_rate}%", "结果": f"{fee:.2f} 万元"},
             ]
         return {
             "费种": f"施工图审查费（河北省）",
-            "依据": "河北省物价局、河北省住房和城乡建设厅《关于规范施工图审查收费有关问题的通知》"
-                    "（冀价行费[2018]57号）\n"
+            "依据": "国家发展改革委《关于降低部分建设项目收费标准规范收费行为等有关问题的通知》"
+                    "（发改价格〔2011〕534号）\n"
                     "河北省住房和城乡建设厅《关于进一步规范施工图审查工作的通知》"
                     "（冀建质[2017]1号）",
             "计算公式": f"审查费 = (勘察费+设计费) × {hebei_rate}%",
@@ -5868,38 +5868,56 @@ def _build_fee_selection_meta(
         if has_rates:
             entry["rate_config"] = _get_rate_config_simple(
                 fee_name, engine_result, query)
-            # 施工图审查费：自定义费率下拉（含公建/工业/市政 + 住宅按面积计费）
+            # 施工图审查费：自定义费率下拉（河北6.5% / 天津津价管46号）
             if fee_name == "施工图审查费" and entry["rate_config"] is None:
                 rate_opts = []
-                # 公建/工业/市政 — 按勘察设计费百分比
-                for r_pt, sizes in SHIGONG_SHENCHA_RATES.items():
-                    for r_sz, r_val in sizes.items():
-                        rate_opts.append({
-                            "key": f"{r_pt}|{r_sz}|{r_val}",
-                            "rate": f"{r_val}%",
-                            "fee_wan": 0,  # 预览时根据基数动态计算
-                            "label": f"{r_pt} · {r_sz} — {r_val}%",
-                            "ptype": r_pt,
-                            "size": r_sz,
-                            "billing": "rate",  # 按费率计费
-                        })
-                # 住宅 — 按建筑面积 × 单价（元/m²）
-                for r_sz, r_val in SHIGONG_SHENCHA_ZHUZHAI.items():
+                _hebei = _is_hebei_project(query)
+                if _hebei:
+                    # 河北省：发改价格〔2011〕534号，统一 6.5%
                     rate_opts.append({
-                        "key": f"住宅|{r_sz}|{r_val}",
-                        "rate": f"{r_val} 元/m²",
+                        "key": f"河北|—|{HEBEI_SHENCHA_RATE}",
+                        "rate": f"{HEBEI_SHENCHA_RATE}%",
                         "fee_wan": 0,
-                        "label": f"住宅 · {r_sz} — {r_val} 元/m²",
-                        "ptype": "住宅",
-                        "size": r_sz,
-                        "billing": "area",  # 按面积计费
+                        "label": f"河北省 — {HEBEI_SHENCHA_RATE}%（发改价格〔2011〕534号）",
+                        "ptype": "河北",
+                        "size": "—",
+                        "billing": "rate",
                     })
+                    _default_key = f"河北|—|{HEBEI_SHENCHA_RATE}"
+                    _basis = "发改价格〔2011〕534号"
+                else:
+                    # 天津/默认：津价管[2011]46号
+                    # 公建/工业/市政 — 按勘察设计费百分比
+                    for r_pt, sizes in SHIGONG_SHENCHA_RATES.items():
+                        for r_sz, r_val in sizes.items():
+                            rate_opts.append({
+                                "key": f"{r_pt}|{r_sz}|{r_val}",
+                                "rate": f"{r_val}%",
+                                "fee_wan": 0,
+                                "label": f"{r_pt} · {r_sz} — {r_val}%",
+                                "ptype": r_pt,
+                                "size": r_sz,
+                                "billing": "rate",
+                            })
+                    # 住宅 — 按建筑面积 × 单价（元/m²）
+                    for r_sz, r_val in SHIGONG_SHENCHA_ZHUZHAI.items():
+                        rate_opts.append({
+                            "key": f"住宅|{r_sz}|{r_val}",
+                            "rate": f"{r_val} 元/m²",
+                            "fee_wan": 0,
+                            "label": f"住宅 · {r_sz} — {r_val} 元/m²",
+                            "ptype": "住宅",
+                            "size": r_sz,
+                            "billing": "area",
+                        })
+                    _default_key = "公建|中型|2.9"
+                    _basis = "津价管[2011]46号"
                 entry["rate_config"] = {
                     "param_key": "施工图审查费费率",
                     "rate_options": rate_opts,
-                    "default_key": "公建|中型|2.9",  # 默认公建中型 2.9%
-                    "use_composite_key": True,  # 使用复合键（费率值不唯一）
-                    "basis": "津价管[2011]46号",
+                    "default_key": _default_key,
+                    "use_composite_key": True,
+                    "basis": _basis,
                 }
 
         # 为环评费 / 可行性研究费构建服务类型选项

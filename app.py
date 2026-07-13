@@ -23,6 +23,7 @@ _POLICY_URLS: dict[str, str] = {
     # 河北省
     "冀建市研[2017]2号": "https://www.baidu.com/s?wd=冀建市研[2017]2号+工程造价咨询服务收费管理暂行办法",
     "冀价行费[2018]57号": "https://www.baidu.com/s?wd=冀价行费[2018]57号+施工图审查费",
+    "发改价格〔2011〕534号": "https://www.baidu.com/s?wd=发改价格〔2011〕534号+降低部分建设项目收费标准",
     # 天津市
     "津价房地[2008]136号": "https://www.baidu.com/s?wd=津价房地[2008]136号+建设工程造价咨询服务",
     "津价管[2011]46号": "https://www.baidu.com/s?wd=津价管[2011]46号+施工图设计文件审查",
@@ -1879,30 +1880,41 @@ if "pending_dependent_fee" in st.session_state:
 
             # ── 施工图审查费：审查费率下拉选择 ──
             if ctx.get("target_fee") == "施工图审查费":
-                from fee_engine import SHIGONG_SHENCHA_RATES, SHIGONG_SHENCHA_ZHUZHAI
+                from fee_engine import (SHIGONG_SHENCHA_RATES, SHIGONG_SHENCHA_ZHUZHAI,
+                                        _is_hebei_project, HEBEI_SHENCHA_RATE)
+                _query = ctx.get("query", "")
                 pt = base_params.get("project_type_shencha", "公建")
                 size = base_params.get("size", "中型")
 
-                # 构建所有可选费率（公建/工业/市政百分比 + 住宅元/m²）
-                rate_options: list[tuple[str, str, str, str, str]] = []
-                for r_pt, sizes in SHIGONG_SHENCHA_RATES.items():
-                    for r_sz, r_val in sizes.items():
-                        label = f"{r_pt} · {r_sz} — {r_val}%"
-                        key = f"{r_pt}|{r_sz}|{r_val}"
-                        rate_options.append((label, key, str(r_val), r_pt, r_sz))
-                # 住宅类：按建筑面积 × 单价（元/m²）
-                for r_sz, r_val in SHIGONG_SHENCHA_ZHUZHAI.items():
-                    label = f"住宅 · {r_sz} — {r_val} 元/m²"
-                    key = f"住宅|{r_sz}|{r_val}"
-                    rate_options.append((label, key, str(r_val), "住宅", r_sz))
+                if _is_hebei_project(_query):
+                    # 河北省：发改价格〔2011〕534号，统一 6.5%
+                    rate_options = [
+                        (f"河北省 — {HEBEI_SHENCHA_RATE}%（发改价格〔2011〕534号）",
+                         f"河北|—|{HEBEI_SHENCHA_RATE}",
+                         str(HEBEI_SHENCHA_RATE), "河北", "—"),
+                    ]
+                    default_idx = 0
+                else:
+                    # 天津/默认：津价管[2011]46号
+                    rate_options: list[tuple[str, str, str, str, str]] = []
+                    for r_pt, sizes in SHIGONG_SHENCHA_RATES.items():
+                        for r_sz, r_val in sizes.items():
+                            label = f"{r_pt} · {r_sz} — {r_val}%"
+                            key = f"{r_pt}|{r_sz}|{r_val}"
+                            rate_options.append((label, key, str(r_val), r_pt, r_sz))
+                    # 住宅类：按建筑面积 × 单价（元/m²）
+                    for r_sz, r_val in SHIGONG_SHENCHA_ZHUZHAI.items():
+                        label = f"住宅 · {r_sz} — {r_val} 元/m²"
+                        key = f"住宅|{r_sz}|{r_val}"
+                        rate_options.append((label, key, str(r_val), "住宅", r_sz))
 
-                # 默认选中当前检测到的项目和规模
-                default_key = f"{pt}|{size}|{SHIGONG_SHENCHA_RATES.get(pt, {}).get(size, SHIGONG_SHENCHA_ZHUZHAI.get(size, 1.7))}"
-                default_idx = 0
-                for i, (_, rk, _, _, _) in enumerate(rate_options):
-                    if rk == default_key:
-                        default_idx = i
-                        break
+                    # 默认选中当前检测到的项目和规模
+                    default_key = f"{pt}|{size}|{SHIGONG_SHENCHA_RATES.get(pt, {}).get(size, SHIGONG_SHENCHA_ZHUZHAI.get(size, 1.7))}"
+                    default_idx = 0
+                    for i, (_, rk, _, _, _) in enumerate(rate_options):
+                        if rk == default_key:
+                            default_idx = i
+                            break
 
                 st.markdown("#### 📊 审查费率")
                 st.caption("选择项目类型和规模对应的审查费率：")
@@ -1935,6 +1947,9 @@ if "pending_dependent_fee" in st.session_state:
                              "大型 1.9 元/m² / 中型 1.7 元/m² / 小型 1.3 元/m²",
                     )
                     ctx["shencha_area_override"] = shencha_area_sf
+                elif sel_pt == "河北":
+                    st.info(f"当前选择：**河北省 — {sel_rate}%**\n\n"
+                            f"依据：发改价格〔2011〕534号，计费基数 = 勘察费 + 设计费")
                 else:
                     st.info(f"当前选择：**{sel_pt} · {sel_sz}** → **{sel_rate}%**")
                 st.markdown("---")
@@ -3930,7 +3945,7 @@ if "pending_fee_selection" in st.session_state:
                 use_composite = config.get("use_composite_key", False)
 
                 if use_composite:
-                    # ── 施工图审查费：两级选择（项目类型 → 规模），费率值不唯一 ──
+                    # ── 施工图审查费：项目类型 → 规模（河北单费率 / 天津多费率）──
                     default_key = config.get("default_key", "")
                     current_key = rate_overrides.get(fee_name, default_key)
 
@@ -3940,11 +3955,11 @@ if "pending_fee_selection" in st.session_state:
                     _cur_size = _cur_parts[1] if len(_cur_parts) >= 2 else "中型"
 
                     # 按项目类型分组
-                    from fee_engine import SHIGONG_SHENCHA_RATES, SHIGONG_SHENCHA_ZHUZHAI
-                    _all_ptypes = list(SHIGONG_SHENCHA_RATES.keys()) + ["住宅"]
                     _size_map: dict[str, dict[str, dict]] = {}
                     for ro in rate_options:
                         _size_map.setdefault(ro["ptype"], {})[ro["size"]] = ro
+                    # 从 rate_options 动态构建项目类型列表（支持河北/天津）
+                    _all_ptypes = list(dict.fromkeys(ro["ptype"] for ro in rate_options))
 
                     with st.expander(
                         f"{fd['label']} — 费率选择",
@@ -3954,7 +3969,11 @@ if "pending_fee_selection" in st.session_state:
                             f"<small>📜 依据：{_basis_with_links(config.get('basis', ''))}</small>",
                             unsafe_allow_html=True,
                         )
-                        st.info("💡 请选择项目类型和规模，费率将自动匹配。")
+                        _is_hebei_sel = _cur_ptype == "河北"
+                        if _is_hebei_sel:
+                            st.info("📍 河北省项目，依据发改价格〔2011〕534号，审查费率统一为 6.5%。")
+                        else:
+                            st.info("💡 请选择项目类型和规模，费率将自动匹配。")
 
                         # Step 1: 选择项目类型
                         _ptype_labels = {
@@ -3962,6 +3981,7 @@ if "pending_fee_selection" in st.session_state:
                             "工业": "工业类",
                             "市政": "市政类（道路/桥梁/管网等）",
                             "住宅": "住宅类（按建筑面积计费）",
+                            "河北": "河北省（发改价格〔2011〕534号）",
                         }
                         try:
                             _ptype_idx = _all_ptypes.index(_cur_ptype)
@@ -3975,20 +3995,24 @@ if "pending_fee_selection" in st.session_state:
                             key=f"cascade_shencha_ptype",
                         )
 
-                        # Step 2: 选择规模（根据类型过滤）
+                        # Step 2: 选择规模（根据类型过滤；河北无规模区分）
                         _sizes = list(_size_map.get(sel_ptype, {}).keys())
+                        _is_hebei_type = sel_ptype == "河北"
                         if _cur_ptype != sel_ptype:
-                            _cur_size = _sizes[1] if len(_sizes) > 1 else _sizes[0]  # 默认中型
+                            _cur_size = _sizes[0] if _sizes else "中型"
                         try:
                             _size_idx = _sizes.index(_cur_size)
                         except ValueError:
-                            _size_idx = 1 if len(_sizes) > 1 else 0
-                        sel_size = st.selectbox(
-                            "项目规模",
-                            _sizes,
-                            index=_size_idx,
-                            key=f"cascade_shencha_size",
-                        )
+                            _size_idx = 0
+                        if not _is_hebei_type:
+                            sel_size = st.selectbox(
+                                "项目规模",
+                                _sizes,
+                                index=_size_idx,
+                                key=f"cascade_shencha_size",
+                            )
+                        else:
+                            sel_size = _sizes[_size_idx] if _sizes else "—"
 
                         # 构建选中项
                         sel_ro = _size_map.get(sel_ptype, {}).get(sel_size)

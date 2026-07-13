@@ -1,0 +1,4 @@
+fee_type: 造价咨询费
+name: 造价咨询费（编制施工图预算）
+result: 1.0094 万元
+is_coef_selectable: None
