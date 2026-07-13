@@ -839,13 +839,13 @@ def calc_cost_consulting_multi(
             })
         except (ValueError, KeyError) as e:
             warnings.append(f"⚠️ **{svc}**：{e}")
-    total = round(total, 2)
-    desc = f"共 {len(details)} 项服务，合计 **{total} 万元**"
+    total = round(total, 4)
+    desc = f"共 {len(details)} 项服务，合计 **{total:.2f} 万元**"
     if warnings:
         desc += "\n\n" + "\n\n".join(warnings)
     return {
         "明细": details,
-        "合计(万元)": total,
+        "合计(万元)": round(total, 4),
         "参数": {
             "工程费用(万元)": round(base_amount_wan, 2),
             "建安工程费用(万元)": round(jianan_only, 2) if jianan_only else None,
@@ -1000,7 +1000,7 @@ def _cumulative_tiered(
         if tier_amount <= 0:
             prev_limit = limit
             continue
-        tier_fee = round(tier_amount * rate / 100.0, 2)
+        tier_fee = round(tier_amount * rate / 100.0, 4)
         total += tier_fee
         steps.append({
             "区间": f"{prev_limit:.0f}~{limit:.0f}" if limit != float("inf") else f">{prev_limit:.0f}",
@@ -1010,7 +1010,7 @@ def _cumulative_tiered(
         })
         prev_limit = limit
 
-    return round(total, 2), steps
+    return round(total, 4), steps
 
 
 def _bracket_fixed(
