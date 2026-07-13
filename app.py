@@ -4911,6 +4911,37 @@ if "pending_fee_selection" in st.session_state:
                     except Exception:
                         pass  # 失败时保留原始值
 
+            # ── 水土保持补偿费（独立于 CC，需在迭代前计算以纳入建管费和预备费基数）──
+            sb_fee_wan = 0.0
+            if "水土保持补偿费" in new_selected:
+                sb_params = ctx.get("shuibao_comp_params", {})
+                sb_type = sb_params.get("calc_type", "general")
+                try:
+                    from fee_engine import calc_shuibao_compensation
+                    _sb_land_m2 = 0.0
+                    _sb_unit = sb_params.get("land_unit", "m²")
+                    _sb_land_input = float(sb_params.get("land_input", 0.0))
+                    if _sb_unit == "亩":
+                        _sb_land_m2 = round(_sb_land_input * 666.67, 2)
+                    elif _sb_unit == "公顷":
+                        _sb_land_m2 = _sb_land_input * 10000
+                    else:
+                        _sb_land_m2 = _sb_land_input
+                    sb_result = calc_shuibao_compensation(
+                        calc_type=sb_type,
+                        land_area_m2=_sb_land_m2,
+                        well_count=int(sb_params.get("well_cnt", 0)),
+                        additional_wells=int(sb_params.get("add_wells", 0)),
+                        extraction_volume_m3=float(sb_params.get("extract_vol", 0.0)),
+                        material_volume_m3=float(sb_params.get("material_vol", 0.0)),
+                        waste_volume_m3=float(sb_params.get("waste_vol", 0.0)),
+                    )
+                    sb_fee_wan = sb_result.get("结果(万元)", 0)
+                    numerical["水土保持补偿费(万元)"] = sb_fee_wan
+                    preview_raw["原始结果"]["水土保持补偿费"] = sb_result
+                except Exception:
+                    pass
+
             # ── 造价咨询费多服务类型计算 ──
             if "造价咨询费" in new_selected and "造价咨询费" not in ctx.get("contract_overrides", {}):
                 cc_svcs = ctx.get("service_selections", {}).get("造价咨询费", [])
@@ -4961,7 +4992,7 @@ if "pending_fee_selection" in st.session_state:
 
                         # ── 迭代收敛：建设管理费 ↔ 造价咨询费(概算审核等) ──
                         # 建设管理费和概算审核都依赖项目总投资，形成循环依赖，
-                        # 需要迭代至收敛（阈值 0.01 万元）
+                        # 需要迭代至收敛（阈值 0.005 万元）
                         from fee_engine import (
                             calc_jianshe_guanli, _extract_numeric_value as _ext_num,
                             _detect_keyan_industry, calc_keyan, JIANSHE_GUANLI_RATES,
@@ -4979,16 +5010,17 @@ if "pending_fee_selection" in st.session_state:
                         # 预备费率：直接从 widget 读取
                         _yb_rate = float(st.session_state.get("cascade_yb_rate", 5.0))
                         _prev_total = 0.0
+                        # 含自定义费用 + 水保费（均为二类费）
                         _curr_total = round(
                             ctx["total_part1"] + new_t0 + t1_total
-                            + preview_raw.get("T2小计(万元)", 0) + _custom_total, 4)
+                            + preview_raw.get("T2小计(万元)", 0) + _custom_total
+                            + sb_fee_wan, 4)
                         # 先用当前 total 计算预备费，得到完整项目总投资
                         _yb = round((_curr_total) * _yb_rate / 100.0, 4)
                         _curr_total = round(_curr_total + _yb, 4)
 
-                        for _iter_i in range(20):
-                            if abs(_curr_total - _prev_total) < 0.01:
-                                break
+                        for _iter_i in range(25):
+                            # 保存本轮起始 total 用于敛散判断
                             _prev_total = _curr_total
 
                             # 1) 重算建设管理费 — 基数 = 项目总投资 − 建管费自身 − 切改费 − 用地费
@@ -5038,65 +5070,53 @@ if "pending_fee_selection" in st.session_state:
                             _new_t0 = sum(
                                 numerical.get(f"{k}(万元)", 0) for k in t0_keys)
 
-                            # 6) 重算汇总（含自定义费用）
+                            # 6) 重算汇总（含自定义费用 + 水保费）
                             _fee_total = _new_t0 + t1_total + _new_t2
                             _yb = round(
-                                (ctx["total_part1"] + _fee_total + _custom_total)
+                                (ctx["total_part1"] + _fee_total + _custom_total
+                                 + sb_fee_wan)
                                 * _yb_rate / 100.0, 4)
                             _curr_total = round(
                                 ctx["total_part1"] + _fee_total + _yb
-                                + _custom_total, 4)
+                                + _custom_total + sb_fee_wan, 4)
 
-                        # 收敛后写入汇总值（含自定义费用）
+                            # 7) 收敛判定（在重算后进行，确保最后一轮结果基于收敛 total）
+                            if abs(_curr_total - _prev_total) < 0.005:
+                                break
+
+                        # 收敛后写入汇总值（含自定义费用 + 水保费）
                         cc_multi = preview_raw["原始结果"]["造价咨询费"]
                         cc_total = numerical["造价咨询费(万元)"]
                         preview_raw["T0小计(万元)"] = round(_new_t0, 4)
                         preview_raw["T2小计(万元)"] = round(_new_t2, 4)
-                        preview_raw["二类费合计(万元)"] = round(_fee_total + _custom_total, 4)
+                        preview_raw["二类费合计(万元)"] = round(
+                            _fee_total + _custom_total + sb_fee_wan, 4)
                         preview_raw["总投资(万元)"] = round(
-                            ctx["total_part1"] + _fee_total + _custom_total, 4)
+                            ctx["total_part1"] + _fee_total + _custom_total
+                            + sb_fee_wan, 4)
                         preview_raw["预备费小计(万元)"] = round(_yb, 4)
                         numerical["预备费(万元)"] = _yb
                         preview_raw["项目总投资(万元)"] = round(
-                            ctx["total_part1"] + _fee_total + _custom_total + _yb, 4)
+                            ctx["total_part1"] + _fee_total + _custom_total
+                            + sb_fee_wan + _yb, 4)
                     except Exception as _e:
                         import traceback
                         print(f"[CC convergence ERROR] {type(_e).__name__}: {_e}", flush=True)
                         traceback.print_exc()
                         pass  # 失败时保留原始值
 
-            # ── 水土保持补偿费计算 ──
-            sb_fee_wan = 0.0
-            if "水土保持补偿费" in new_selected:
-                sb_params = ctx.get("shuibao_comp_params", {})
-                sb_type = sb_params.get("calc_type", "general")
-                try:
-                    from fee_engine import calc_shuibao_compensation
-
-                    _sb_land_m2 = 0.0
-                    _sb_unit = sb_params.get("land_unit", "m²")
-                    _sb_land_input = float(sb_params.get("land_input", 0.0))
-                    if _sb_unit == "亩":
-                        _sb_land_m2 = round(_sb_land_input * 666.67, 2)
-                    elif _sb_unit == "公顷":
-                        _sb_land_m2 = _sb_land_input * 10000
-                    else:
-                        _sb_land_m2 = _sb_land_input
-
-                    sb_result = calc_shuibao_compensation(
-                        calc_type=sb_type,
-                        land_area_m2=_sb_land_m2,
-                        well_count=int(sb_params.get("well_cnt", 0)),
-                        additional_wells=int(sb_params.get("add_wells", 0)),
-                        extraction_volume_m3=float(sb_params.get("extract_vol", 0.0)),
-                        material_volume_m3=float(sb_params.get("material_vol", 0.0)),
-                        waste_volume_m3=float(sb_params.get("waste_vol", 0.0)),
-                    )
-                    sb_fee_wan = sb_result.get("结果(万元)", 0)
-                    numerical["水土保持补偿费(万元)"] = sb_fee_wan
-                    preview_raw["原始结果"]["水土保持补偿费"] = sb_result
-                except Exception:
-                    pass  # 参数不全则跳过
+            # ── 若造价咨询费未跑迭代，需手动将水保费补入汇总值 ──
+            if sb_fee_wan > 0:
+                _cc_iter_ran = ("造价咨询费" in new_selected
+                                and "造价咨询费" not in ctx.get("contract_overrides", {})
+                                and bool(ctx.get("service_selections", {}).get("造价咨询费", [])))
+                if not _cc_iter_ran:
+                    preview_raw["二类费合计(万元)"] = round(
+                        preview_raw.get("二类费合计(万元)", 0) + sb_fee_wan, 4)
+                    preview_raw["总投资(万元)"] = round(
+                        preview_raw.get("总投资(万元)", 0) + sb_fee_wan, 4)
+                    preview_raw["项目总投资(万元)"] = round(
+                        preview_raw.get("项目总投资(万元)", 0) + sb_fee_wan, 4)
 
             # ── 对非 T0 费种统一补应用折扣（T0 已由引擎应用）──
             _final_disc = ctx.get("fee_discounts", {})
@@ -5125,7 +5145,8 @@ if "pending_fee_selection" in st.session_state:
                 preview_raw["T0小计(万元)"] = round(_nt0, 4)
                 preview_raw["T1小计(万元)"] = round(_nt1, 4)
                 preview_raw["T2小计(万元)"] = round(_nt2, 4)
-                preview_raw["二类费合计(万元)"] = round(_nt0 + _nt1 + _nt2 + _nt_custom, 4)
+                preview_raw["二类费合计(万元)"] = round(
+                    _nt0 + _nt1 + _nt2 + _nt_custom + sb_fee_wan, 4)
 
             # ── 存储计算结果供打折区和预览区共用 ──
             ctx["_computed_raw"] = preview_raw
@@ -5177,10 +5198,10 @@ if "pending_fee_selection" in st.session_state:
                             unsafe_allow_html=True,
                         )
 
-            # 预备费（含费率输入）——先同步引擎值为含sb费的完整预备费
+            # 预备费（含费率输入）——二类费合计已含水保费，预备费基数完整
             _yb_rate_disp = float(st.session_state.get("cascade_yb_rate", 5.0))
             _yb_ctr_disp = (ctx.get("contract_overrides") or {}).get("预备费", {})
-            _fee_for_yb = round(preview_raw.get("二类费合计(万元)", 0) + sb_fee_wan, 4)
+            _fee_for_yb = preview_raw.get("二类费合计(万元)", 0)
             if _yb_ctr_disp and _yb_ctr_disp.get("type") == "price":
                 yb_val = numerical.get("预备费(万元)")
             else:
@@ -5224,8 +5245,8 @@ if "pending_fee_selection" in st.session_state:
             fee_total_raw = preview_raw.get("二类费合计(万元)", 0)
             pt = preview_raw.get("项目总投资(万元)", 0)
 
-            # 二类费合计 = 引擎二类费（含自定义）+ 水土保持补偿费
-            fee_total_with_custom = round(fee_total_raw + sb_fee_wan, 4)
+            # 二类费合计（已含自定义费用 + 水土保持补偿费，迭代中已汇入）
+            fee_total_with_custom = fee_total_raw
             # 预备费已在上方统一计算（yb_val），直接复用
             yb_total = yb_val if yb_val is not None else preview_raw.get("预备费小计(万元)", 0)
             # 项目总投资 = 一类费 + 二类费 + 预备费
@@ -5476,6 +5497,11 @@ if prompt:
 
                     # 始终用最新代码重建 fee_defs（支持热更新 service_config）
                     fee_defs = _build_fee_selection_meta(raw, prompt)
+                    # 🔧 DEBUG
+                    for _fd in fee_defs:
+                        if _fd["name"] == "施工图审查费":
+                            _rc = _fd.get("rate_config") or {}
+                            print(f"DEBUG _build_fee_selection_meta: query={prompt[:50]} basis={_rc.get('basis')} default={_rc.get('default_key')} n_opts={len(_rc.get('rate_options',[]))}")
 
                     if "pending_fee_selection" not in st.session_state:
                         # 首次：初始化交互式费种选择面板

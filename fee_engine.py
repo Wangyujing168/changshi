@@ -5685,6 +5685,10 @@ def _calc_all_fees(
 
     _prev_gl = numerical.get("建设管理费(万元)", 0)
     for _iter in range(15):
+        # 保存本轮起始值用于敛散判断
+        _iter_start_proj = project_total
+        _iter_start_gl = _prev_gl
+
         # 1) 重算建管费 — base = project_total - 建管费 - 切改费 - 用地费
         if not _gl_contracted:
             _gl_base = project_total - _prev_gl - _gl_qg - _gl_js
@@ -5719,9 +5723,9 @@ def _calc_all_fees(
         _yb_new = round((total_part1 + _fee_new + _custom_total_all) * yubei_rate / 100.0, 4)
         _project_new = round(total_part1 + _fee_new + _custom_total_all + _yb_new, 4)
 
-        # 6) 检查收敛
-        _gl_conv = _gl_contracted or abs(_gl_new2 - _prev_gl) < 0.001
-        _proj_conv = abs(_project_new - project_total) < 0.005
+        # 6) 检查收敛（基于本轮起始值与新计算值的差异）
+        _gl_conv = _gl_contracted or abs(_gl_new2 - _iter_start_gl) < 0.001
+        _proj_conv = abs(_project_new - _iter_start_proj) < 0.005
         if _gl_conv and _proj_conv:
             numerical["建设管理费(万元)"] = _gl_new2
             if not _gl_contracted:
