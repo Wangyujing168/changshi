@@ -4995,7 +4995,8 @@ if "pending_fee_selection" in st.session_state:
                         # 需要迭代至收敛（阈值 0.005 万元）
                         from fee_engine import (
                             calc_jianshe_guanli, _extract_numeric_value as _ext_num,
-                            _detect_keyan_industry, calc_keyan, JIANSHE_GUANLI_RATES,
+                            _detect_keyan_industry, calc_keyan, calc_keyan_multi,
+                            JIANSHE_GUANLI_RATES,
                             _cumulative_tiered, _match_custom_fee_deductions,
                         )
                         t1_total = preview_raw.get("T1小计(万元)", 0)
@@ -5031,16 +5032,29 @@ if "pending_fee_selection" in st.session_state:
                                 _gl_r = calc_jianshe_guanli(_gl_base)
                                 numerical["建设管理费(万元)"] = _ext_num(_gl_r)
 
-                            # 2) 重算可行性研究费
+                            # 2) 重算可行性研究费（多服务类型用 calc_keyan_multi）
                             #    有合同覆盖的费种保持不变
                             if "可行性研究费" not in ctx.get("contract_overrides", {}):
                                 _keyan_ind, _keyan_coef = _detect_keyan_industry(ctx["query"])
-                                _amount_yi = _curr_total / 10000.0
-                                _keyan_r = calc_keyan(
-                                    _amount_yi, service_type="编制可研报告",
-                                    industry_coef=_keyan_coef, industry_name=_keyan_ind,
-                                )
-                                numerical["可行性研究费(万元)"] = _ext_num(_keyan_r)
+                                _ky_comp_coef = (ctx.get("coef_overrides", {})
+                                                 .get("可行性研究费", {})
+                                                 .get("complexity_coef", 1.0))
+                                _ky_svcs = ctx.get("service_selections", {}).get("可行性研究费", [])
+                                if _ky_svcs and _ky_svcs != ["编制可研报告"]:
+                                    # 用户选择了多服务类型，用 calc_keyan_multi
+                                    _ky_multi = calc_keyan_multi(
+                                        _curr_total / 10000.0, _ky_svcs,
+                                        industry_coef=_keyan_coef,
+                                        complexity_coef=_ky_comp_coef,
+                                    )
+                                    numerical["可行性研究费(万元)"] = _ky_multi.get("合计(万元)", 0)
+                                else:
+                                    _amount_yi = _curr_total / 10000.0
+                                    _keyan_r = calc_keyan(
+                                        _amount_yi, service_type="编制可研报告",
+                                        industry_coef=_keyan_coef, industry_name=_keyan_ind,
+                                    )
+                                    numerical["可行性研究费(万元)"] = _ext_num(_keyan_r)
 
                             # 3) 更新 T2
                             _t2_keys = ["建设管理费", "可行性研究费", "环境影响咨询费"]
