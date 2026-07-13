@@ -57,6 +57,16 @@ def show_policy_badge(policy_id: str):
         st.info(policy_id)
 
 
+def _round2(val: float) -> str:
+    """Round to 2 decimal places using round-half-up (matches Excel ROUND).
+
+    Python's built-in round() and format() use banker's rounding (round half
+    to even), which can differ from Excel at the exact .005 boundary by 0.01.
+    """
+    import math
+    return f"{math.floor(val * 100 + 0.5) / 100:.2f}"
+
+
 def _basis_with_links(basis_text: str) -> str:
     """Insert clickable HTML links into a 依据 text for panel captions."""
     result = basis_text
@@ -5268,9 +5278,9 @@ if "pending_fee_selection" in st.session_state:
 
             n_cols = 3
             col1, col2, col3 = st.columns(n_cols)
-            col1.metric("二类费合计", f"{fee_total_with_custom:.2f} 万元")
-            col2.metric("预备费", f"{yb_total:.2f} 万元")
-            col3.metric("项目总投资", f"{project_total_with_custom:.2f} 万元")
+            col1.metric("二类费合计", f"{_round2(fee_total_with_custom)} 万元")
+            col2.metric("预备费", f"{_round2(yb_total)} 万元")
+            col3.metric("项目总投资", f"{_round2(project_total_with_custom)} 万元")
 
             # 存储预览结果供确认按钮使用
             ctx["preview"] = {
