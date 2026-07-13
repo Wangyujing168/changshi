@@ -5528,8 +5528,11 @@ if prompt:
                             print(f"DEBUG _build_fee_selection_meta: query={prompt[:50]} basis={_rc.get('basis')} default={_rc.get('default_key')} n_opts={len(_rc.get('rate_options',[]))}")
 
                     if "pending_fee_selection" not in st.session_state:
-                        # 首次：初始化交互式费种选择面板
-                        selected_fees = set(fd["name"] for fd in fee_defs)
+                        # 首次：初始化交互式费种选择面板（交易服务费默认不选中）
+                        selected_fees = set(
+                            fd["name"] for fd in fee_defs
+                            if fd["name"] != "交易服务费"
+                        )
 
                         coef_overrides = {}
                         for fd in fee_defs:
