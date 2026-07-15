@@ -6302,7 +6302,7 @@ def _extract_extra_fees(query: str, known_fees: set | None = None) -> list[dict]
     return extra
 
 
-# ==================== 模式1：多费种联算 ====================
+# ==================== 模式1：二类费计算 ====================
 
 def calc_cascade(query: str, *, region: str | None = None) -> dict | None:
     """模式1：给定建安+设备费，一次性计算所有可自动计算的二类费。"""

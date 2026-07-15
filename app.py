@@ -90,6 +90,74 @@ def _basis_md_links(basis_text: str) -> str:
     return result
 
 
+# ===== 近期计算记录 =====
+
+import json as _json
+
+_RECENTS_FILE = "recent_calculations.json"
+
+
+def _load_recents() -> list[dict]:
+    """从文件加载近期计算记录。"""
+    try:
+        with open(_RECENTS_FILE, "r", encoding="utf-8") as f:
+            return _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return []
+
+
+def _save_recents(recents: list[dict]):
+    """将近期计算记录持久化到文件。"""
+    try:
+        with open(_RECENTS_FILE, "w", encoding="utf-8") as f:
+            _json.dump(recents, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass  # 写入失败不影响计算
+
+
+def _record_calculation(query: str, fee_result: dict | None):
+    """将一次成功计算追加到近期计算列表。"""
+    if not query or not fee_result:
+        return
+    recents = list(st.session_state.get("recent_calculations", []))
+    # 去重：与上一条相同则不重复记录
+    if recents and recents[-1].get("query") == query:
+        return
+
+    from datetime import datetime
+    mode_map = {
+        "__cascade__": "二类费计算",
+        "__iteration__": "迭代计算",
+        "__comparison__": "方案比选",
+    }
+    mode = mode_map.get(fee_result.get("fee_type", ""), "单费种")
+
+    # 构建摘要
+    summary_parts = []
+    fee_name = fee_result.get("费种", "")
+    if fee_name:
+        summary_parts.append(fee_name)
+    val = fee_result.get("结果(万元)")
+    if val is not None:
+        summary_parts.append(f"{val:.2f}万")
+    elif fee_result.get("结果汇总"):
+        total = fee_result["结果汇总"].get("项目总投资(万元)")
+        if total is not None:
+            summary_parts.append(f"总投资 {total:.2f}万")
+
+    recents.append({
+        "query": query,
+        "timestamp": datetime.now().strftime("%m-%d %H:%M"),
+        "summary": " · ".join(summary_parts) or query[:30],
+        "mode": mode,
+    })
+    # 最多保留 20 条
+    if len(recents) > 20:
+        recents = recents[-20:]
+    st.session_state.recent_calculations = recents
+    _save_recents(recents)
+
+
 # ===== 页面设置 =====
 st.set_page_config(
     page_title="造价智能助手",
@@ -522,10 +590,10 @@ def _build_sheji_text(fee_result):
 # ===== 多费种迭代计算渲染函数 =====
 
 def _render_cascade_result(result):
-    """渲染模式1：多费种联算结果。"""
+    """渲染模式1：二类费计算结果。"""
     import pandas as pd
 
-    st.markdown("## 多费种联算结果（程序精确计算）")
+    st.markdown("## 二类费计算结果（程序精确计算）")
 
     params = result["输入参数"]
     col1, col2, col3 = st.columns(3)
@@ -607,7 +675,7 @@ def _render_cascade_result(result):
     if yb_val > 0:
         yubei_text = f"\n**预备费（基本预备费）：{yb_val:.2f} 万元**（(一类费+二类费)×5%）"
     return (
-        f"## 多费种联算结果\n\n"
+        f"## 二类费计算结果\n\n"
         f"计费基数：建安费 {params['建安工程费(万元)']} 万 + 设备费 {params['设备购置费(万元)']} 万 "
         f"= **{params['第一部分工程费(万元)']} 万元**\n\n"
         f"### 各项费用\n\n" + "\n".join(lines) + "\n\n"
@@ -696,16 +764,23 @@ def _render_iteration_result(result):
                 st.markdown(f"- {fee_key}：{val:.2f} 万元")
             st.caption(f"总投资：{h['总投资(万元)']:.2f} 万元 ｜ 变化：{h['变化(万元)']:.2f} 万元")
 
-    # 响应文本
+    # 响应文本（含完整明细，确保 rerun 后不丢失）
     yb_val = final.get("预备费(万元)", 0)
     proj_total = final.get("项目总投资(万元)", final["总投资(万元)"])
     yb_text = f"\n预备费：**{yb_val:.2f} 万元**（(一类费+二类费)×5%）" if yb_val > 0 else ""
+    fee_lines = []
+    fees_detail = final["各项费用"]
+    for fee_key, val in sorted(fees_detail.items()):
+        fee_lines.append(f"- **{fee_key}**：{val:.2f} 万元")
+    if yb_val > 0:
+        fee_lines.append(f"- **预备费**：{yb_val:.2f} 万元")
     return (
         f"## 迭代计算结果\n\n"
         f"经过 **{result['迭代次数']}** 次迭代，静态总投资收敛至 "
         f"**{final['总投资(万元)']:.2f} 万元**，"
         f"二类费合计 **{final['二类费合计(万元)']:.2f} 万元**。"
-        f"{yb_text}\n"
+        f"{yb_text}\n\n"
+        f"### 收敛后各项费用\n\n" + "\n".join(fee_lines) + "\n\n"
         f"项目总投资（含预备费）：**{proj_total:.2f} 万元**。"
     )
 
@@ -746,12 +821,34 @@ def _render_comparison_result(result):
             st.metric("二类费合计", f"{s['二类费合计(万元)']:.2f} 万元")
             st.metric("总投资", f"{s['总投资(万元)']:.2f} 万元")
 
-    # 响应文本
+    # 构建持久化响应文本（含完整对比表，确保 rerun 后不丢失）
+    # Markdown 表格
+    col_keys = list(comparison_rows[0].keys()) if comparison_rows else []
+    md_table = ""
+    if col_keys:
+        md_table += "| " + " | ".join(str(c) for c in col_keys) + " |\n"
+        md_table += "|" + "|".join(":--" for _ in col_keys) + "|\n"
+        for row in comparison_rows:
+            md_table += "| " + " | ".join(str(row.get(c, "")) for c in col_keys) + " |\n"
+
+    # 方案明细文本
+    detail_lines = []
+    for s in result["方案列表"]:
+        detail_lines.append(f"**{s['方案名称']}**：二类费合计 {s['二类费合计(万元)']:.2f} 万，"
+                           f"总投资 {s['总投资(万元)']:.2f} 万")
+
     return (
         f"## 多方案比选结果\n\n"
-        f"扫描参数：{sweep['参数描述']}，共 {len(sweep['值列表'])} 个方案。"
+        f"扫描参数：{sweep['参数描述']}，共 {len(sweep['值列表'])} 个方案。\n\n"
+        f"### 费用对比表（单位：万元）\n\n"
+        f"{md_table}\n\n"
+        f"### 各方案汇总\n\n" + "\n".join(f"- {l}" for l in detail_lines)
     )
 
+
+# 初始化近期计算列表（从文件恢复，刷新不丢失，必须在 sidebar 之前）
+if "recent_calculations" not in st.session_state:
+    st.session_state.recent_calculations = _load_recents()
 
 # ===== 侧边栏 =====
 with st.sidebar:
@@ -810,21 +907,6 @@ with st.sidebar:
     st.divider()
 
     st.markdown("### 二类费计算")
-    examples_fee = [
-        "建安工程费131万，设备费160万，桥梁工程，勘察费多少？",
-        "工程总概算8000万，建设管理费多少？",
-        "中标金额6000万工程招标代理费",
-        "交易服务费 中标额2000万",
-        "监理费 计费额8000万",
-        "总投资1.2亿建设管理费和监理费",
-    ]
-    for i, ex in enumerate(examples_fee):
-        if st.button(ex, use_container_width=True, key=f"fee_{i}"):
-            st.session_state.current_query = ex
-
-    st.divider()
-
-    st.markdown("### 多费种联算 / 迭代 / 比选")
     examples_multi = [
         "建安费131万，设备费160万，桥梁工程，帮我算全部费用",
         "建安费8000万，工程总概算迭代计算",
@@ -833,6 +915,22 @@ with st.sidebar:
     for i, ex in enumerate(examples_multi):
         if st.button(ex, use_container_width=True, key=f"multi_{i}"):
             st.session_state.current_query = ex
+
+    # ── 近期计算 ──
+    if st.session_state.get("recent_calculations"):
+        st.divider()
+        st.markdown("### 🕐 近期计算")
+        recents = st.session_state.recent_calculations
+        for i, rec in enumerate(reversed(recents)):
+            label = f"{rec['timestamp']} · {rec['summary'][:28]}"
+            if st.button(
+                label,
+                use_container_width=True,
+                key=f"recent_{i}",
+                help=rec.get("query", ""),
+            ):
+                st.session_state.current_query = rec["query"]
+                st.rerun()
 
     st.divider()
 
@@ -888,6 +986,10 @@ if "messages" not in st.session_state:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+
+# ===== 方案比选结果持久化渲染（rerun 后重新绘制图表） =====
+if "pending_comparison" in st.session_state:
+    _render_comparison_result(st.session_state.pending_comparison)
 
 # ===== 交互式费率选择（持久化在聊天区外） =====
 if "pending_rate_select" in st.session_state:
@@ -5447,7 +5549,7 @@ if "pending_fee_selection" in st.session_state:
                 project_total_val = preview["project_total_with_custom"] if preview else 0
 
                 final_response = (
-                    f"## 多费种联算结果\n\n"
+                    f"## 二类费计算结果\n\n"
                     f"计费基数：建安费 **{ctx['jianan']}** 万 + 设备费 **{ctx['shebei']}** 万 "
                     f"= **{ctx['total_part1']}** 万元 ｜ "
                     f"项目类型：**{ctx['project_type']}**\n\n"
@@ -5465,6 +5567,12 @@ if "pending_fee_selection" in st.session_state:
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": final_response,
+                })
+                # 记录到近期计算
+                _record_calculation(ctx.get("query", ""), {
+                    "费种": "二类费计算",
+                    "fee_type": "__cascade__",
+                    "结果汇总": {"项目总投资(万元)": project_total_val},
                 })
                 del st.session_state.pending_fee_selection
                 st.rerun()
@@ -5495,6 +5603,7 @@ if prompt:
     st.session_state.pop("pending_shuibao_compensation", None)
     st.session_state.pop("pending_jiaoyi_party", None)
     st.session_state.pop("pending_fee_selection", None)
+    st.session_state.pop("pending_comparison", None)
     # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -5532,6 +5641,10 @@ if prompt:
             # fee_result = detect_and_calculate(prompt)  # 已在上方调用
 
             if fee_result and fee_result.get("has_amount"):
+                # 记录到近期计算（级联模式在确认时记录，此处跳过）
+                if fee_result.get("mode") != "cascade":
+                    _record_calculation(prompt, fee_result)
+
                 # === 多费种迭代模式路由 ===
                 mode = fee_result.get("mode")
                 if mode == "cascade":
@@ -5639,7 +5752,7 @@ if prompt:
 
                     n_fees = len(st.session_state.pending_fee_selection["fee_defs"])
                     response = (
-                        f"## 多费种联算\n\n"
+                        f"## 二类费计算\n\n"
                         f"> 📋 该模式支持 {n_fees} 项二类费\n\n"
                         f"请滚动到页面下方 **📋 二类费选择 — 交互式联算** 区域，"
                         f"勾选需要计算的费种后可调整系数、添加自定义费用。"
@@ -5648,6 +5761,8 @@ if prompt:
                     response = _render_iteration_result(fee_result)
                 elif mode == "comparison":
                     response = _render_comparison_result(fee_result)
+                    # 存储结果以便 rerun 后重新渲染交互式图表
+                    st.session_state.pending_comparison = fee_result
 
                 if mode is None:
                     # === 引擎精确计算：单费种直接展示，不经过 LLM ===
