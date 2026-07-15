@@ -11,7 +11,8 @@ from fee_engine import (
     _HEBEI_PROFESSIONAL_COEFFICIENTS,
     resolve_dependent_calc, calc_huanping_multi,
     _build_fee_selection_meta, _TIER_DEPS, _calc_all_fees,
-    _FEE_LABELS, _is_hebei_project,
+    _FEE_LABELS, _is_hebei_project, is_hebei_region,
+    ALL_PROVINCES, DEFAULT_REGION,
     JIANLI_PROFESSIONAL_OPTIONS, JIANLI_COMPLEXITY_OPTIONS,
     JIANLI_ELEVATION_OPTIONS,
     SHEJI_PROFESSIONAL_OPTIONS, SHEJI_COMPLEXITY_OPTIONS,
@@ -755,6 +756,22 @@ def _render_comparison_result(result):
 # ===== 侧边栏 =====
 with st.sidebar:
     st.title("🏗️ 造价智能助手")
+    st.divider()
+
+    # ── 省份选择 ──
+    if "selected_region" not in st.session_state:
+        st.session_state.selected_region = DEFAULT_REGION
+
+    selected_region = st.selectbox(
+        "📍 所在省份",
+        ALL_PROVINCES,
+        index=ALL_PROVINCES.index(st.session_state.selected_region)
+              if st.session_state.selected_region in ALL_PROVINCES else 1,
+        key="region_selector",
+    )
+    st.session_state.selected_region = selected_region
+    st.caption("有特殊政策的省份将自动应用对应费率，其余暂按默认（天津）计算。")
+
     st.divider()
 
     st.markdown("### 功能导航")
@@ -1891,12 +1908,12 @@ if "pending_dependent_fee" in st.session_state:
             # ── 施工图审查费：审查费率下拉选择 ──
             if ctx.get("target_fee") == "施工图审查费":
                 from fee_engine import (SHIGONG_SHENCHA_RATES, SHIGONG_SHENCHA_ZHUZHAI,
-                                        _is_hebei_project, HEBEI_SHENCHA_RATE)
+                                        HEBEI_SHENCHA_RATE)
                 _query = ctx.get("query", "")
                 pt = base_params.get("project_type_shencha", "公建")
                 size = base_params.get("size", "中型")
 
-                if _is_hebei_project(_query):
+                if is_hebei_region(st.session_state.get("selected_region")):
                     # 河北省：发改价格〔2011〕534号，统一 6.5%
                     rate_options = [
                         (f"河北省 — {HEBEI_SHENCHA_RATE}%（发改价格〔2011〕534号）",
@@ -2193,6 +2210,7 @@ if "pending_dependent_fee" in st.session_state:
                             all_configs,
                             base_params,
                             dep_discounts=ctx.get("dep_discounts"),
+                            region=st.session_state.get("selected_region"),
                         )
                         ctx["final_result"] = final
                     except Exception as e:
@@ -3744,7 +3762,7 @@ if "pending_fee_selection" in st.session_state:
                 st.markdown("---")
                 if is_cost_consulting:
                     st.markdown("#### 🌿 工程造价咨询服务子项")
-                    if _is_hebei_project(ctx["query"]):
+                    if is_hebei_region(st.session_state.get("selected_region")):
                         all_svcs = service_config.get("services_hebei", [])
                         default_svcs = service_config.get("default_selected_hebei", ["预算编制"])
                         st.caption("勾选需要计算的河北省造价咨询服务子项（冀建市研[2017]2号）。")
@@ -3819,13 +3837,14 @@ if "pending_fee_selection" in st.session_state:
                             skip_fees=_svc_skip if _svc_skip else None,
                             coef_overrides=ctx.get("coef_overrides") or None,
                             param_overrides=_svc_param or None,
+                            region=st.session_state.get("selected_region"),
                         )
                         _svc_approx_total = (
                             _svc_raw.get("项目总投资(万元)", 0)
                             + sum(cf["amount_wan"]
                                   for cf in ctx.get("custom_fees", []))
                         )
-                        if _is_hebei_project(ctx["query"]):
+                        if is_hebei_region(st.session_state.get("selected_region")):
                             from fee_engine import calc_cost_consulting_multi_hebei
                             _cc_prof = (ctx.get("coef_overrides", {})
                                         .get("造价咨询费", {})
@@ -3871,6 +3890,7 @@ if "pending_fee_selection" in st.session_state:
                             project_type=ctx["project_type"], query=ctx["query"],
                             skip_fees=_hp_skip if _hp_skip else None,
                             coef_overrides=ctx.get("coef_overrides") or None,
+                            region=st.session_state.get("selected_region"),
                         )
                         _hp_approx_total = (
                             _hp_raw.get("项目总投资(万元)", 0)
@@ -3907,6 +3927,7 @@ if "pending_fee_selection" in st.session_state:
                             project_type=ctx["project_type"], query=ctx["query"],
                             skip_fees=_ky_skip if _ky_skip else None,
                             coef_overrides=ctx.get("coef_overrides") or None,
+                            region=st.session_state.get("selected_region"),
                         )
                         _ky_total = _ky_raw.get("项目总投资(万元)", 0)
                         _ky_amount_yi = _ky_total / 10000.0
@@ -4653,6 +4674,7 @@ if "pending_fee_selection" in st.session_state:
                     contract_overrides=ctx.get("contract_overrides") or None,
                     fee_discounts=ctx.get("fee_discounts") or None,
                     custom_fees=ctx.get("custom_fees") or None,
+                    region=st.session_state.get("selected_region"),
                 )
                 _disc_numerical = _disc_raw["_数值"]
             except Exception:
@@ -4665,7 +4687,7 @@ if "pending_fee_selection" in st.session_state:
                         _cc_cascade_total = (
                             _disc_raw.get("项目总投资(万元)", 0) + sum(cf["amount_wan"] for cf in ctx.get("custom_fees", []))
                         )
-                        if _is_hebei_project(ctx["query"]):
+                        if is_hebei_region(st.session_state.get("selected_region")):
                             from fee_engine import calc_cost_consulting_multi_hebei
                             _cc_prof = (ctx.get("coef_overrides", {}).get("造价咨询费", {}).get("professional_coef", 1.0))
                             _cc_multi = calc_cost_consulting_multi_hebei(
@@ -4829,6 +4851,7 @@ if "pending_fee_selection" in st.session_state:
                 contract_overrides=ctx.get("contract_overrides") or None,
                 fee_discounts=ctx.get("fee_discounts") or None,
                 custom_fees=ctx.get("custom_fees") or None,
+                region=st.session_state.get("selected_region"),
             )
 
             numerical = preview_raw["_数值"]
@@ -4965,7 +4988,7 @@ if "pending_fee_selection" in st.session_state:
                             + sum(cf["amount_wan"]
                                   for cf in ctx.get("custom_fees", []))
                         )
-                        if _is_hebei_project(ctx["query"]):
+                        if is_hebei_region(st.session_state.get("selected_region")):
                             from fee_engine import calc_cost_consulting_multi_hebei
                             _cc_prof = (ctx.get("coef_overrides", {})
                                         .get("造价咨询费", {})
@@ -5074,7 +5097,7 @@ if "pending_fee_selection" in st.session_state:
                             # 4) 用最新项目总投资重算造价咨询费（概算审核等依赖总投资）
                             #    有合同覆盖的费种保持不变
                             if "造价咨询费" not in ctx.get("contract_overrides", {}):
-                                if _is_hebei_project(ctx["query"]):
+                                if is_hebei_region(st.session_state.get("selected_region")):
                                     _cc_multi = calc_cost_consulting_multi_hebei(
                                         cc_svcs, ctx["jianan"],
                                         total_investment=_curr_total,
@@ -5477,7 +5500,7 @@ if prompt:
 
     # 调试：将检测结果存入 session_state，跨 rerun 持久化
     try:
-        debug_fee = detect_and_calculate(prompt)
+        debug_fee = detect_and_calculate(prompt, region=st.session_state.get("selected_region"))
         st.session_state.debug_info = {
             "prompt": prompt[:80],
             "fee_type": debug_fee.get("fee_type") if debug_fee else "None",
@@ -5498,7 +5521,7 @@ if prompt:
     # 生成回答
     with st.chat_message("assistant"):
         try:
-            fee_result = detect_and_calculate(prompt)
+            fee_result = detect_and_calculate(prompt, region=st.session_state.get("selected_region"))
         except Exception as e:
             import traceback
             st.code(traceback.format_exc())
@@ -5520,7 +5543,7 @@ if prompt:
                     total_part1 = params["第一部分工程费(万元)"]
 
                     # 始终用最新代码重建 fee_defs（支持热更新 service_config）
-                    fee_defs = _build_fee_selection_meta(raw, prompt)
+                    fee_defs = _build_fee_selection_meta(raw, prompt, region=st.session_state.get("selected_region"))
                     # 🔧 DEBUG
                     for _fd in fee_defs:
                         if _fd["name"] == "施工图审查费":
@@ -5557,7 +5580,7 @@ if prompt:
                                 "可行性研究费": ["编制可研报告"],
                                 "造价咨询费": (
                                     ["预算编制"]
-                                    if _is_hebei_project(prompt)
+                                    if is_hebei_region(st.session_state.get("selected_region"))
                                     else ["编制施工图预算"]
                                 ),
                             },
@@ -5588,7 +5611,7 @@ if prompt:
                         svc.setdefault("可行性研究费", ["编制可研报告"])
                         if "造价咨询费" not in svc:
                             svc["造价咨询费"] = (
-                                ["预算编制"] if _is_hebei_project(prompt)
+                                ["预算编制"] if is_hebei_region(st.session_state.get("selected_region"))
                                 else ["编制施工图预算"]
                             )
                         # 补上可能缺失的 coef_overrides（新费种）

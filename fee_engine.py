@@ -1959,8 +1959,59 @@ def calc_keyan_multi(
 
 
 def _is_hebei_project(query: str) -> bool:
-    """检测是否为河北省项目。"""
+    """[已废弃] 从查询文本检测河北省项目。
+
+    请改用 is_hebei_region(region) + 显式传入 region 参数。
+    此函数保留作为命令行/API 直接调用时的兜底。
+    """
     return bool(re.search(r"河北", query))
+
+
+# ── 区域/省份配置 ──
+
+# 全部可选省份列表（34 个省级行政区）
+ALL_PROVINCES: list[str] = [
+    "北京", "天津", "河北", "山西", "内蒙古",
+    "辽宁", "吉林", "黑龙江",
+    "上海", "江苏", "浙江", "安徽", "福建", "江西", "山东",
+    "河南", "湖北", "湖南", "广东", "广西", "海南",
+    "重庆", "四川", "贵州", "云南", "西藏",
+    "陕西", "甘肃", "青海", "宁夏", "新疆",
+    "香港", "澳门", "台湾",
+]
+
+DEFAULT_REGION = "天津"
+
+# 仅记录有特殊政策的省份（费率不同于默认/天津）
+_REGION_POLICY: dict[str, dict] = {
+    "河北": {
+        "label": "河北省",
+        "fees": {
+            "施工图审查费": {
+                "basis": "发改价格〔2011〕534号",
+                "mode": "fixed_rate",
+                "rate": 6.5,
+                "base_desc": "勘察费+设计费",
+            },
+            "造价咨询费": {
+                "basis": "冀建市研[2017]2号",
+                "mode": "hebei",
+            },
+        },
+    },
+    # 后续新增省份只需在此添加条目，下拉框自动包含
+}
+
+
+def get_region_policy(region: str | None = None) -> dict | None:
+    """获取指定省份的特殊费率策略，无特殊策略时返回 None（使用默认）。"""
+    region = region or DEFAULT_REGION
+    return _REGION_POLICY.get(region)
+
+
+def is_hebei_region(region: str | None = None) -> bool:
+    """检查是否为河北省区域（用于快速判断）。"""
+    return (region or DEFAULT_REGION) == "河北"
 
 
 def calc_shigong_shencha(
@@ -1973,6 +2024,7 @@ def calc_shigong_shencha(
     kancha_rate_desc: str = "区间中值",
     query: str = "",
     rate_override: float | None = None,
+    region: str | None = None,
 ) -> dict:
     """
     施工图审查费。
@@ -2009,7 +2061,7 @@ def calc_shigong_shencha(
         }
 
     # 河北省项目：除有特殊规定外，（勘察费+设计费）× 6.5%
-    if query and _is_hebei_project(query):
+    if is_hebei_region(region):
         hebei_rate = HEBEI_SHENCHA_RATE
         if sheji_fee is not None:
             fee = round(sheji_fee * hebei_rate / 100.0, 4)
@@ -2017,7 +2069,7 @@ def calc_shigong_shencha(
             params = {"勘察设计费(万元)": sheji_fee, "= 设计费+勘察费": "", "费率(%)": hebei_rate, "适用地区": "河北省"}
             if sheji_fee_only is not None and kancha_fee_mid is not None:
                 steps = [
-                    {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
+                    {"步骤": "判定适用地区", "公式": "区域设置", "结果": "河北省"},
                     {"步骤": "计算设计费", "公式": "计价格[2002]10号：收费基价 × 专业系数 × 复杂系数 × 附加系数", "结果": f"{sheji_fee_only:.2f} 万元"},
                     {"步骤": "计算勘察费", "公式": f"《市政工程设计概算编制办法》百分比法（{kancha_rate_desc}）", "结果": f"{kancha_fee_mid:.2f} 万元"},
                     {"步骤": "计算勘察设计费基数", "公式": f"设计费 + 勘察费 = {sheji_fee_only:.2f} + {kancha_fee_mid:.2f}", "结果": f"{sheji_fee:.2f} 万元"},
@@ -2026,7 +2078,7 @@ def calc_shigong_shencha(
                 ]
             else:
                 steps = [
-                    {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
+                    {"步骤": "判定适用地区", "公式": "区域设置", "结果": "河北省"},
                     {"步骤": "计算勘察设计费", "公式": "设计费（计价格[2002]10号）+ 勘察费（概算编制办法百分比法）", "结果": f"{sheji_fee:.2f} 万元"},
                     {"步骤": "应用河北省费率", "公式": f"发改价格〔2011〕534号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
                     {"步骤": "计算审查费", "公式": f"{sheji_fee:.2f} 万元 × {hebei_rate}%", "结果": f"{fee:.2f} 万元"},
@@ -2036,7 +2088,7 @@ def calc_shigong_shencha(
             desc = f"河北省项目，计费基数 {amount:.0f} 万元 × {hebei_rate}%，审查费 **{fee:.2f} 万元**"
             params = {"计费基数(万元)": amount, "费率(%)": hebei_rate, "适用地区": "河北省"}
             steps = [
-                {"步骤": "判定适用地区", "公式": "查询关键词检测", "结果": "河北省"},
+                {"步骤": "判定适用地区", "公式": "区域设置", "结果": "河北省"},
                 {"步骤": "查找河北省费率", "公式": f"发改价格〔2011〕534号：施工图审查费 = (勘察费+设计费) × {hebei_rate}%", "结果": f"{hebei_rate}%"},
                 {"步骤": "计算审查费", "公式": f"{amount:.0f} 万元 × {hebei_rate}%", "结果": f"{fee:.2f} 万元"},
             ]
@@ -3666,6 +3718,7 @@ def resolve_dependent_calc(
     configs: dict,
     base_params: dict,
     dep_discounts: dict | None = None,
+    region: str | None = None,
 ) -> dict:
     """用用户选择的参数计算依赖费种，再汇总计算目标费种。
 
@@ -3823,6 +3876,7 @@ def resolve_dependent_calc(
             kancha_rate_desc=kancha_rate_desc,
             query=base_params.get("query", ""),
             rate_override=rate_override if ptype != "住宅" else None,
+            region=region,
         )
         result["_dependent_details"] = dep_results
         result["_dependent_configs"] = configs
@@ -3831,7 +3885,8 @@ def resolve_dependent_calc(
     return {}
 
 
-def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | None:
+def detect_and_calculate(query: str, *, fee_type: str | None = None,
+                         region: str | None = None) -> dict | None:
     """
     检测查询是否涉及二类费，如果是则直接计算。
 
@@ -3845,11 +3900,11 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
         # 先检查多费种模式（在单费种检测之前）
         multi_mode = _detect_multi_fee_mode(query)
         if multi_mode == "cascade":
-            return calc_cascade(query)
+            return calc_cascade(query, region=region)
         elif multi_mode == "iteration":
-            return calc_iteration(query)
+            return calc_iteration(query, region=region)
         elif multi_mode == "comparison":
-            return calc_comparison(query)
+            return calc_comparison(query, region=region)
         fee_type = _detect_fee_type(query)
     if not fee_type:
         # 未命中明确的费种关键词，但可能隐含在上下文中
@@ -4286,7 +4341,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
                     amount = val * 10000
                 else:
                     amount = val
-            result = calc_shigong_shencha(amount, ptype, size, query=query)
+            result = calc_shigong_shencha(amount, ptype, size, query=query, region=region)
     elif fee_type == "水土保持补偿费":
         # ── 水土保持补偿费（津发改价综〔2020〕351号）──
         # 尝试从查询中提取物理参数
@@ -4568,7 +4623,7 @@ def detect_and_calculate(query: str, *, fee_type: str | None = None) -> dict | N
             )
     elif fee_type == "造价咨询费":
         # ── 河北省：冀建市研[2017]2号 ──
-        if query and _is_hebei_project(query):
+        if is_hebei_region(region):
             svc_type = _detect_hebei_cost_consulting_type(query)
             if svc_type is None:
                 svc_type = "预算编制"  # 默认
@@ -5191,6 +5246,7 @@ def _calc_all_fees(
     shebei: float,
     project_type: str = "通用",
     query: str = "",
+    region: str | None = None,
     total_investment_override: float | None = None,
     param_overrides: dict | None = None,
     skip_fees: set | None = None,
@@ -5512,6 +5568,7 @@ def _calc_all_fees(
             project_type="住宅",
             size=size,
             query=_shencha_query,
+            region=region,
         )
     else:
         # 公建/工业/市政：按（设计费+勘察费）× 费率
@@ -5525,6 +5582,7 @@ def _calc_all_fees(
             kancha_fee_mid=numerical["勘察费(万元)"],
             query=_shencha_query,
             rate_override=shencha_rate_override,
+            region=region,
         )
     raw_results["施工图审查费"] = shencha_r
     numerical["施工图审查费(万元)"] = _extract_numeric_value(shencha_r)
@@ -5830,6 +5888,7 @@ def _build_fee_summary(result: dict) -> list[dict]:
 def _build_fee_selection_meta(
     engine_result: dict,
     query: str,
+    region: str | None = None,
 ) -> list[dict]:
     """构建全费用选择面板的费种元数据列表。
 
@@ -5875,7 +5934,7 @@ def _build_fee_selection_meta(
             # 施工图审查费：自定义费率下拉（河北6.5% / 天津津价管46号）
             if fee_name == "施工图审查费" and entry["rate_config"] is None:
                 rate_opts = []
-                _hebei = _is_hebei_project(query)
+                _hebei = is_hebei_region(region)
                 if _hebei:
                     # 河北省：发改价格〔2011〕534号，统一 6.5%
                     rate_opts.append({
@@ -5998,7 +6057,7 @@ def _build_fee_selection_meta(
         {"name": "全过程造价咨询", "label": "全过程造价咨询（基数=建安费）"},
         {"name": "工程造价鉴定", "label": "工程造价鉴定（基数=鉴定标的额）"},
     ]
-    _cc_hebei = _is_hebei_project(query)
+    _cc_hebei = is_hebei_region(region)
     definitions.append({
         "name": "造价咨询费",
         "label": _FEE_LABELS.get("造价咨询费", "工程造价咨询服务费"),
@@ -6245,7 +6304,7 @@ def _extract_extra_fees(query: str, known_fees: set | None = None) -> list[dict]
 
 # ==================== 模式1：多费种联算 ====================
 
-def calc_cascade(query: str) -> dict | None:
+def calc_cascade(query: str, *, region: str | None = None) -> dict | None:
     """模式1：给定建安+设备费，一次性计算所有可自动计算的二类费。"""
     jianan, shebei = _extract_jianli_components(query)
     if jianan is None:
@@ -6258,7 +6317,7 @@ def calc_cascade(query: str) -> dict | None:
     shebei = shebei or 0.0
 
     project_type = _detect_project_type(query)
-    engine_result = _calc_all_fees(jianan, shebei, project_type, query)
+    engine_result = _calc_all_fees(jianan, shebei, project_type, query, region=region)
 
     # 提取用户额外指定的费用
     known_names = set(engine_result["_层级"].keys())
@@ -6309,7 +6368,7 @@ def _snapshot_fees(numerical: dict[str, float]) -> dict[str, float]:
     return dict(numerical)
 
 
-def calc_iteration(query: str) -> dict | None:
+def calc_iteration(query: str, *, region: str | None = None) -> dict | None:
     """模式2：迭代收敛计算建设管理费（处理循环依赖）。"""
     jianan, shebei = _extract_jianli_components(query)
     if jianan is None:
@@ -6326,7 +6385,7 @@ def calc_iteration(query: str) -> dict | None:
     max_iter = 20
 
     # 第一轮：初始总投资
-    result = _calc_all_fees(jianan, shebei, project_type, query)
+    result = _calc_all_fees(jianan, shebei, project_type, query, region=region)
     iteration_history = [{
         "迭代次数": 0,
         "总投资(万元)": result["总投资(万元)"],
@@ -6339,7 +6398,7 @@ def calc_iteration(query: str) -> dict | None:
         prev_total = result["总投资(万元)"]
         result = _calc_all_fees(
             jianan, shebei, project_type, query,
-            total_investment_override=prev_total,
+            total_investment_override=prev_total, region=region,
         )
         current_total = result["总投资(万元)"]
         diff = round(current_total - prev_total, 6)
@@ -6406,7 +6465,7 @@ def _detect_sweep_parameter(query: str) -> dict:
     }
 
 
-def calc_comparison(query: str) -> dict | None:
+def calc_comparison(query: str, *, region: str | None = None) -> dict | None:
     """模式3：多方案比选/敏感性分析。"""
     jianan, shebei = _extract_jianli_components(query)
     if jianan is None:
@@ -6426,7 +6485,7 @@ def calc_comparison(query: str) -> dict | None:
     for pv in sweep["值列表"]:
         result = _calc_all_fees(
             jianan, shebei, project_type, query,
-            param_overrides={sweep["参数名称"]: pv},
+            param_overrides={sweep["参数名称"]: pv}, region=region,
         )
         fees = result["_数值"]
         scenario = {
@@ -6444,7 +6503,7 @@ def calc_comparison(query: str) -> dict | None:
     all_fee_keys.add("项目总投资(万元)")
 
     # 提取用户额外指定的费用（对所有方案一致）
-    engine_result0 = _calc_all_fees(jianan, shebei, project_type, query)
+    engine_result0 = _calc_all_fees(jianan, shebei, project_type, query, region=region)
     known_names = set(engine_result0["_层级"].keys())
     known_names.update(engine_result0["_跳过的费种"].keys())
     extra_fees = _extract_extra_fees(query, known_names)
