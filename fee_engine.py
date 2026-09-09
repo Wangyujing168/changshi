@@ -7738,9 +7738,20 @@ def advance_checklist(ctx: dict, text: str, region: str | None = None) -> dict:
 
     # ── 2) 基础金额 ──
     jianan, shebei = _extract_jianli_components(text)
-    if jianan is not None and (ctx["amounts"]["jianan"] is None or change_mode):
+    if jianan is not None and (ctx["amounts"]["jianan"] is None or change_mode
+                               or abs(ctx["amounts"]["jianan"] - jianan) > 0.5):
+        # 裸新金额（无费种/无改选标记）→ 视为金额更正，就地覆盖
         ctx["amounts"]["jianan"] = jianan
         recognized = True
+    # 金额收集阶段裸数字（如「5000万」）→ 按建安费填入
+    if stage == "amounts" and ctx["amounts"]["jianan"] is None and jianan is None:
+        m = re.search(r"(\d+\.?\d*)\s*(万|亿)\s*元?", text)
+        if m:
+            v = float(m.group(1))
+            if m.group(2) == "亿":
+                v *= 10000.0
+            ctx["amounts"]["jianan"] = v
+            recognized = True
     if shebei is not None:
         ctx["amounts"]["shebei"] = shebei
         ctx["amounts"]["shebei_known"] = True
@@ -8044,6 +8055,81 @@ def advance_checklist(ctx: dict, text: str, region: str | None = None) -> dict:
     if recognized:
         ctx["qno"] = ctx.get("qno", 1) + 1
     return {"recognized": recognized, "fee_domain_token": fee_token}
+
+
+_NEW_TASK_MARKERS = re.compile(
+    r"重新算|重算|重新计算|重来|再来(?:一遍|一次)?|从头(?:开始|算|再来)?|重新问|另算|"
+    r"另一个.{0,6}(?:项目|工程)|新项目|新工程|换个?(?:项目|工程)")
+_APPEND_MARKERS = re.compile(r"改为|改成|换成|再加|加上|增加|新增|补充|还要|也需要")
+_NARROW_MARKERS = re.compile(r"只需要|只算|仅需要|仅算")
+
+
+def detect_new_task_intent(ctx: dict, text: str) -> str | None:
+    """任务进行中，判断新输入是否是「另起炉灶的新问题」。
+
+    返回 None → 续填当前任务（回答当前步骤/改选/排除/纯金额更正）。
+    返回 str → 应结束当前任务、按该查询文本重新启动任务；
+              裸「重新算」类无实质内容时返回原查询，否则返回新文本。
+
+    新问题信号：
+    - 显式重算标记（重新算/重来/新项目…）
+    - 出现不在当前清单里的费种，且带计算动词或基础金额
+    - 基础金额（建安费/总投资）与已收集金额冲突，且文本含费种
+    排除的续填场景：改为/再加（改选）、不需要X费（排除）、只算X（收窄）、
+    费种收集阶段的正常命名、纯金额更正（由 advance_checklist 就地覆盖）。
+    """
+    stage = current_stage(ctx)
+    new_fees = _detect_all_fee_types(text)
+    jianan, _ = _extract_jianli_components(text)
+    ti = _extract_total_investment(text)
+    has_amt_token = jianan is not None or ti is not None
+    bare_redo = bool(_NEW_TASK_MARKERS.search(text)) and not new_fees \
+        and not has_amt_token and not re.search(r"\d+\.?\d*\s*[万亿]", text)
+
+    # 1) 显式重算：裸「重新算」→ 用原查询重建；带新信息 → 用新文本
+    if _NEW_TASK_MARKERS.search(text):
+        return (ctx.get("query") or text) if bare_redo else text
+
+    if not new_fees:
+        return None  # 纯金额/参数/折扣/排除 → 续填（金额由 advance 就地覆盖）
+
+    # 2) 改选/排除/收窄 → 续填
+    if (_APPEND_MARKERS.search(text) or _FEE_EXCLUDE_MARKERS.search(text)
+            or _NARROW_MARKERS.search(text)):
+        return None
+
+    # 3) 费种收集阶段：命名费种是正常回答
+    if stage == "fees":
+        if ctx.get("preset_all") and not ctx.get("fees_confirmed"):
+            # 预设全量时，只有「没有/排除/只算」是正常回答；
+            # 带着新费种+金额/计算动词 → 新问题
+            if has_amt_token or re.search(
+                    r"(?:帮我|请).{0,4}(?:算|计算|测算)|(?:怎么|如何)(?:算|计算)",
+                    text):
+                return text
+        return None
+
+    # 4) 不在清单里的费种 + 计算动词/基础金额 → 新问题
+    unknown = [f for f in new_fees if f not in ctx["fees"]]
+    if unknown and (
+        has_amt_token
+        or re.search(
+            r"(?:帮我|请).{0,4}(?:算|计算|测算|估算)|(?:怎么|如何)(?:算|计算)"
+            r"|^(?:帮我|请)?(?:算|计算|测算|估算)(?:一下|下)?"
+            r"|(?:算|计算|测算|估算)(?:一下|下)?$",
+            text)
+    ):
+        return text
+
+    # 5) 费种 + 基础金额冲突 → 新项目
+    old_jianan = ctx["amounts"]["jianan"]
+    old_ti = ctx["amounts"].get("total_investment")
+    if old_jianan is not None and jianan is not None \
+            and abs(old_jianan - jianan) > 0.5:
+        return text
+    if old_ti and ti is not None and abs(old_ti - ti) > 0.5:
+        return text
+    return None
 
 
 def _build_shencha_rate_options(region: str | None) -> dict:

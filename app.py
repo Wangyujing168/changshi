@@ -10,6 +10,7 @@ from fee_engine import (
     FEE_PARAM_SPECS,
     FEE_CATALOG, CHECKLIST_STAGES,
     fee_calc_intent, build_checklist_meta, advance_checklist,
+    detect_new_task_intent,
     current_stage, param_cards_for, settle_checklist,
     linear_rate_options, _build_shencha_rate_options, fee_catalog_for,
     calc_discount_scenarios,
@@ -1669,21 +1670,35 @@ if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-        res = advance_checklist(
-            pending_task, prompt, region=st.session_state.get("selected_region"))
-        st.session_state.pending_task = pending_task
-        if res.get("recognized"):
-            st.rerun()
-        if res.get("fee_domain_token"):
-            # 有费种/金额关键词但没解析出新信息 → 留在任务中提示
+        _restart_q = detect_new_task_intent(pending_task, prompt)
+        if _restart_q:
+            # 中途的新问题 → 结束旧任务，按新查询重新启动（裸「重新算」用原查询）
+            _typed = prompt
+            prompt = _restart_q
+            st.session_state.pop("pending_task", None)
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": "🤔 没有从这句话中识别出新的信息。"
-                           "请回复当前步骤所需的内容，或点击「🗑 结束本次计算」重新提问。",
+                "content": ("🔄 好的，按原问题重新开始计算。" if _restart_q != _typed
+                            else "🔄 检测到新的计算问题，已结束上一个任务，重新开始。"),
             })
-            st.rerun()
-        # 完全无关输入 → 结束任务，落普通问答（消息已记录，继续走下方流程）
-        st.session_state.pop("pending_task", None)
+            with st.chat_message("assistant"):
+                st.markdown(st.session_state.messages[-1]["content"])
+        else:
+            res = advance_checklist(
+                pending_task, prompt, region=st.session_state.get("selected_region"))
+            st.session_state.pending_task = pending_task
+            if res.get("recognized"):
+                st.rerun()
+            if res.get("fee_domain_token"):
+                # 有费种/金额关键词但没解析出新信息 → 留在任务中提示
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": "🤔 没有从这句话中识别出新的信息。"
+                               "请回复当前步骤所需的内容，或点击「🗑 结束本次计算」重新提问。",
+                })
+                st.rerun()
+            # 完全无关输入 → 结束任务，落普通问答（消息已记录，继续走下方流程）
+            st.session_state.pop("pending_task", None)
 
     # 新提问时清除旧的待处理选择
     st.session_state.pop("pending_comparison", None)
