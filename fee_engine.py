@@ -1346,12 +1346,12 @@ _FEE_PATTERNS: list[tuple[str, str]] = [
     ("招标代理费", r"招标代理|招标.*收费|计价格.*1980"),
     ("交易服务费", r"交易服务费|工程建设交易|津发改.*979"),
     ("监理费", r"监理.*(?:费|收费|服务费)|施工监理.*收费|发改价格.*670"),
-    ("工程设计费", r"工程(?:勘察)?设计费?[^用]|基本设计收费|勘察设计收费|设计收费基价|设计费.*(?:计费|计算|收费|多少|怎么|如何|专业|调整|系数|表|区分|分类|有哪些|是什么|怎么区分|复杂|Ⅰ|Ⅱ|Ⅲ|I级|II级|III级|\d)|设计费\s*[？?]|设计费\s*$|计价格.*10号"),
+    ("工程设计费", r"工程(?:勘察)?设计费?[^用]|基本设计收费|勘察设计收费|设计收费基价|设计费.*(?:计费|计算|收费|多少|怎么|如何|专业|调整|系数|表|区分|分类|有哪些|是什么|怎么区分|复杂|Ⅰ|Ⅱ|Ⅲ|I级|II级|III级|\d)|设计费\s*[？?]|设计费\s*$|(?<!工程)设计费(?!用)|计价格.*10号"),
     ("施工图审查费", r"施工图(?:设计文件)?审查|图审[费费]|津价管.*46"),
     ("勘察费", r"勘察费|工程勘察(?!设计)|岩土.*勘察.*费|水文地质.*勘察.*费|勘察.*(?:多少|计算|怎么|如何|收费|取费|标准|定额)"),
     ("可行性研究费", r"可行性研究|可研|项目建议书|前期工作咨询|计价格.*1283"),
     ("水土保持补偿费", r"水土保持补偿|水保补偿|水土保持.*补偿|津发改价综.*351|发改价格.*1186.*水土|水土保持.*1186"),
-    ("水土保持费", r"水土保持(?!.*补偿).*(?:费|方案编制|监测|验收|咨询)|保监.*22"),
+    ("水土保持费", r"水土保持(?!补偿)[^。；;，]{0,8}(?:咨询|方案|监测|验收|技术|费)|保监.*22"),
     ("环境影响咨询费", r"环境影响(?:咨询|评价).*[费费]|环评[费费]|计价格.*125"),
     ("劳动安全卫生评审费", r"劳动安全卫生评审|安全卫生评审费|安全评审费|劳安评审"),
     ("场地准备费及临时设施费", r"场地准备费|临时设施费|场地准备及临时设施|场地.*准备.*费"),
@@ -7269,6 +7269,7 @@ _CALC_INTENT_RE = re.compile(
 )
 _RULE_LOOKUP_RE = re.compile(
     r"标准|规定|依据|文件|是什么|有哪些|怎么区分|政策|条款|费率表|收费办法|通知|目录"
+    r"|包括|包含|哪些|内容"
 )
 
 
@@ -7488,19 +7489,27 @@ _FEE_EXCLUDE_MARKERS = re.compile(
 def _apply_fee_exclusions(ctx: dict, text: str) -> bool:
     """「不需要/不算/排除 + 费种名」→ 从 ctx["fees"] 中移除（任何阶段可用）。
 
-    每个否定标记到下一个否定标记或句读之间为作用窗口，
+    作用窗口到下一个否定标记或句读为止；顿号不截断，保留
+    「不需要计算监理费、设计费、勘察费」这类连续列举；
+    标记后没有费种时，回溯本句读内标记前的部分
+    （「监理费、设计费、勘察费都不需要计算」），
     避免「不算监理费，但要算勘察费」中后者被误删。返回是否真的移除了费种。
     """
     changed = False
     for m in _FEE_EXCLUDE_MARKERS.finditer(text):
+        # 向后窗口：标记后到下一个否定标记或句读（顿号不截断）
         seg = text[m.end():]
         nxt = _FEE_EXCLUDE_MARKERS.search(seg)
         if nxt:
             seg = seg[:nxt.start()]
-        seg = re.split(r"[，。；;！!？?、\n]", seg)[0]
-        if not seg:
-            continue
-        for f in _detect_all_fee_types(seg):
+        seg = re.split(r"[，。；;！!？?\n]", seg)[0]
+        seg = re.sub(r"^(?:计算|算|要计算)", "", seg)
+        fees = _detect_all_fee_types(seg)
+        if not fees and not re.search(r"[一-鿿]", seg):
+            # 标记后无实质内容 → 费种在本句读内标记之前
+            before = re.split(r"[，。；;！!？?\n]", text[:m.start()])[-1]
+            fees = _detect_all_fee_types(before)
+        for f in fees:
             if f in ctx["fees"]:
                 ctx["fees"].remove(f)
                 ctx.setdefault("fee_exclusions", set()).add(f)
@@ -7515,11 +7524,13 @@ def build_checklist_meta(
     """解析用户查询，构建清单式对话任务上下文（纯静态解析，不做计算）。
 
     Returns None 当：
-    - 查询无计算意图（查规则等，落 LLM）
+    - 查询无计算意图（查规则等，落 LLM）；force=True 时跳过此检查
+      （用于任务进行中「新项目」重启：新文本可能只有金额没有费种，
+      仍应从清单第一步重新收集）
     - iteration/comparison 建安费齐全（恒走旧直算路径）
     - cascade 建安费齐全且 force=False（旧直算路径）
     """
-    if not fee_calc_intent(query):
+    if not fee_calc_intent(query) and not force:
         return None
 
     mode = _detect_multi_fee_mode(query)
@@ -7626,7 +7637,13 @@ def _needs_jianan(ctx: dict) -> bool:
 
 
 def current_stage(ctx: dict) -> str | None:
-    """返回当前未完成的清单阶段名；全部完成返回 None（可结算）。"""
+    """返回当前未完成的清单阶段名；全部完成返回 None（可结算）。
+
+    「上一步」回退（ctx["_reask"]）期间优先返回回退目标阶段，
+    直到该阶段重新确认完成（确认回调清除 _reask 后恢复常规推进）。
+    """
+    if ctx.get("_reask") in CHECKLIST_STAGES:
+        return ctx["_reask"]
     if not ctx.get("fees"):
         return "fees"
     if ctx.get("preset_all") and not ctx.get("fees_confirmed"):
@@ -8000,7 +8017,7 @@ def advance_checklist(ctx: dict, text: str, region: str | None = None) -> dict:
     cards = param_cards_for(ctx)
     if stage == "params":
         # 「剩余全部用默认值」/ 当前卡「用默认值」
-        if re.search(r"(?:全部|剩余|其余|剩下).{0,6}(?:默认|默认值)|(?:都|全)默认", text):
+        if re.search(r"(?:全部|剩余|其余|剩下).{0,6}(?:默认|默认值)|(?:都|全)(?:用|选|按)?默认(?:值)?", text):
             ctx["params_done"] = True
             recognized = True
         elif re.search(r"(?:用|按|就).{0,4}默认", text) and cards:
@@ -8054,12 +8071,26 @@ def advance_checklist(ctx: dict, text: str, region: str | None = None) -> dict:
     # 推进一次 qno+1（widget key 防冲突；renderer 同样负责推进）
     if recognized:
         ctx["qno"] = ctx.get("qno", 1) + 1
+
+    # 「上一步」回退期间，文本把回退目标的完成标志补齐 → 结束回退，恢复常规推进
+    # （fees 网格路径无完成标志，仍须按钮确认）
+    _r = ctx.get("_reask")
+    if _r == "custom" and ctx.get("custom_answered"):
+        ctx.pop("_reask", None)
+    elif _r == "discount" and ctx.get("discount_answered"):
+        ctx.pop("_reask", None)
+    elif _r == "amounts" and ctx["amounts"]["jianan"] is not None:
+        ctx.pop("_reask", None)
+    elif _r == "params" and ctx.get("params_done"):
+        ctx.pop("_reask", None)
+    elif _r == "fees" and ctx.get("preset_all") and ctx.get("fees_confirmed"):
+        ctx.pop("_reask", None)
     return {"recognized": recognized, "fee_domain_token": fee_token}
 
 
 _NEW_TASK_MARKERS = re.compile(
-    r"重新算|重算|重新计算|重来|再来(?:一遍|一次)?|从头(?:开始|算|再来)?|重新问|另算|"
-    r"另一个.{0,6}(?:项目|工程)|新项目|新工程|换个?(?:项目|工程)")
+    r"重新算|重算|重新计算|重来|再来(?:一遍|一次)?|从头(?:开始|算|再来)?|重新问|重新提问|另算|"
+    r"(?:另外|另|新|换)(?:一个?|个|的)?.{0,2}(?:项目|工程)")
 _APPEND_MARKERS = re.compile(r"改为|改成|换成|再加|加上|增加|新增|补充|还要|也需要")
 _NARROW_MARKERS = re.compile(r"只需要|只算|仅需要|仅算")
 
@@ -8274,6 +8305,74 @@ def _settle_shuibao_comp(sb_params: dict) -> dict | None:
         return None
 
 
+def _append_subtotal_step(rr: dict, final_val, fn: str,
+                          fee_discounts: dict | None) -> None:
+    """多子项费用（招标代理/造价咨询/环评/可研等）：计算步骤末尾补
+    「各项子费用相加」一步，使各项子费用之和等于该费种总费用。
+
+    明细各行的数值为折扣前金额；若该费种打了折（非 T0 折扣补乘），
+    公式追加「× 折扣」，最终结果取回显的折后值。
+    """
+    rows = rr.get("明细")
+    if not isinstance(rows, list) or len(rows) < 2:
+        return
+    steps = rr.get("计算步骤") or []
+    if not steps or steps[-1].get("步骤") in ("汇总", "各项子费用相加"):
+        return
+    vals: list[float] = []
+    for row in rows:
+        v = row.get("费用(万元)")
+        if v is None:
+            v = row.get("结果中值(万元)")
+        vals.append(v if isinstance(v, (int, float)) else 0.0)
+    sub_sum = round(sum(vals), 4)
+    disc = (fee_discounts or {}).get(fn)
+    has_disc = disc is not None and abs(disc - 1.0) >= 0.005
+    formula = " + ".join(
+        f"{v:.4f}".rstrip("0").rstrip(".") for v in vals)
+    if has_disc:
+        formula = f"（{formula}）× 折扣 {disc}"
+    result_val = round(sub_sum * disc, 4) if has_disc else sub_sum
+    if isinstance(final_val, (int, float)):
+        result_val = final_val
+    steps.append({
+        "步骤": "各项子费用相加",
+        "公式": f"{formula} 万元",
+        "结果": f"{result_val} 万元",
+    })
+
+
+def _annotate_hebei_cc_min_fee(cc_multi: dict) -> None:
+    """河北造价咨询费最低收费标准说明（冀建市研[2017]2号）。
+
+    每项服务收费低于 3000 元的按 3000 元收取、超过 3000 元的按标准收取。
+    单费种 calc 只把最低价落进数值，明细行看不出依据，此处补说明：
+    - 触底子项的「计算步骤」末尾追加「最低收费标准」一步
+    - 参数区写入完整规则说明（含超过 3000 元按标准收取）
+    """
+    _prof = float(cc_multi.get("参数", {}).get("专业调整系数", 1.0) or 1.0)
+    _min_hit = False
+    for _row in cc_multi.get("明细", []):
+        _row_steps = _row.get("计算步骤") or []
+        _pre = round(sum(
+            float(s.get("费用(万元)", 0) or 0)
+            for s in _row_steps) * _prof, 4)
+        _fee = _row.get("费用(万元)") or 0
+        if _pre > 0 and _pre < 0.3 and abs(_fee - 0.3) < 0.005:
+            _row_steps.append({
+                "步骤": "最低收费标准",
+                "公式": (f"计算费用 {_pre} 万元 < 每项最低 3000 元"
+                         f" → 按 3000 元收取"),
+                "结果": f"{_fee} 万元",
+            })
+            _row["计算步骤"] = _row_steps
+            _min_hit = True
+    if _min_hit:
+        cc_multi.setdefault("参数", {})["最低收费标准"] = (
+            "每项服务收费低于 3000 元按 3000 元收取；"
+            "超过 3000 元按标准收取")
+
+
 def compute_selected_fees(
     jianan: float,
     shebei: float,
@@ -8313,6 +8412,16 @@ def compute_selected_fees(
         "name": cf.get("name", cf.get("名称", "")),
         "amount_wan": cf.get("amount_wan", cf.get("金额(万元)", 0)),
     } for cf in (custom_fees or [])]
+    # 造价咨询服务费未明确选择时套用区域默认服务（与旧面板默认勾选一致）
+    service_selections = dict(service_selections or {})
+    if ("造价咨询费" in selected_fees
+            and not service_selections.get("造价咨询费")
+            and "造价咨询费" not in (contract_overrides or {})):
+        _cc_cat = FEE_CATALOG.get("造价咨询费", {}).get("conf", {})
+        _cc_default = (_cc_cat.get("default_hebei") if is_hebei_region(region)
+                       else _cc_cat.get("default_tianjin")) or []
+        if _cc_default:
+            service_selections["造价咨询费"] = list(_cc_default)
     shebei = shebei or 0.0
     total_part1 = round(jianan + shebei, 4)
     all_fee_names = set(FEE_CATALOG.keys())
@@ -8503,6 +8612,8 @@ def compute_selected_fees(
                         jianan_only=jianan,
                         total_investment=_cascade_total if _cascade_total > 0 else None,
                     )
+                if _hebei:
+                    _annotate_hebei_cc_min_fee(cc_multi)
                 numerical["造价咨询费(万元)"] = cc_multi.get("合计(万元)", 0)
                 preview_raw["原始结果"]["造价咨询费"] = cc_multi
                 t0_keys = [
@@ -8578,6 +8689,8 @@ def compute_selected_fees(
                                 total_investment=_curr_total,
                             )
                         numerical["造价咨询费(万元)"] = _cc_multi.get("合计(万元)", 0)
+                        if _hebei:
+                            _annotate_hebei_cc_min_fee(_cc_multi)
                         preview_raw["原始结果"]["造价咨询费"] = _cc_multi
 
                     # 5) 更新 T0
@@ -8664,10 +8777,114 @@ def compute_selected_fees(
     else:
         yb_val = round((total_part1 + _fee_for_yb) * float(yubei_rate) / 100.0, 4)
         numerical["预备费(万元)"] = yb_val
+        # 明细公式同步最终基数：多服务覆盖/水保费/非T0折扣补乘后二类费合计已变，
+        # 引擎内写的公式基数过期，不重写会出现「公式基数 ≠ 结果」的错位
+        _yb_rr = preview_raw.get("原始结果", {}).get("预备费")
+        if isinstance(_yb_rr, dict):
+            _yb_src = _yb_rr.get("预备费率来源") or "默认"
+            _yb_rr["计算公式"] = (
+                f"（{total_part1} + {round(_fee_for_yb, 4)}）× "
+                f"{float(yubei_rate)}%（{_yb_src}）")
+            _yb_rr["结果(万元)"] = yb_val
     custom_total = round(sum(cf["amount_wan"] for cf in custom_fees), 4)
     fee_total_with_custom = preview_raw.get("二类费合计(万元)", 0)
     project_total_with_custom = round(
         total_part1 + fee_total_with_custom + (yb_val or 0.0), 4)
+
+    # ── 详情归一化：各费种计算卡片回显最终数值与计算过程 ──
+    # 费率档位（区间/结果中值）、多服务覆盖（合计/明细）、合同折算、折扣补乘
+    # 都不更新 raw 明细里的「结果(万元)」，结算完成后统一同步一次；
+    # 无顶层计算步骤的明细（招标代理/造价咨询/环评/可研多服务）合成计算步骤。
+    _raw_details = preview_raw.get("原始结果", {})
+    for _fn in selected_fees:
+        _rr = _raw_details.get(_fn)
+        if not isinstance(_rr, dict):
+            continue
+        _val = numerical.get(f"{_fn}(万元)")
+        if _val is not None:
+            _rr["结果(万元)"] = _val
+        # 费率类费种：回显最终采用的费率（默认=档位中值，用户指定=所选值）
+        if _fn in RATE_PARAM_KEY_MAP and _val is not None:
+            _rate = (rate_overrides or {}).get(_fn)
+            _user_picked = _rate is not None
+            _disc = (fee_discounts or {}).get(_fn)
+            _has_disc = _disc is not None and abs(_disc - 1.0) >= 0.005
+            if _rate is None and (jianan + shebei) > 0:
+                # 数值可能已按折扣折算，推导费率前先还原
+                _v = _val / _disc if _has_disc else _val
+                _rate = round(_v / (jianan + shebei) * 100.0, 6)
+            if _rate is not None:
+                _params = _rr.get("参数")
+                if not isinstance(_params, dict):
+                    _params = {}
+                    _rr["参数"] = _params
+                _rate_disp = str(_rate).replace("%", "")
+                _params["最终费率"] = (
+                    f"{_rate_disp}%（用户指定）" if _user_picked
+                    else f"{_rate_disp}%（默认取区间中值）")
+                _st = _rr.get("计算步骤") or []
+                if _st and (_st[-1].get("步骤") == "逐费率计算"):
+                    _st.append({
+                        "步骤": "确定最终费率",
+                        "公式": (f"第一部分工程费 × {_rate}%"
+                                 + (f" × 折扣 {_disc}" if _has_disc else "")),
+                        "结果": f"{_val} 万元",
+                    })
+        if _rr.get("计算步骤"):
+            # 已有顶层步骤的多子项费用：末尾补「各项子费用相加」汇总
+            _append_subtotal_step(_rr, _val, _fn, fee_discounts)
+            continue
+        if not _rr.get("明细"):
+            # 无明细但有计算公式（预备费/勘察费选率/合同覆盖）→ 合成单步过程
+            if _rr.get("计算公式"):
+                _rr["计算步骤"] = [{
+                    "步骤": "计算",
+                    "公式": _rr["计算公式"],
+                    "结果": f"{_val} 万元" if _val is not None else "",
+                }]
+            continue
+        _steps: list = []
+        for _row in _rr["明细"]:
+            _svc = _row.get("服务类型") or _row.get("类型") or ""
+            _row_steps = _row.get("计算步骤") or []
+            for _s in _row_steps:
+                _ns = dict(_s)
+                _ns["步骤"] = " · ".join(
+                    x for x in (_svc, _s.get("步骤") or _s.get("区间") or "")
+                    if x)
+                if "公式" not in _ns and _s.get("金额(万元)") is not None:
+                    _rate = _s.get("费率(%)")
+                    _rate_txt = (f"{_rate}%" if _rate is not None
+                                 else (f"{_s.get('费率(‰)')}‰"
+                                       if _s.get("费率(‰)") is not None else ""))
+                    _ns["公式"] = f"{_s.get('金额(万元)')} 万元 × {_rate_txt}"
+                if "结果" not in _ns and _s.get("费用(万元)") is not None:
+                    _ns["结果"] = f"{_s.get('费用(万元)')} 万元"
+                _steps.append(_ns)
+            if not _row_steps:
+                _base = (_row.get("计费基数(万元)")
+                         if _row.get("计费基数(万元)") is not None
+                         else _row.get("基数(万元)"))
+                _steps.append({
+                    "步骤": _svc or "计算",
+                    "公式": (f"基数 {_base} 万元" if _base is not None else ""),
+                    "结果": f"{_row.get('费用(万元)', '')} 万元",
+                })
+        if _steps:
+            _rr["计算步骤"] = _steps
+        # 多子项费用：末尾补「各项子费用相加」一步，子项之和 = 该费种总费用
+        _append_subtotal_step(_rr, _val, _fn, fee_discounts)
+        # 分项明细（多服务/多类型费种的逐项金额，卡片统一展示）
+        if not _rr.get("分项明细"):
+            _items = [{
+                "类别": _row.get("服务类型") or _row.get("类型")
+                        or _row.get("费种", ""),
+                "基数(万元)": _row.get("计费基数(万元)",
+                                       _row.get("基数(万元)", 0)),
+                "费用(元)": round((_row.get("费用(万元)") or 0) * 10000, 2),
+            } for _row in _rr["明细"]]
+            if len(_items) > 1:
+                _rr["分项明细"] = _items
 
     preview = {
         "raw": preview_raw,

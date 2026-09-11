@@ -459,10 +459,24 @@ def _render_engine_card(fee_result):
             else:
                 st.markdown("**分档计算**：")
                 for s in steps:
+                    rate = s.get("费率(%)", s.get("费率(‰)", ""))
+                    unit = "%" if "费率(%)" in s else "‰"
                     st.markdown(
                         f"- {s.get('区间', '')}：{s.get('金额(万元)', '')}万元 "
-                        f"× {s.get('费率(%)', '')}% = **{s.get('费用(万元)', '')}万元**"
+                        f"× {rate}{unit} = **{s.get('费用(万元)', '')}万元**"
                     )
+        rate_detail = fee_result.get("费率明细")
+        if rate_detail:
+            st.markdown("**费率档位**：")
+            final_val = fee_result.get("结果(万元)")
+            for rd in rate_detail:
+                rv = rd.get("费用(万元)")
+                mark = ""
+                if (final_val is not None and rv is not None
+                        and isinstance(rv, (int, float))
+                        and abs(float(rv) - float(final_val)) < 0.005):
+                    mark = " ✔（最终采用）"
+                st.markdown(f"- {rd.get('费率', '')} → {rv} 万元{mark}")
         if "分摊" in fee_result:
             st.caption(fee_result["分摊"])
         adjustment = fee_result.get("计费额调整")
@@ -668,6 +682,33 @@ def _cancel_task(ctx: dict | None = None):
     st.rerun()
 
 
+def _step_back(ctx: dict, from_stage: str | None = None) -> None:
+    """⬅ 上一步：回退到上一阶段重新修改（已填数据保留，各卡以原值为默认）。
+
+    撤销目标阶段及之后阶段的「完成」标记，并置 ctx["_reask"] 强制重问
+    目标阶段；目标阶段重新确认完成后（确认回调清除 _reask）恢复常规推进。
+    """
+    stages = CHECKLIST_STAGES
+    stage = from_stage if from_stage is not None else current_stage(ctx)
+    idx = stages.index(stage) if stage in stages else len(stages)
+    if idx <= 0:
+        return  # 已在第一步，无上一步
+    target_idx = idx - 1
+    ctx["_reask"] = stages[target_idx]
+    ctx["_subflow"] = None
+    # 撤销目标及之后阶段的完成标记（金额等已填数据保留作默认值）
+    if target_idx <= 0:
+        ctx["fees_confirmed"] = False
+    if target_idx <= 2:
+        ctx["custom_answered"] = False
+    if target_idx <= 3:
+        ctx["params_done"] = False
+        ctx["param_idx"] = 0
+    if target_idx <= 4:
+        ctx["discount_answered"] = False
+    ctx["qno"] = ctx.get("qno", 1) + 1
+
+
 def _task_progress_header(ctx: dict, stage: str | None):
     """提问气泡顶部：进度徽标 + 已识别信息摘要。"""
     stages = CHECKLIST_STAGES
@@ -720,8 +761,16 @@ def _ask_bubble(ctx: dict):
         _finalize_confirm(ctx)
 
     st.markdown("---")
-    if st.button("🗑 结束本次计算", key=f"ck_cancel_{stage}_{ctx.get('qno', 1)}"):
-        _cancel_task(ctx)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("⬅ 上一步", key=f"ck_back_{stage}_{ctx.get('qno', 1)}",
+                     use_container_width=True, disabled=stage == "fees"):
+            _step_back(ctx, from_stage=stage)
+            st.rerun()
+    with c2:
+        if st.button("🗑 结束本次计算", key=f"ck_cancel_{stage}_{ctx.get('qno', 1)}",
+                     use_container_width=True):
+            _cancel_task(ctx)
 
 
 def _ask_fees(ctx: dict):
@@ -734,6 +783,7 @@ def _ask_fees(ctx: dict):
         if st.button("✅ 没有，全部计算", key=f"ck_fees_allok_{qno}",
                      use_container_width=True, type="primary"):
             ctx["fees_confirmed"] = True
+            ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
         st.caption("如有不需要的费种，直接回复即可，"
@@ -771,6 +821,7 @@ def _ask_fees(ctx: dict):
         if st.button("✅ 确认所选费种", key=f"ck_fees_ok_{qno}", use_container_width=True,
                      disabled=not selected):
             ctx["fees_confirmed"] = True
+            ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
 
@@ -787,11 +838,13 @@ def _ask_amounts(ctx: dict):
     c1, c2 = st.columns(2)
     with c1:
         jianan_in = st.number_input(
-            "建安工程费（万元）", min_value=0.0, value=0.0, step=100.0,
+            "建安工程费（万元）", min_value=0.0,
+            value=float(am.get("jianan") or 0.0), step=100.0,
             key=f"ck_amounts_jianan_{qno}")
     with c2:
         shebei_in = st.number_input(
-            "设备购置费（万元，没有可留空）", min_value=0.0, value=0.0, step=50.0,
+            "设备购置费（万元，没有可留空）", min_value=0.0,
+            value=float(am.get("shebei") or 0.0), step=50.0,
             key=f"ck_amounts_shebei_{qno}")
     col1, col2 = st.columns(2)
     with col1:
@@ -802,6 +855,10 @@ def _ask_amounts(ctx: dict):
             if shebei_in and shebei_in > 0:
                 am["shebei"] = float(shebei_in)
                 am["shebei_known"] = True
+            else:
+                am.pop("shebei", None)
+                am.pop("shebei_known", None)
+            ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
     with col2:
@@ -842,6 +899,7 @@ def _ask_custom(ctx: dict):
     with c1:
         if st.button("🚫 不需要", key=f"ck_custom_no_{qno}", use_container_width=True):
             ctx["custom_answered"] = True
+            ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
     with c2:
@@ -860,6 +918,7 @@ def _ask_custom(ctx: dict):
         if st.button("✅ 确认，无需更多", key=f"ck_custom_done_{qno}",
                      use_container_width=True):
             ctx["custom_answered"] = True
+            ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
 
@@ -948,6 +1007,7 @@ def _params_advance(ctx: dict, pidx: int, n_cards: int):
         ctx["param_idx"] = pidx + 1
     else:
         ctx["params_done"] = True
+        ctx.pop("_reask", None)
 
 
 def _clear_card_overrides(ctx: dict, card: dict):
@@ -1019,6 +1079,13 @@ def _ask_params(ctx: dict):
         if st.button("⚡ 剩余全部用默认值", key=f"ck_params_alldef_{qno}",
                      use_container_width=True):
             ctx["params_done"] = True
+            ctx.pop("_reask", None)
+            ctx["qno"] = qno + 1
+            st.rerun()
+    if pidx > 0:
+        if st.button("⬅ 上一项参数（返回修改上一个费种的设置）",
+                     key=f"ck_params_prev_{qno}", use_container_width=True):
+            ctx["param_idx"] = pidx - 1
             ctx["qno"] = qno + 1
             st.rerun()
 
@@ -1287,6 +1354,7 @@ def _ask_discount(ctx: dict):
     with c1:
         if st.button("🚫 不需要", key=f"ck_disc_no_{qno}", use_container_width=True):
             ctx["discount_answered"] = True
+            ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
     with c2:
@@ -1299,6 +1367,7 @@ def _ask_discount(ctx: dict):
                      use_container_width=True):
             ctx["discount_scenario"] = True
             ctx["discount_answered"] = True
+            ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
 
@@ -1322,6 +1391,7 @@ def _discount_loop(ctx: dict):
         if st.button("✅ 应用", key=f"ck_dl_ok_{qno}", use_container_width=True):
             ctx.setdefault("discounts", {})[fn[0]] = float(coef)
             ctx["discount_answered"] = True
+            ctx.pop("_reask", None)
             ctx["_subflow"] = None
             ctx["qno"] = qno + 1
             st.rerun()
@@ -1402,6 +1472,13 @@ def _finalize_and_render(ctx: dict):
 
 def _render_result_payload(ctx: dict):
     """done 阶段：汇总指标 + 各费种分步计算 + Excel/折扣对比按钮。"""
+    if st.button("⬅ 返回修改设置", key=f"ck_result_back_{ctx.get('qno', 1)}"):
+        # 回到最后一个步骤（折扣）重新确认；可继续「上一步」回退到更早阶段
+        ctx["phase"] = "ask"
+        ctx["_reask"] = "discount"
+        ctx["discount_answered"] = False
+        ctx["qno"] = ctx.get("qno", 1) + 1
+        st.rerun()
     payload = ctx.get("payload")
     if payload:
         preview = payload["preview"]
@@ -1485,19 +1562,21 @@ def _render_result_payload(ctx: dict):
                 st.warning(f"**{fn}**：计算失败（参数不足）")
 
 
-def _try_start_fee_task(query: str) -> bool:
+def _try_start_fee_task(query: str, *, force_task: bool = False) -> bool:
     """尝试启动清单式任务流。返回 True 表示已接管（调用方立即 rerun）。
 
     路由规则：
-    - fee_calc_intent False（查规则等）→ 落 LLM，返回 False
+    - fee_calc_intent False（查规则等）→ 落 LLM，返回 False；
+      force_task=True（任务进行中「新项目」重启）时跳过意图检查，
+      即使新文本只有金额没有费种，也从清单第一步重新收集
     - cascade/iteration/comparison 且金额齐 → 旧直算路径（B3 翻转后进清单机）
     - 其余 → build_checklist_meta → pending_task，返回 True
     """
-    if not fee_calc_intent(query):
+    if not fee_calc_intent(query) and not force_task:
         return False
     ctx = build_checklist_meta(
         query, region=st.session_state.get("selected_region"),
-        force=_TASK_FLOW_CASCADE,
+        force=_TASK_FLOW_CASCADE or force_task,
     )
     if ctx is None:
         return False
@@ -1665,6 +1744,7 @@ if prompt:
     # === 清单式任务流：进行中的任务 → 自由文本推进 ===
     pending_task = st.session_state.get("pending_task")
     _user_msg_appended = False
+    _force_restart = False
     if pending_task and pending_task.get("phase") == "ask":
         _user_msg_appended = True
         st.session_state.messages.append({"role": "user", "content": prompt})
@@ -1673,6 +1753,9 @@ if prompt:
         _restart_q = detect_new_task_intent(pending_task, prompt)
         if _restart_q:
             # 中途的新问题 → 结束旧任务，按新查询重新启动（裸「重新算」用原查询）
+            # 新文本可能只有金额没有费种（如「帮我算一个新的项目，建安费8000万」），
+            # 强制从清单第一步重新收集，不因 fee_calc_intent 为 False 落 LLM
+            _force_restart = True
             _typed = prompt
             prompt = _restart_q
             st.session_state.pop("pending_task", None)
@@ -1710,7 +1793,7 @@ if prompt:
             st.markdown(prompt)
 
     # === 清单式任务流接管（缺金额/缺费种等旧路径会丢的场景）===
-    if _try_start_fee_task(prompt):
+    if _try_start_fee_task(prompt, force_task=_force_restart):
         st.rerun()
 
     # 生成回答
