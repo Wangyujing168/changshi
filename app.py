@@ -1615,7 +1615,9 @@ with st.sidebar:
     st.markdown("- 智能问答（已上线）")
     st.markdown("- 二类费计算（已上线）")
     st.markdown("- 指标对比分析（开发中）")
-    st.markdown("- 材料价格趋势（开发中）")
+    st.markdown("- 正反项目案例（开发中）")
+    st.markdown("- 表格预处理（开发中）")
+    st.markdown("- 政策文件说明（开发中）")
 
     st.divider()
 
