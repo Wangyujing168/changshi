@@ -16,6 +16,7 @@ from fee_engine import (
     calc_discount_scenarios,
     _get_coef_config_simple,
     _preset_fee_numbers,
+    build_excel_summary,
 )
 
 # ===== 清单式任务流（checklist task flow）双轨开关 =====
@@ -187,206 +188,15 @@ st.set_page_config(
 
 
 def _build_cascade_excel(ctx: dict) -> bytes:
-    """根据级联计算结果生成 Excel 文件，返回 bytes 供下载。"""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill, numbers
-    from openpyxl.utils import get_column_letter
-    import datetime
+    """根据计算结果生成「活公式」Excel 文件，返回 bytes 供下载。
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "费用汇总"
+    四 sheet 构建（费用汇总/输入参数/计算规则/计算过程）在
+    fee_engine.build_excel_summary：全部费用为活公式，修改黄色输入格
+    （建安费/设备费/折扣/费率/档位表）后自动重算；循环引用依赖 Excel
+    迭代计算（文件已内置 calcPr 设置）。
+    """
+    return build_excel_summary(ctx)
 
-    # ── 样式定义 ──
-    thin_border = Border(
-        left=Side(style="thin"), right=Side(style="thin"),
-        top=Side(style="thin"), bottom=Side(style="thin"))
-    header_font = Font(name="微软雅黑", bold=True, size=11)
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_font_w = Font(name="微软雅黑", bold=True, size=11, color="FFFFFF")
-    title_font = Font(name="微软雅黑", bold=True, size=14)
-    subtotal_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
-    normal_font = Font(name="微软雅黑", size=10)
-    bold_font = Font(name="微软雅黑", bold=True, size=10)
-    center_align = Alignment(horizontal="center", vertical="center")
-    left_align = Alignment(horizontal="left", vertical="center")
-    right_align = Alignment(horizontal="right", vertical="center")
-    money_fmt = '#,##0.00'
-
-    preview = ctx.get("preview", {})
-    numerical = preview.get("numerical", {}) if preview else {}
-    fee_defs = ctx.get("fee_defs", [])
-    selected = ctx.get("selected_fees", set())
-    custom_fees = ctx.get("custom_fees", [])
-    fee_discounts = ctx.get("fee_discounts", {})
-
-    # ── 列宽预设 ──
-    ws.column_dimensions["A"].width = 6
-    ws.column_dimensions["B"].width = 26
-    ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 14
-    ws.column_dimensions["E"].width = 18
-    ws.column_dimensions["F"].width = 28
-
-    row = 1
-    # ── 标题 ──
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
-    ws.cell(row=row, column=1, value="建设项目二类费计算汇总表").font = title_font
-    ws.cell(row=row, column=1).alignment = center_align
-    row += 1
-
-    # ── 项目基本信息 ──
-    info_data = [
-        ("建安工程费", f"{ctx.get('jianan', 0):.2f} 万元"),
-        ("设备购置费", f"{ctx.get('shebei', 0):.2f} 万元"),
-        ("第一部分工程费", f"{ctx.get('total_part1', 0):.2f} 万元"),
-        ("项目类型", ctx.get("project_type", "")),
-        ("计算日期", datetime.date.today().isoformat()),
-    ]
-    for label, val in info_data:
-        ws.cell(row=row, column=1, value=label).font = bold_font
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=3)
-        ws.cell(row=row, column=2, value=val).font = normal_font
-        row += 1
-    row += 1
-
-    # ── 表头 ──
-    headers = ["序号", "费用名称", "费用（万元）", "打折后（万元）", "备注", "依据"]
-    for col_idx, h in enumerate(headers, 1):
-        cell = ws.cell(row=row, column=col_idx, value=h)
-        cell.font = header_font_w
-        cell.fill = header_fill
-        cell.alignment = center_align
-        cell.border = thin_border
-    row += 1
-
-    # ── 按层级输出各费种 ──
-    seq = 0
-    raw_total = 0.0
-    discounted_total = 0.0
-    tier_names = {0: "第一部分工程费相关", 1: "勘察设计费相关", 2: "总投资相关"}
-
-    for tier in [0, 1, 2]:
-        tier_fees = sorted(
-            [fd for fd in fee_defs if fd["tier"] == tier and fd["name"] in selected],
-            key=lambda fd: fd["name"])
-        if not tier_fees:
-            continue
-        # 层级小标题
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
-        tier_cell = ws.cell(row=row, column=1, value=tier_names.get(tier, f"Tier {tier}"))
-        tier_cell.font = Font(name="微软雅黑", bold=True, size=10, color="4472C4")
-        tier_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-        row += 1
-
-        for fd in tier_fees:
-            fn = fd["name"]
-            val = numerical.get(f"{fn}(万元)")
-            if val is None or val <= 0:
-                continue
-            seq += 1
-            disc = fee_discounts.get(fn, 1.0)
-            # 数值已含折扣（T0 由引擎应用、非 T0 结算侧补乘），避免二次打折
-            disc_val = val
-            raw_total += val
-            discounted_total += disc_val
-
-            # 备注
-            notes = []
-            if fn in ctx.get("coef_overrides", {}):
-                for k, v in ctx["coef_overrides"][fn].items():
-                    if abs(v - 1.0) > 0.005:
-                        notes.append(f"{k}={v}")
-            if fn in ctx.get("rate_overrides", {}):
-                notes.append(f"费率={ctx['rate_overrides'][fn]}")
-            if fn in ctx.get("service_selections", {}):
-                svcs = ctx["service_selections"][fn]
-                notes.append(f"{'、'.join(svcs)}")
-            if abs(disc - 1.0) >= 0.005:
-                notes.append(f"打折={disc:.2f}")
-            note_str = "；".join(notes) if notes else ""
-            display_val = disc_val if abs(disc - 1.0) >= 0.005 else val
-
-            ws.cell(row=row, column=1, value=seq).font = normal_font
-            ws.cell(row=row, column=1).alignment = center_align
-            ws.cell(row=row, column=2, value=fd["label"]).font = normal_font
-            ws.cell(row=row, column=3, value=val).font = normal_font
-            ws.cell(row=row, column=3).number_format = money_fmt
-            ws.cell(row=row, column=3).alignment = right_align
-            ws.cell(row=row, column=4, value=display_val).font = normal_font
-            ws.cell(row=row, column=4).number_format = money_fmt
-            ws.cell(row=row, column=4).alignment = right_align
-            ws.cell(row=row, column=5, value=note_str).font = Font(name="微软雅黑", size=9)
-            ws.cell(row=row, column=6, value=fd.get("依据", "")).font = Font(name="微软雅黑", size=9)
-            for c in range(1, 7):
-                ws.cell(row=row, column=c).border = thin_border
-            row += 1
-
-    # ── 自定义费用 ──
-    if custom_fees:
-        for cf in custom_fees:
-            seq += 1
-            cf_amount = cf["amount_wan"]
-            raw_total += cf_amount
-            discounted_total += cf_amount
-            ws.cell(row=row, column=1, value=seq).font = normal_font
-            ws.cell(row=row, column=1).alignment = center_align
-            ws.cell(row=row, column=2, value=f"【自定义】{cf['name']}").font = normal_font
-            ws.cell(row=row, column=3, value=cf_amount).font = normal_font
-            ws.cell(row=row, column=3).number_format = money_fmt
-            ws.cell(row=row, column=3).alignment = right_align
-            ws.cell(row=row, column=4, value=cf_amount).font = normal_font
-            ws.cell(row=row, column=4).number_format = money_fmt
-            ws.cell(row=row, column=4).alignment = right_align
-            ws.cell(row=row, column=5, value="自定义费用，不打折").font = Font(name="微软雅黑", size=9)
-            for c in range(1, 7):
-                ws.cell(row=row, column=c).border = thin_border
-            row += 1
-
-    # ── 二类费合计 ──
-    for c in range(1, 7):
-        ws.cell(row=row, column=c).fill = subtotal_fill
-        ws.cell(row=row, column=c).border = thin_border
-    ws.cell(row=row, column=2, value="二类费合计").font = bold_font
-    ws.cell(row=row, column=3, value=round(raw_total, 4)).font = bold_font
-    ws.cell(row=row, column=3).number_format = money_fmt
-    ws.cell(row=row, column=3).alignment = right_align
-    display_disc_total = round(discounted_total, 4)
-    ws.cell(row=row, column=4, value=display_disc_total).font = bold_font
-    ws.cell(row=row, column=4).number_format = money_fmt
-    ws.cell(row=row, column=4).alignment = right_align
-    row += 1
-
-    # ── 预备费 ──
-    yb_val = preview.get("yubei_total", 0) if preview else 0
-    if yb_val > 0:
-        for c in range(1, 7):
-            ws.cell(row=row, column=c).border = thin_border
-        ws.cell(row=row, column=2, value="预备费（基本预备费）").font = bold_font
-        ws.cell(row=row, column=3, value=round(yb_val, 4)).font = bold_font
-        ws.cell(row=row, column=3).number_format = money_fmt
-        ws.cell(row=row, column=3).alignment = right_align
-        ws.cell(row=row, column=4, value=round(yb_val, 4)).font = bold_font
-        ws.cell(row=row, column=4).number_format = money_fmt
-        ws.cell(row=row, column=4).alignment = right_align
-        row += 1
-
-    # ── 项目总投资 ──
-    project_total = preview.get("project_total_with_custom", 0) if preview else 0
-    for c in range(1, 7):
-        ws.cell(row=row, column=c).fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-        ws.cell(row=row, column=c).border = thin_border
-    ws.cell(row=row, column=2, value="项目总投资").font = Font(name="微软雅黑", bold=True, size=11)
-    ws.cell(row=row, column=3, value=round(project_total, 4)).font = Font(name="微软雅黑", bold=True, size=11)
-    ws.cell(row=row, column=3).number_format = money_fmt
-    ws.cell(row=row, column=3).alignment = right_align
-
-    # ── 保存到内存 ──
-    import io
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output.getvalue()
 
 
 
@@ -1563,7 +1373,14 @@ def _render_result_payload(ctx: dict):
         col1, col2 = st.columns(2)
         with col1:
             try:
-                excel_bytes = _build_cascade_excel(payload)
+                excel_bytes = _build_cascade_excel({
+                    **payload,
+                    "region": ctx.get("region"),
+                    "yubei_rate": ctx.get("yubei_rate"),
+                    "jiaoyi_party": ctx.get("jiaoyi_party"),
+                    "spec_overrides": ctx.get("spec_overrides"),
+                    "discounts": ctx.get("discounts"),
+                })
                 st.download_button(
                     "📥 导出 Excel 汇总表",
                     data=excel_bytes,
