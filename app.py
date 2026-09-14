@@ -15,6 +15,7 @@ from fee_engine import (
     linear_rate_options, _build_shencha_rate_options, fee_catalog_for,
     calc_discount_scenarios,
     _get_coef_config_simple,
+    _preset_fee_numbers,
 )
 
 # ===== 清单式任务流（checklist task flow）双轨开关 =====
@@ -777,17 +778,45 @@ def _ask_fees(ctx: dict):
     qno = ctx.get("qno", 1)
     if ctx.get("preset_all") and not ctx.get("fees_confirmed"):
         # 未指明费种：默认全量计算，先确认是否有不需要的费种
+        preset = _preset_fee_numbers()
+        excluded = ctx.get("fee_exclusions") or set()
         st.markdown(
-            f"未指明具体费种，将**默认计算全部 {len(ctx.get('fees') or [])} 项二类费**"
-            f"（不含交易服务费）。\n\n**是否有不需要计算的费用？**")
-        if st.button("✅ 没有，全部计算", key=f"ck_fees_allok_{qno}",
+            f"未指明具体费种，将**默认计算全部 {len(preset)} 项二类费**"
+            f"（不含交易服务费）。\n\n**是否有不需要计算的费用？**"
+            f"点击序号即可排除，或直接回复序号。")
+        cols = st.columns(3)
+        for n, name, label in preset:
+            is_ex = name in excluded
+            with cols[(n - 1) % 3]:
+                if st.button(
+                    f"{'🚫 ' if is_ex else ''}{n}. {label}",
+                    key=f"ck_fees_ex_{name}_{qno}",
+                    use_container_width=True,
+                    type="primary" if is_ex else "secondary",
+                ):
+                    if is_ex:
+                        excluded.discard(name)
+                        if name not in ctx["fees"]:
+                            ctx["fees"].append(name)
+                    else:
+                        excluded.add(name)
+                        if name in ctx["fees"]:
+                            ctx["fees"].remove(name)
+                    ctx["fee_exclusions"] = excluded
+                    ctx["qno"] = qno + 1
+                    st.rerun()
+        remain = len(ctx["fees"])
+        if st.button(f"✅ 确认，按剩余 {remain} 项计算",
+                     key=f"ck_fees_allok_{qno}",
                      use_container_width=True, type="primary"):
             ctx["fees_confirmed"] = True
             ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
-        st.caption("如有不需要的费种，直接回复即可，"
-                   "例如：**「不需要勘察费、不算监理费」**。")
+        st.caption(
+            "也可以直接回复：**「不需要 3、5」** / **「3、5」**"
+            "（排除第 3、5 项）/ **「除了 3-5，其他都要」**。"
+            "全部都要算的话直接点上方确认即可。")
         return
     st.markdown("请问需要计算哪些**二类费**？（点击选择，可多选）")
     defs = fee_catalog_for(ctx.get("region"))
@@ -1216,7 +1245,7 @@ def _ask_service_card(ctx: dict, card: dict, qno: int):
         default = conf.get("default_hebei") if hebei else conf.get("default_tianjin")
     elif fee_name == "环境影响咨询费":
         svc_list = [{"name": s, "label": s} for s in _HP_SERVICES]
-        default = ["编制报告书"]
+        default = ["编制报告表", "评估报告表"]
     else:  # 可行性研究费
         svc_list = [{"name": s, "label": s} for s in _KY_SERVICES]
         default = ["编制可研报告"]
