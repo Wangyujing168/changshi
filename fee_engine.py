@@ -9198,8 +9198,9 @@ def calc_discount_scenarios(
 #      修改档位表单元格，公式自动跟随。不使用动态数组函数（WPS 兼容）。
 #   2) 折前/折后两层：引擎的非 T0 折扣在迭代收敛后补乘（compute_selected_fees），
 #      最终预备费按折后二类费合计重算。Excel 同构：循环引用网只发生在
-#      「计算过程」sheet 的折前层（PROC_*）；「费用汇总」E 列=折前活公式，
-#      F 列（打折后）=E×折扣；T1 基数引用 T0 的 F 列；合计/预备费/总投资全用 F 列。
+#      「计算过程」sheet 的折前层（PROC_*）；「费用汇总」I 列（其他）=折前公式×
+#      折扣（单列显示折后金额），J 列（合计）=SUM(F:I)；T1 基数引用 T0 折后
+#      （SUM_*_F 命名格）；第二部分/预备费/总投资引用 I 列。
 #   3) 循环引用用 Excel 迭代计算（CalcProperties: iterate=True, 100 轮, 0.001）。
 #      不动点映射压缩（建管费边际≤2%、可研≤1.1%、环评≤0.8%、造价咨询≤3‰、
 #      预备费 5%）→ 收缩系数 L≈0.094，100 轮远优于引擎 0.005 判据。
@@ -9686,6 +9687,13 @@ def build_excel_summary(ctx: dict) -> bytes:
     FILL_SUB = PatternFill("solid", fgColor="D9E2F3")
     THIN = Side(style="thin", color="999999")
     BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    # 概算表表头逐边复刻用（参考文件合并区内部格只画部分边，WPS 下照此渲染）
+    _B_BOT = Border(bottom=THIN)
+    _B_TB = Border(top=THIN, bottom=THIN)
+    _B_LR = Border(left=THIN, right=THIN)
+    _B_LRT = Border(left=THIN, right=THIN, top=THIN)
+    _B_LRB = Border(left=THIN, right=THIN, bottom=THIN)
+    _B_RTB = Border(right=THIN, top=THIN, bottom=THIN)
     FMT_MONEY = "#,##0.00"
     FMT_NUM4 = "#,##0.0000"
     AL_C = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -9768,91 +9776,138 @@ def build_excel_summary(ctx: dict) -> bytes:
     sc_contract = "施工图审查费" in sem["contract_overrides"]
 
     # ══════════════ Sheet1 费用汇总 ══════════════
+    # 布局参照「概算汇总表.xlsx」概算表：14 列（项/目/节/细目/工程或费用名称/建筑/安装/
+    # 设备及工器具购置/其他/合计/单位/数量/单位价值/备注），标题＋项目名称＋3 层合并表头
+    # （行 3-5），按「第一部分 建筑安装工程费 / 第二部分 工程建设其他费 / 第三部分
+    # 预备费 / 工程总投资」分节；金额活公式集中在 I 列（其他），J 列（合计）=SUM(F:I)，
+    # 技术经济指标 K-L-M 列（单位/数量/单位价值）。
+    F_HEAD_REF = Font(name="宋体", size=10)
+    F_PART_BOLD = Font(name="宋体", size=10, bold=True)
+    F_TITLE_REF = Font(name="宋体", size=12, bold=True)
+
     r = 1
-    ws_sum.merge_cells("A1:H1")
-    _set(ws_sum, "A1", "工程造价汇总表", F_TITLE, align=AL_C)
-    ws_sum.merge_cells("A2:H2")
-    _set(ws_sum, "A2",
-         "黄色单元格可直接修改（建安费/设备费/折扣/费率/合同价等），全部费用公式自动重算；"
-         "档位规则见「计算规则」，其余输入见「输入参数」。",
-         F_NOTE, align=AL_L)
-    r = 3
-    _set(ws_sum, "A3", "建安工程费（万元）", F_BOLD, border=BORDER)
-    _set(ws_sum, "B3", sem["jianan"], F_BASE, FILL_INPUT, FMT_MONEY, BORDER)
-    names.append(("SUM_JA", "费用汇总", "$B$3"))
-    _set(ws_sum, "C3", "设备购置费（万元）", F_BOLD, border=BORDER)
-    _set(ws_sum, "D3", sem["shebei"], F_BASE, FILL_INPUT, FMT_MONEY, BORDER)
-    names.append(("SUM_SB", "费用汇总", "$D$3"))
-    _set(ws_sum, "E3", "第一部分工程费（万元）", F_BOLD, border=BORDER)
-    _set(ws_sum, "F3", "=SUM_JA+SUM_SB", F_BOLD, fmt=FMT_MONEY, border=BORDER)
-    names.append(("SUM_P1", "费用汇总", "$F$3"))
-    _set(ws_sum, "G3", "项目类型", F_BOLD, border=BORDER)
-    _set(ws_sum, "H3", sem["project_type"], F_BASE, FILL_INPUT, border=BORDER)
-    r = 4
-    _set(ws_sum, "A4", "区域", F_BOLD, border=BORDER)
-    _set(ws_sum, "B4", "河北" if sem["hebei"] else "天津", F_BASE, FILL_INPUT, border=BORDER)
-    _set(ws_sum, "C4", "交易服务费计费方", F_BOLD, border=BORDER)
-    _set(ws_sum, "D4", sem["jiaoyi_party"], F_BASE, FILL_INPUT, border=BORDER)
-    _set(ws_sum, "E4", "计算日期", F_BOLD, border=BORDER)
-    _set(ws_sum, "F4", "=TODAY()", F_BASE, fmt="yyyy-mm-dd", border=BORDER)
-    r = 5
-    ws_sum.merge_cells("A5:H5")
-    _set(ws_sum, "A5",
-         "若打开后费用为 0 或提示循环引用：请开启迭代计算（Excel：文件→选项→公式→启用迭代计算；"
-         "WPS：文件→选项→重新计算→迭代计算，最大迭代 100，误差 0.001）。本文件已内置该设置。",
-         F_NOTE, align=AL_L)
+    ws_sum.merge_cells("A1:N1")
+    _set(ws_sum, "A1", "总 概 算 表", F_TITLE_REF, align=AL_C)
+    ws_sum.row_dimensions[1].height = 30
+    _set(ws_sum, "A2", "项目名称：", F_HEAD_REF, align=AL_L, border=_B_BOT)
+    ws_sum.merge_cells("B2:N2")
+    _set(ws_sum, "B2", "", F_HEAD_REF, FILL_INPUT, align=AL_L, border=_B_BOT)
+    for _j in range(3, 15):  # 项目名称行仅下边线（与概算表一致）
+        _set(ws_sum, f"{get_column_letter(_j)}2", None, border=_B_BOT)
+    ws_sum.row_dimensions[2].height = 23.25
+
+    # 3 层合并表头（行 3-5，与概算表一致：宋体、细边框、居中、垂直合并；
+    # 边框逐边复刻参考文件——合并区内部格也按边补线，WPS 渲染不断线）
+    for _mg, _t in [("A3:A5", "项"), ("B3:B5", "目"), ("C3:C5", "节"),
+                    ("D3:D5", "细目"), ("E3:E5", "工 程 或 费 用 名 称")]:
+        ws_sum.merge_cells(_mg)
+        _set(ws_sum, _mg.split(":")[0], _t, F_HEAD_REF, border=BORDER, align=AL_C)
+    ws_sum.merge_cells("F3:J3")
+    _set(ws_sum, "F3", "概      算     金     额   （  万     元  ）",
+         F_HEAD_REF, border=BORDER, align=AL_C)
+    for _j in (7, 8, 9):  # G3/H3/I3：合并区内部，仅上下边
+        _set(ws_sum, f"{get_column_letter(_j)}3", None, border=_B_TB)
+    _set(ws_sum, "J3", None, border=_B_RTB)
+    ws_sum.merge_cells("K3:M3")
+    _set(ws_sum, "K3", "技  术  经  济  指  标", F_HEAD_REF, border=BORDER, align=AL_C)
+    _set(ws_sum, "L3", None, border=_B_TB)
+    _set(ws_sum, "M3", None, border=_B_RTB)
+    ws_sum.merge_cells("N3:N5")
+    _set(ws_sum, "N3", "备    注", F_HEAD_REF, border=BORDER, align=AL_C)
+    for _j in range(1, 6):  # A4-E4：垂直合并区内部，仅左右边
+        _set(ws_sum, f"{get_column_letter(_j)}4", None, border=_B_LR)
+    for _j, _t4, _t5 in [(6, "建   筑", "工   程"), (7, "安   装", "工   程"),
+                         (8, "设备及工", "器具购置"), (9, "其   他", "费   用")]:
+        _col = get_column_letter(_j)
+        _set(ws_sum, f"{_col}4", _t4, F_HEAD_REF, border=_B_LRT, align=AL_C)
+        _set(ws_sum, f"{_col}5", _t5, F_HEAD_REF, border=_B_LRB, align=AL_C)
+    ws_sum.merge_cells("J4:J5")
+    _set(ws_sum, "J4", "合   计", F_HEAD_REF, border=BORDER, align=AL_C)
+    _set(ws_sum, "J5", None, border=_B_LRB)
+    ws_sum.merge_cells("K4:K5")
+    _set(ws_sum, "K4", "单 位", F_HEAD_REF, border=BORDER, align=AL_C)
+    _set(ws_sum, "K5", None, border=_B_LRB)
+    ws_sum.merge_cells("L4:L5")
+    _set(ws_sum, "L4", "数 量", F_HEAD_REF, border=BORDER, align=AL_C)
+    _set(ws_sum, "L5", None, border=_B_LRB)
+    _set(ws_sum, "M4", "单位价值", F_HEAD_REF, border=_B_LRT, align=AL_C)
+    _set(ws_sum, "M5", "（元）", F_HEAD_REF, border=_B_LRB, align=AL_C)
+    _set(ws_sum, "N4", None, border=_B_LR)
+    _set(ws_sum, "N5", None, border=_B_LRB)
+    for _hr in (3, 4, 5):
+        ws_sum.row_dimensions[_hr].height = 20.1
     r = 6
-    for j, h in enumerate(["序号", "费用名称", "计算基数（万元）", "费率·系数",
-                           "费用（万元）=公式", "打折后费用（万元）", "备注", "依据"]):
-        _set(ws_sum, f"{get_column_letter(j+1)}{r}", h, F_WHITE_BOLD, FILL_HEADER,
-             border=BORDER, align=AL_C)
-    r = 7
 
-    rowref = {}
-    no = 0
+    rowref = {}  # 费种名 -> 费用行行号（I 列）
 
-    def _sec(title):
-        nonlocal r
-        ws_sum.merge_cells(f"A{r}:H{r}")
-        _set(ws_sum, f"A{r}", title, F_BOLD, FILL_SUB, border=BORDER, align=AL_L)
+    def _bordered_row(rr):
+        for _j in range(1, 15):
+            _set(ws_sum, f"{get_column_letter(_j)}{rr}", None, border=BORDER)
+
+    def _unit_value(rr):
+        # 技术经济指标：单位价值（元）= 合计×10000÷数量（数量留空则不显示）
+        return f'=IF(N(L{rr})>0,J{rr}*10000/L{rr},"")'
+
+    # ── 一、第一部分 建筑安装工程费 ──
+    _bordered_row(r)
+    _set(ws_sum, f"A{r}", "一", F_PART_BOLD, align=AL_C)
+    _set(ws_sum, f"E{r}", "第一部分 建筑安装工程费", F_PART_BOLD, align=AL_C)
+    for _col in "FGHI":
+        _set(ws_sum, f"{_col}{r}", f"=SUM({_col}{r+1}:{_col}{r+2})",
+             F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    names.append(("SUM_P1", "费用汇总", f"$J${r}"))
+    p1_row = r
+    r += 1
+    _bordered_row(r)
+    _set(ws_sum, f"B{r}", 1, F_HEAD_REF, align=AL_C)
+    _set(ws_sum, f"E{r}", "建安工程费", F_HEAD_REF, align=AL_C)
+    _set(ws_sum, f"F{r}", sem["jianan"], F_HEAD_REF, FILL_INPUT, FMT_MONEY, align=AL_C)
+    names.append(("SUM_JA", "费用汇总", f"$F${r}"))
+    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"K{r}", None, fill=FILL_INPUT, align=AL_C)
+    _set(ws_sum, f"L{r}", None, fill=FILL_INPUT, align=AL_C)
+    _set(ws_sum, f"M{r}", _unit_value(r), F_HEAD_REF, fmt="#,##0.00", align=AL_C)
+    r += 1
+    _bordered_row(r)
+    _set(ws_sum, f"B{r}", 2, F_HEAD_REF, align=AL_C)
+    _set(ws_sum, f"E{r}", "设备购置费", F_HEAD_REF, align=AL_C)
+    _set(ws_sum, f"H{r}", sem["shebei"], F_HEAD_REF, FILL_INPUT, FMT_MONEY, align=AL_C)
+    names.append(("SUM_SB", "费用汇总", f"$H${r}"))
+    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"K{r}", None, fill=FILL_INPUT, align=AL_C)
+    _set(ws_sum, f"L{r}", None, fill=FILL_INPUT, align=AL_C)
+    _set(ws_sum, f"M{r}", _unit_value(r), F_HEAD_REF, fmt="#,##0.00", align=AL_C)
+    r += 1
+
+    # ── 二、第二部分 工程建设其他费 ──
+    _bordered_row(r)
+    _set(ws_sum, f"A{r}", "二", F_PART_BOLD, align=AL_C)
+    _set(ws_sum, f"E{r}", "第二部分  工程建设其他费", F_PART_BOLD, align=AL_C)
+    p2_row = r
+    r += 1
+    part2_first = r
+    part2_no = 0
+    t0_i_first, t0_i_last = None, None
+
+    def _fee_row(name, i_formula=None, i_static=None, note="", basis=""):
+        """第二部分费用行：I 列=折后活公式（或黄色静态金额），J=SUM(F:I)，N=依据＋备注。"""
+        nonlocal r, part2_no
+        part2_no += 1
+        _bordered_row(r)
+        _set(ws_sum, f"B{r}", part2_no, F_HEAD_REF, align=AL_C)
+        _set(ws_sum, f"E{r}", name, F_HEAD_REF, align=AL_C)
+        if i_static is not None:
+            _set(ws_sum, f"I{r}", i_static, F_HEAD_REF, FILL_INPUT, FMT_MONEY, align=AL_C)
+        else:
+            _set(ws_sum, f"I{r}", i_formula, F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"N{r}", "；".join(x for x in (basis, note) if x) or "",
+             F_HEAD_REF, align=AL_L)
+        rowref[name] = r
         r += 1
 
-    def _fee_row(name, base_c, rate_d, formula_e, disc_cell, note_g, basis_h,
-                 static_e=None, c_fmt=None):
-        nonlocal r, no
-        no += 1
-        _set(ws_sum, f"A{r}", no, F_BASE, border=BORDER, align=AL_C)
-        _set(ws_sum, f"B{r}", name, F_BASE, border=BORDER, align=AL_L)
-        if base_c is None:
-            _set(ws_sum, f"C{r}", "", border=BORDER)
-        elif isinstance(base_c, str) and base_c.startswith("="):
-            _set(ws_sum, f"C{r}", base_c, F_BASE, border=BORDER,
-                 fmt=c_fmt or FMT_MONEY, align=AL_R)
-        elif isinstance(base_c, (int, float)):
-            _set(ws_sum, f"C{r}", base_c, F_BASE, border=BORDER,
-                 fmt=c_fmt or FMT_MONEY, align=AL_R)
-        else:
-            _set(ws_sum, f"C{r}", base_c, F_BASE, border=BORDER, align=AL_L)
-        _set(ws_sum, f"D{r}", rate_d or "", F_BASE, border=BORDER, align=AL_L)
-        if static_e is not None:
-            _set(ws_sum, f"E{r}", static_e, F_BASE, FILL_INPUT, FMT_MONEY, BORDER)
-            _set(ws_sum, f"F{r}", f"=E{r}", F_BASE, fmt=FMT_MONEY, border=BORDER)
-        elif disc_cell is None:
-            _set(ws_sum, f"E{r}", formula_e, F_BASE, fmt=FMT_MONEY, border=BORDER)
-            _set(ws_sum, f"F{r}", f"=E{r}", F_BASE, fmt=FMT_MONEY, border=BORDER)
-        else:
-            _set(ws_sum, f"E{r}", formula_e, F_BASE, fmt=FMT_MONEY, border=BORDER)
-            _set(ws_sum, f"F{r}", f"=ROUND(E{r}*{disc_cell},4)", F_BASE,
-                 fmt=FMT_MONEY, border=BORDER)
-        _set(ws_sum, f"G{r}", note_g or "", F_BASE, border=BORDER, align=AL_L)
-        _set(ws_sum, f"H{r}", basis_h or "", F_BASE, border=BORDER, align=AL_L)
-        rowref[name] = {"E": r, "F": r}
-        r += 1
-
-    # ── 一、T0 ──
-    _sec("一、以第一部分工程费为基数计取的费用（T0）— 折后值 F 列作为 T1 基数")
-    t0_er, t0_fr = [], []
-
+    # ── T0（以第一部分工程费为基数；I 列=折前公式×折扣）──
     def _t0_rate_interval(n, ov_key):
         _ov = _t0_rate_override(n)
         if _ov is not None:
@@ -9864,286 +9919,198 @@ def build_excel_summary(ctx: dict) -> bytes:
 
     if "监理费" in sem["t0"]:
         if "监理费" in sem["contract_overrides"]:
-            _fee_row("监理费", None, "合同价（编辑黄色格）", None, "IN_JL_DISC",
-                     "合同价覆盖，折扣已含于合同价", _basis("监理费"),
-                     static_e=float(sem["t0"]["监理费"]))
+            _fee_row("监理费", i_static=float(sem["t0"]["监理费"]),
+                     note="合同价覆盖，折扣已含于合同价", basis=_basis("监理费"))
         else:
-            _fee_row("监理费", "=PROC_JL_JIFEI",
-                     "基价表内插×专业×复杂×高程（可±20%浮动）",
-                     "=ROUND(PROC_JL_BASE*IN_JL_PROF*IN_JL_COMP*IN_JL_ELEV,2)",
-                     "IN_JL_DISC",
-                     "设备占比>40% 时计费额按 40% 规则（1.0.8条）",
-                     _basis("监理费"))
-        t0_er.append(rowref["监理费"]["E"]); t0_fr.append(rowref["监理费"]["F"])
-        names.append(("SUM_JL_F", "费用汇总", f"$F${rowref['监理费']['F']}"))
-
+            _fee_row("监理费",
+                     i_formula="=ROUND(ROUND(PROC_JL_BASE*IN_JL_PROF*IN_JL_COMP*IN_JL_ELEV,2)*IN_JL_DISC,4)",
+                     note="基价表内插×专业×复杂×高程（可±20%浮动）；设备占比>40% 时计费额按 40% 规则（1.0.8条）",
+                     basis=_basis("监理费"))
+        names.append(("SUM_JL_F", "费用汇总", f"$I${rowref['监理费']}"))
+        t0_i_first = rowref["监理费"]
+        t0_i_last = rowref["监理费"]
     if "工程设计费" in sem["t0"]:
         if "工程设计费" in sem["contract_overrides"]:
-            _fee_row("工程设计费", None, "合同价（编辑黄色格）", None, "IN_SJ_DISC",
-                     "合同价覆盖，折扣已含于合同价", _basis("工程设计费"),
-                     static_e=float(sem["t0"]["工程设计费"]))
+            _fee_row("工程设计费", i_static=float(sem["t0"]["工程设计费"]),
+                     note="合同价覆盖，折扣已含于合同价", basis=_basis("工程设计费"))
         else:
-            _fee_row("工程设计费", "=SUM_P1",
-                     "基价表内插×专业×复杂×附加＋其他设计收费",
-                     "=ROUND(PROC_SJ_BASIC+PROC_SJ_OTHER,2)",
-                     "IN_SJ_DISC",
-                     "含施工图预算10%/竣工图8%开关（见输入参数）；可±20%浮动",
-                     _basis("工程设计费"))
-        t0_er.append(rowref["工程设计费"]["E"]); t0_fr.append(rowref["工程设计费"]["F"])
-        names.append(("SUM_SJ_F", "费用汇总", f"$F${rowref['工程设计费']['F']}"))
+            _fee_row("工程设计费",
+                     i_formula="=ROUND(ROUND(PROC_SJ_BASIC+PROC_SJ_OTHER,2)*IN_SJ_DISC,4)",
+                     note="基价表内插×专业×复杂×附加＋其他设计收费；含施工图预算10%/竣工图8%开关（见输入参数）；可±20%浮动",
+                     basis=_basis("工程设计费"))
+        names.append(("SUM_SJ_F", "费用汇总", f"$I${rowref['工程设计费']}"))
+        if t0_i_first is None:
+            t0_i_first = rowref["工程设计费"]
+        t0_i_last = rowref["工程设计费"]
 
     _kc_ov, _kc_iv = _t0_rate_interval("勘察费", "勘察费费率")
     if "勘察费" in sem["t0"]:
         if "勘察费" in sem["contract_overrides"]:
-            _fee_row("勘察费", None, "合同价（编辑黄色格）", None, "IN_KC_DISC",
-                     "合同价覆盖，折扣已含于合同价", _basis("勘察费"),
-                     static_e=float(sem["t0"]["勘察费"]))
+            _fee_row("勘察费", i_static=float(sem["t0"]["勘察费"]),
+                     note="合同价覆盖，折扣已含于合同价", basis=_basis("勘察费"))
         elif _kc_ov is not None:
-            _fee_row("勘察费", "=SUM_P1", f"用户指定费率 {_kc_ov}%",
-                     "=ROUND(SUM_P1*IN_KC_RATE/100,4)", "IN_KC_DISC",
-                     "粗略估算（用户指定费率）；精确需按实物工作量定额",
-                     _basis("勘察费"))
+            _fee_row("勘察费",
+                     i_formula="=ROUND(ROUND(SUM_P1*IN_KC_RATE/100,4)*IN_KC_DISC,4)",
+                     note=f"用户指定费率 {_kc_ov}%；粗略估算，精确需按实物工作量定额",
+                     basis=_basis("勘察费"))
         else:
-            _fee_row("勘察费", "=SUM_P1",
-                     f"费率区间 {_kc_iv[0]}%~{_kc_iv[1]}%（取中值）",
-                     "=ROUND((ROUND(SUM_P1*IN_KC_LO/100,4)+ROUND(SUM_P1*IN_KC_HI/100,4))/2,4)",
-                     "IN_KC_DISC",
-                     "粗略估算（区间中值）；精确需按实物工作量定额",
-                     _basis("勘察费"))
-        t0_er.append(rowref["勘察费"]["E"]); t0_fr.append(rowref["勘察费"]["F"])
-        names.append(("SUM_KC_F", "费用汇总", f"$F${rowref['勘察费']['F']}"))
+            _fee_row("勘察费",
+                     i_formula="=ROUND(ROUND((ROUND(SUM_P1*IN_KC_LO/100,4)+ROUND(SUM_P1*IN_KC_HI/100,4))/2,4)*IN_KC_DISC,4)",
+                     note=f"费率区间 {_kc_iv[0]}%~{_kc_iv[1]}%（取中值）；粗略估算，精确需按实物工作量定额",
+                     basis=_basis("勘察费"))
+        names.append(("SUM_KC_F", "费用汇总", f"$I${rowref['勘察费']}"))
+        if t0_i_first is None:
+            t0_i_first = rowref["勘察费"]
+        t0_i_last = rowref["勘察费"]
 
-    for _n, _short, _disc in [
-        ("劳动安全卫生评审费", "劳安", "IN_LA_DISC"),
-        ("场地准备费及临时设施费", "场地", "IN_CD_DISC"),
-        ("工程保险费", "保险", "IN_BX_DISC"),
-    ]:
+    for _n, _disc in [("劳动安全卫生评审费", "IN_LA_DISC"),
+                      ("场地准备费及临时设施费", "IN_CD_DISC"),
+                      ("工程保险费", "IN_BX_DISC")]:
         if _n not in sem["t0"]:
             continue
         _ov, _iv = _t0_rate_interval(_n, "")
         if _n in sem["contract_overrides"]:
-            _fee_row(_n, None, "合同价（编辑黄色格）", None, _disc,
-                     "合同价覆盖，折扣已含于合同价", _basis(_n),
-                     static_e=float(sem["t0"][_n]))
+            _fee_row(_n, i_static=float(sem["t0"][_n]),
+                     note="合同价覆盖，折扣已含于合同价", basis=_basis(_n))
         elif _ov is not None:
-            _lo_cell, _hi_cell = {
-                "劳动安全卫生评审费": ("IN_LA_LO", "IN_LA_HI"),
-                "场地准备费及临时设施费": ("IN_CD_LO", "IN_CD_HI"),
-                "工程保险费": ("IN_BX_LO", "IN_BX_HI"),
-            }[_n]
             _rate_cell = {"劳动安全卫生评审费": "IN_LA_RATE",
                           "场地准备费及临时设施费": "IN_CD_RATE",
                           "工程保险费": "IN_BX_RATE"}[_n]
-            _fee_row(_n, "=SUM_P1", f"用户指定费率 {_ov}%",
-                     f"=ROUND(SUM_P1*{_rate_cell}/100,4)", _disc,
-                     "概算办法百分比估算（用户指定费率）", _basis(_n))
+            _fee_row(_n,
+                     i_formula=f"=ROUND(ROUND(SUM_P1*{_rate_cell}/100,4)*{_disc},4)",
+                     note=f"用户指定费率 {_ov}%（概算办法百分比估算）", basis=_basis(_n))
         else:
             _lo_cell, _hi_cell = {
                 "劳动安全卫生评审费": ("IN_LA_LO", "IN_LA_HI"),
                 "场地准备费及临时设施费": ("IN_CD_LO", "IN_CD_HI"),
                 "工程保险费": ("IN_BX_LO", "IN_BX_HI"),
             }[_n]
-            _fee_row(_n, "=SUM_P1",
-                     f"费率区间 {_iv[0]}%~{_iv[1]}%（取中值）",
-                     f"=ROUND((ROUND(SUM_P1*{_lo_cell}/100,4)+ROUND(SUM_P1*{_hi_cell}/100,4))/2,4)",
-                     _disc, "概算办法百分比估算（区间中值）", _basis(_n))
-        t0_er.append(rowref[_n]["E"]); t0_fr.append(rowref[_n]["F"])
-        names.append(({"劳动安全卫生评审费": "SUM_LA_F",
-                       "场地准备费及临时设施费": "SUM_CD_F",
-                       "工程保险费": "SUM_BX_F"}[_n], "费用汇总", f"$F${rowref[_n]['F']}"))
+            _fee_row(_n,
+                     i_formula=(f"=ROUND(ROUND((ROUND(SUM_P1*{_lo_cell}/100,4)"
+                                f"+ROUND(SUM_P1*{_hi_cell}/100,4))/2,4)*{_disc},4)"),
+                     note=f"费率区间 {_iv[0]}%~{_iv[1]}%（取中值，概算办法百分比估算）",
+                     basis=_basis(_n))
+        if t0_i_first is None:
+            t0_i_first = rowref[_n]
+        t0_i_last = rowref[_n]
 
-    if t0_fr:
-        _set(ws_sum, f"B{r}", "T0 小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", f"=SUM(E{min(t0_er)}:E{max(t0_er)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", f"=SUM(F{min(t0_fr)}:F{max(t0_fr)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        names.append(("SUM_T0F", "费用汇总", f"$F${r}"))
-        t0_sub_r = r
-        r += 1
-    else:
-        t0_sub_r = None
-
-    # ── 二、T1 ──
-    _sec("二、以 T0 折后费用为基数计取的费用（T1）")
-    t1_er, t1_fr = [], []
-
+    # ── T1（以 T0 折后费用为基数；折前公式在「计算过程」）──
     if jy_present:
-        _jy_ref = "SUM_JA" if "监理费" in sem["t0"] else "0"
-        _fee_row("交易服务费", "四类分档定额（施工/设备/监理/设计，见计算过程）",
-                 "分档定额表 8 档 × 计费方比例",
-                 "=ROUND(ROUND(PROC_JY_TOTAL*IN_JY_PARTY,2)/10000,4)",
-                 "IN_JY_DISC",
-                 "招标方承担 60%、中标方 40%；四类基数>0 才计",
-                 _basis("交易服务费"))
-        t1_er.append(rowref["交易服务费"]["E"]); t1_fr.append(rowref["交易服务费"]["F"])
-        names.append(("SUM_JY_E", "费用汇总", f"$E${rowref['交易服务费']['E']}"))
-        names.append(("SUM_JY_F", "费用汇总", f"$F${rowref['交易服务费']['F']}"))
+        _fee_row("交易服务费",
+                 i_formula="=ROUND(PROC_JY_RAW*IN_JY_DISC,4)",
+                 note="四类分档定额（施工/设备/监理/设计，见计算过程）×计费方比例；招标方承担 60%、中标方 40%；四类基数>0 才计",
+                 basis=_basis("交易服务费"))
 
+    sc_pre_formula = None
     if sc_present:
         if sc_contract:
-            _fee_row("施工图审查费", None, "合同价（编辑黄色格）", None, "IN_SC_DISC",
-                     "合同价覆盖", _basis("施工图审查费"),
-                     static_e=float(sem["t1_pre"]["施工图审查费"]))
+            _fee_row("施工图审查费", i_static=float(sem["t1_pre"]["施工图审查费"]),
+                     note="合同价覆盖", basis=_basis("施工图审查费"))
+            sc_pre_formula = "=SUM_SC_E"
         elif sc_is_zhuzhai:
             _danjia = _sc_p.get("单价(元/m²)", 1.7)
-            _fee_row("施工图审查费", "=IN_SC_M2",
-                     f"住宅 {_sc_p.get('项目规模', '')} × {_danjia} 元/m²",
-                     "=ROUND(IN_SC_M2*IN_SC_DANJIA/10000,4)",
-                     "IN_SC_DISC",
-                     "按建筑面积计费（津价管[2011]46号），结果已换算万元",
-                     _basis("施工图审查费"))
+            sc_pre_formula = "=ROUND(IN_SC_M2*IN_SC_DANJIA/10000,4)"
+            _fee_row("施工图审查费",
+                     i_formula=f"=ROUND({sc_pre_formula[1:]}*IN_SC_DISC,4)",
+                     note=f"住宅 {_sc_p.get('项目规模', '')} × {_danjia} 元/m²（津价管[2011]46号），结果已换算万元",
+                     basis=_basis("施工图审查费"))
         else:
             _rate = _sc_p.get("费率(%)", 6.5 if sem["hebei"] else 3.0)
             _sj_ref = "SUM_SJ_F" if "工程设计费" in sem["t0"] else "0"
             _kc_ref = "SUM_KC_F" if "勘察费" in sem["t0"] else "0"
-            _fee_row("施工图审查费", f"={_sj_ref}+{_kc_ref}",
-                     f"（折后设计费+折后勘察费）× {_rate}%",
-                     f"=ROUND(({_sj_ref}+{_kc_ref})*IN_SC_RATE/100,4)",
-                     "IN_SC_DISC",
-                     ("河北省项目：发改价格〔2011〕534号 ×6.5%"
-                      if sem["hebei"] else f"津价管[2011]46号 {_sc_p.get('项目类型', '')}·{_sc_p.get('项目规模', '')}"),
-                     _basis("施工图审查费"))
-        t1_er.append(rowref["施工图审查费"]["E"]); t1_fr.append(rowref["施工图审查费"]["F"])
-        names.append(("SUM_SC_E", "费用汇总", f"$E${rowref['施工图审查费']['E']}"))
-        names.append(("SUM_SC_F", "费用汇总", f"$F${rowref['施工图审查费']['F']}"))
+            sc_pre_formula = f"=ROUND(({_sj_ref}+{_kc_ref})*IN_SC_RATE/100,4)"
+            _fee_row("施工图审查费",
+                     i_formula=f"=ROUND({sc_pre_formula[1:]}*IN_SC_DISC,4)",
+                     note=("（折后设计费+折后勘察费）× %s（河北省项目：发改价格〔2011〕534号）" % _rate
+                           if sem["hebei"] else
+                           "（折后设计费+折后勘察费）× %s（津价管[2011]46号 %s·%s）" % (
+                               _rate, _sc_p.get("项目类型", ""), _sc_p.get("项目规模", ""))),
+                     basis=_basis("施工图审查费"))
+        names.append(("SUM_SC_E", "费用汇总", f"$I${rowref['施工图审查费']}"))
 
     if zd_present:
-        _fee_row("招标代理费", "五类差额定率（货物/工程/服务×3，见计算过程）",
-                 "差额定率累进 7 档（计价格[2002]1980号）",
-                 "=PROC_ZD_TOTAL", "IN_ZD_DISC",
-                 "服务·设计基数不含附加系数与施工图预算/竣工图（与引擎一致）；可±20%浮动",
-                 _basis("招标代理费"))
-        t1_er.append(rowref["招标代理费"]["E"]); t1_fr.append(rowref["招标代理费"]["F"])
-        names.append(("SUM_ZD_E", "费用汇总", f"$E${rowref['招标代理费']['E']}"))
-        names.append(("SUM_ZD_F", "费用汇总", f"$F${rowref['招标代理费']['F']}"))
+        _fee_row("招标代理费",
+                 i_formula="=ROUND(PROC_ZD_TOTAL*IN_ZD_DISC,4)",
+                 note="五类差额定率（货物/工程/服务×3，计价格[2002]1980号）；服务·设计基数不含附加系数与施工图预算/竣工图（与引擎一致）；可±20%浮动",
+                 basis=_basis("招标代理费"))
 
-    if t1_fr:
-        _set(ws_sum, f"B{r}", "T1 小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", f"=SUM(E{min(t1_er)}:E{max(t1_er)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", f"=SUM(F{min(t1_fr)}:F{max(t1_fr)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        names.append(("SUM_T1F", "费用汇总", f"$F${r}"))
-        t1_sub_r = r
-        r += 1
-    else:
-        t1_sub_r = None
-
-    # ── 三、T2 ──
-    _sec("三、以项目总投资为基数计取的费用（T2，迭代计算）")
-    t2_er, t2_fr = [], []
-
+    # ── T2（以项目总投资为基数，迭代计算；折前公式在「计算过程」）──
     if gl_present:
         if sem["gl_mode"] == "const":
-            _fee_row("建设管理费", None, "合同价（编辑黄色格）", None, "IN_GL_DISC",
-                     "合同价覆盖", _basis("建设管理费"),
-                     static_e=float(sem["numerical"].get("建设管理费(万元)", 0)))
+            _fee_row("建设管理费",
+                     i_static=float(sem["numerical"].get("建设管理费(万元)", 0)),
+                     note="合同价覆盖", basis=_basis("建设管理费"))
         else:
-            _fee_row("建设管理费", "=PROC_GL_BASE",
-                     "差额定率累进 6 档",
-                     "=PROC_GL_RAW", "IN_GL_DISC",
-                     "基数=总投资−自身−管线切改−建设用地（财建[2016]504号）",
-                     _basis("建设管理费"))
-        t2_er.append(rowref["建设管理费"]["E"]); t2_fr.append(rowref["建设管理费"]["F"])
-        names.append(("SUM_GL_E", "费用汇总", f"$E${rowref['建设管理费']['E']}"))
+            _fee_row("建设管理费",
+                     i_formula="=ROUND(PROC_GL_RAW*IN_GL_DISC,4)",
+                     note="差额定率累进 6 档；基数=总投资−自身−管线切改−建设用地（财建[2016]504号）",
+                     basis=_basis("建设管理费"))
+        names.append(("SUM_GL_E", "费用汇总", f"$I${rowref['建设管理费']}"))
 
     if ky_present:
         if sem["ky_mode"] == "const":
-            _fee_row("可行性研究费", None, "合同价（编辑黄色格）", None, "IN_KY_DISC",
-                     "合同价覆盖", _basis("可行性研究费"),
-                     static_e=float(sem["numerical"].get("可行性研究费(万元)", 0)))
+            _fee_row("可行性研究费",
+                     i_static=float(sem["numerical"].get("可行性研究费(万元)", 0)),
+                     note="合同价覆盖", basis=_basis("可行性研究费"))
         else:
-            _fee_row("可行性研究费", "=PROC_CURR_RAW/10000",
-                     "分档内插（亿元）×行业系数×复杂系数",
-                     "=PROC_KY_RAW", "IN_KY_DISC",
-                     "基数单位：亿元；服务明细见「计算过程」",
-                     _basis("可行性研究费"), c_fmt=FMT_NUM4)
-        t2_er.append(rowref["可行性研究费"]["E"]); t2_fr.append(rowref["可行性研究费"]["F"])
-        names.append(("SUM_KY_E", "费用汇总", f"$E${rowref['可行性研究费']['E']}"))
+            _fee_row("可行性研究费",
+                     i_formula="=ROUND(PROC_KY_RAW*IN_KY_DISC,4)",
+                     note="分档内插（亿元）×行业系数×复杂系数；±20% 浮动取中值；服务明细见「计算过程」",
+                     basis=_basis("可行性研究费"))
+        names.append(("SUM_KY_E", "费用汇总", f"$I${rowref['可行性研究费']}"))
 
     if hp_present:
         if "环境影响咨询费" in sem["contract_overrides"]:
-            _fee_row("环境影响咨询费", None, "合同价（编辑黄色格）", None, "IN_HP_DISC",
-                     "合同价覆盖", _basis("环境影响咨询费"),
-                     static_e=float(sem["hp_value"]))
+            _fee_row("环境影响咨询费", i_static=float(sem["hp_value"]),
+                     note="合同价覆盖", basis=_basis("环境影响咨询费"))
         else:
-            _fee_row("环境影响咨询费", "=PROC_CURR_RAW/10000",
-                     "分档内插（亿元）×行业系数×敏感度系数",
-                     "=PROC_HP_RAW", "IN_HP_DISC",
-                     "±20% 浮动取中值；服务明细见「计算过程」",
-                     _basis("环境影响咨询费"), c_fmt=FMT_NUM4)
-        t2_er.append(rowref["环境影响咨询费"]["E"]); t2_fr.append(rowref["环境影响咨询费"]["F"])
-        names.append(("SUM_HP_E", "费用汇总", f"$E${rowref['环境影响咨询费']['E']}"))
+            _fee_row("环境影响咨询费",
+                     i_formula="=ROUND(PROC_HP_RAW*IN_HP_DISC,4)",
+                     note="分档内插（亿元）×行业系数×敏感度系数；±20% 浮动取中值；服务明细见「计算过程」",
+                     basis=_basis("环境影响咨询费"))
+        names.append(("SUM_HP_E", "费用汇总", f"$I${rowref['环境影响咨询费']}"))
 
     if cc_present:
         if "造价咨询费" in sem["contract_overrides"]:
-            _fee_row("造价咨询费", None, "合同价（编辑黄色格）", None, "IN_CC_DISC",
-                     "合同价覆盖", _basis("造价咨询费"),
-                     static_e=float(sem["numerical"].get("造价咨询费(万元)", 0)))
+            _fee_row("造价咨询费",
+                     i_static=float(sem["numerical"].get("造价咨询费(万元)", 0)),
+                     note="合同价覆盖", basis=_basis("造价咨询费"))
         else:
-            _fee_row("造价咨询费", "各服务基数见「计算过程」",
-                     f"差额定率累进（‰，{'冀建市研[2017]2号' if sem['hebei'] else '津价房地[2008]136号'}）",
-                     "=PROC_CC_RAW", "IN_CC_DISC",
-                     ("含最低收费 3000 元/项与专业系数；可下浮≤20%"
-                      if sem["hebei"] else "可±20% 浮动"),
-                     _basis("造价咨询费"))
-        t2_er.append(rowref["造价咨询费"]["E"]); t2_fr.append(rowref["造价咨询费"]["F"])
-        names.append(("SUM_CC_E", "费用汇总", f"$E${rowref['造价咨询费']['E']}"))
+            _fee_row("造价咨询费",
+                     i_formula="=ROUND(PROC_CC_RAW*IN_CC_DISC,4)",
+                     note=("各服务基数见「计算过程」；含最低收费 3000 元/项与专业系数；可下浮≤20%"
+                           if sem["hebei"] else
+                           "各服务基数见「计算过程」；可±20% 浮动"),
+                     basis=_basis("造价咨询费"))
+        names.append(("SUM_CC_E", "费用汇总", f"$I${rowref['造价咨询费']}"))
 
-    if t2_fr:
-        _set(ws_sum, f"B{r}", "T2 小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", f"=SUM(E{min(t2_er)}:E{max(t2_er)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", f"=SUM(F{min(t2_fr)}:F{max(t2_fr)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        names.append(("SUM_T2F", "费用汇总", f"$F${r}"))
-        t2_sub_r = r
-        r += 1
-    else:
-        t2_sub_r = None
-
-    # ── 四、自定义费用 ──
-    _sec("四、自定义费用（不打折，参与合计与预备费基数；黄色格可填，末 5 行为预留行）")
-    custom_er, custom_fr = [], []
+    # ── 自定义费用（不打折；黄色格可填，末 5 行为预留行）──
+    custom_i_first = None
     for cf in sem["custom_fees"]:
         _name = str(cf.get("名称") or cf.get("name") or "自定义费用")
         _amt = float(cf.get("amount_wan") or 0)
-        _fee_row(f"自定义：{_name}", None, "自定义金额（编辑黄色格）", None, None,
-                 "自定义费用，不打折", "用户自定义", static_e=_amt)
-        custom_er.append(rowref[f"自定义：{_name}"]["E"])
-        custom_fr.append(rowref[f"自定义：{_name}"]["F"])
-    # 预留 5 行空白自定义行（黄格可填，已在 SUM 区间内：留空不计入；用尽可在预留行之间插行）
+        _fee_row(f"自定义：{_name}", i_static=_amt,
+                 note="自定义费用，不打折", basis="用户自定义")
+        if custom_i_first is None:
+            custom_i_first = rowref[f"自定义：{_name}"]
+    if custom_i_first is None:
+        custom_i_first = r
     for _ in range(5):
-        no += 1
-        _set(ws_sum, f"A{r}", no, F_BASE, border=BORDER, align=AL_C)
-        _set(ws_sum, f"B{r}", "", F_BASE, FILL_INPUT, border=BORDER, align=AL_L)
-        _set(ws_sum, f"C{r}", "", border=BORDER)
-        _set(ws_sum, f"D{r}", "", border=BORDER, align=AL_L)
-        _set(ws_sum, f"E{r}", "", F_BASE, FILL_INPUT, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", f"=E{r}", F_BASE, fmt=FMT_MONEY, border=BORDER)
-        _set(ws_sum, f"G{r}",
-             "预留行：填名称＋金额（黄格）自动计入合计；留空不计；用尽可在预留行之间插行",
-             F_BASE, border=BORDER, align=AL_L)
-        _set(ws_sum, f"H{r}", "", border=BORDER, align=AL_L)
-        custom_er.append(r)
-        custom_fr.append(r)
+        part2_no += 1
+        _bordered_row(r)
+        _set(ws_sum, f"B{r}", part2_no, F_HEAD_REF, align=AL_C)
+        _set(ws_sum, f"E{r}", None, fill=FILL_INPUT, align=AL_L)
+        _set(ws_sum, f"I{r}", None, fill=FILL_INPUT, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"N{r}",
+             "预留行：填名称＋金额（黄格）自动计入合计；留空不计；用尽可在预留行之间插行"
+             "（勿在「第三部分 预备费」行正上方插行）",
+             F_HEAD_REF, align=AL_L)
         r += 1
-    if custom_fr:
-        _set(ws_sum, f"B{r}", "自定义费用小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", f"=SUM(E{min(custom_er)}:E{max(custom_er)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", f"=SUM(F{min(custom_fr)}:F{max(custom_fr)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        names.append(("SUM_CUSTOM", "费用汇总", f"$F${r}"))
-        custom_sub_r = r
-        r += 1
-    else:
-        custom_sub_r = None
+    custom_i_last = r - 1
 
-    # ── 五、水土保持 ──
-    _sec("五、水土保持费用（不打折）")
-    sb_er, sb_fr = [], []
+    # ── 水土保持（不打折）──
+    sb_i_first, sb_i_last = None, None
     if sb_bianzhi_present:
         _sb_rr = None
         for _k, _v in (sem["orig"] or {}).items():
@@ -10152,19 +10119,18 @@ def build_excel_summary(ctx: dict) -> bytes:
                 break
         _sb_p = (_sb_rr or {}).get("参数") or {}
         _svc = str(_sb_p.get("服务类型", "方案编制"))
-        _tz = float(_sb_p.get("土建投资(亿元)", 0) or 0) or round(sem["p1"] / 10000.0, 4)
         _sb_e = (
             "=ROUND(IF(IN_SB_TYPE=1," + _formula_clamp_interp("IN_SB_TZ", "TBL_SB_X", "TBL_SB_BZ")[1:] +
             ",IF(IN_SB_TYPE=2," + _formula_clamp_interp("IN_SB_TZ", "TBL_SB_X", "TBL_SB_JC")[1:] +
             ",IF(IN_SB_TYPE=3," + _formula_clamp_interp("IN_SB_TZ", "TBL_SB_X", "TBL_SB_PG")[1:] +
             "," + _formula_clamp_interp("IN_SB_TZ", "TBL_SB_X", "TBL_SB_ZX")[1:] + ")))*IN_SB_DM,4)"
         )
-        _fee_row("水土保持咨询服务费", "=IN_SB_TZ",
-                 f"21 档内插（土建投资·亿元）×地貌系数（{_svc}）",
-                 _sb_e, None, "地貌系数：山区1.2/丘陵风沙1.0/平原0.8（引擎未自动应用，默认1.0）",
-                 _basis("水土保持咨询服务费"))
-        sb_er.append(rowref["水土保持咨询服务费"]["E"])
-        sb_fr.append(rowref["水土保持咨询服务费"]["F"])
+        _fee_row("水土保持咨询服务费",
+                 i_formula=_sb_e,
+                 note=f"21 档内插（土建投资·亿元）×地貌系数（{_svc}）；地貌系数：山区1.2/丘陵风沙1.0/平原0.8（引擎未自动应用，默认1.0）",
+                 basis=_basis("水土保持咨询服务费"))
+        sb_i_first = rowref["水土保持咨询服务费"]
+        sb_i_last = rowref["水土保持咨询服务费"]
 
     if sb_buchang_present:
         _sbc_rr = sem["orig"].get("水土保持补偿费") or {}
@@ -10176,60 +10142,113 @@ def build_excel_summary(ctx: dict) -> bytes:
             "IF(IN_SBC_TYPE=4,IN_SBC_EXTRACT*0.3,"
             "IF(IN_SBC_TYPE=5,IN_SBC_MATERIAL*0.3,IN_SBC_WASTE*0.3)))))/10000,2)"
         )
-        _fee_row("水土保持补偿费", "物理参数见「输入参数」",
-                 "按计征类型（m²/井/方）×收费标准",
-                 _sbc_e, None,
-                 "1.4元/m²·0.3元/m³·2000m²/井·400m²/增井；总缴费额10%上缴中央",
-                 _basis("水土保持补偿费"))
-        sb_er.append(rowref["水土保持补偿费"]["E"])
-        sb_fr.append(rowref["水土保持补偿费"]["F"])
+        _fee_row("水土保持补偿费",
+                 i_formula=_sbc_e,
+                 note="按计征类型（m²/井/方）×收费标准；1.4元/m²·0.3元/m³·2000m²/井·400m²/增井；总缴费额10%上缴中央",
+                 basis=_basis("水土保持补偿费"))
+        if sb_i_first is None:
+            sb_i_first = rowref["水土保持补偿费"]
+        sb_i_last = rowref["水土保持补偿费"]
 
-    if sb_fr:
-        _set(ws_sum, f"B{r}", "水保费用小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", f"=SUM(E{min(sb_er)}:E{max(sb_er)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", f"=SUM(F{min(sb_fr)}:F{max(sb_fr)})",
-             F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        names.append(("SUM_SB", "费用汇总", f"$F${r}"))
-        sb_sub_r = r
+    # 第二部分小计（回填标题行：I=Σ各费用行折后，J=SUM(F:I)）
+    _set(ws_sum, f"I{p2_row}", f"=SUM(I{part2_first}:I{r-1})",
+         F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"J{p2_row}", f"=SUM(F{p2_row}:I{p2_row})",
+         F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    names.append(("SUM_ERR2_F", "费用汇总", f"$I${p2_row}"))
+
+    # ── 三、第三部分 预备费 ──
+    _bordered_row(r)
+    _set(ws_sum, f"A{r}", "三", F_PART_BOLD, align=AL_C)
+    _set(ws_sum, f"E{r}", "第三部分 预备费", F_PART_BOLD, align=AL_C)
+    _set(ws_sum, f"I{r}", f"=I{r+1}", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    p3_row = r
+    r += 1
+    _bordered_row(r)
+    _set(ws_sum, f"B{r}", 1, F_HEAD_REF, align=AL_C)
+    _set(ws_sum, f"E{r}", "预备费", F_HEAD_REF, align=AL_C)
+    _set(ws_sum, f"I{r}", "=ROUND((SUM_P1+SUM_ERR2_F)*IN_YB_RATE/100,4)",
+         F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"N{r}", f"（一+二）×{sem['yb_rate']}%（IN_YB_RATE 可编辑）",
+         F_HEAD_REF, align=AL_L)
+    names.append(("SUM_YB", "费用汇总", f"$I${r}"))
+    r += 1
+
+    # ── 四、工程总投资 ──
+    _bordered_row(r)
+    _set(ws_sum, f"A{r}", "四", F_PART_BOLD, align=AL_C)
+    _set(ws_sum, f"E{r}", "工程总投资", F_PART_BOLD, align=AL_C)
+    _set(ws_sum, f"F{r}", f"=F{p1_row}", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"G{r}", f"=G{p1_row}", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"H{r}", f"=H{p1_row}", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"I{r}", f"=I{p2_row}+I{p3_row}", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+    p4_row = r
+    r += 1
+
+    # ── 技术经济指标（批复对比，黄色格可填）──
+    r += 1
+    _bordered_row(r)
+    _set(ws_sum, f"E{r}", "技术经济指标", F_PART_BOLD, align=AL_C)
+    r += 1
+
+    def _tj_row(label, j_formula=None, j_input=False, j_fmt=None):
+        nonlocal r
+        _bordered_row(r)
+        _set(ws_sum, f"E{r}", label, F_HEAD_REF, align=AL_C)
+        if j_input:
+            _set(ws_sum, f"J{r}", None, fill=FILL_INPUT, fmt=FMT_MONEY, align=AL_C)
+        else:
+            _set(ws_sum, f"J{r}", j_formula, F_HEAD_REF, fmt=j_fmt or FMT_MONEY,
+                 align=AL_C)
         r += 1
-    else:
-        sb_sub_r = None
 
-    # ── 六、合计与预备费 ──
-    _sec("六、合计与预备费")
-    _sub_e = "+".join(f"E{x}" for x in [t0_sub_r, t1_sub_r, t2_sub_r,
-                                        custom_sub_r, sb_sub_r] if x is not None)
-    _sub_f = "+".join(f"F{x}" for x in [t0_sub_r, t1_sub_r, t2_sub_r,
-                                        custom_sub_r, sb_sub_r] if x is not None)
-    _set(ws_sum, f"B{r}", "二类费合计", F_BOLD, FILL_SUB, border=BORDER)
-    _set(ws_sum, f"D{r}", "F 列=各费种折后之和＋自定义＋水保", F_NOTE, align=AL_L)
-    _set(ws_sum, f"E{r}", "=" + _sub_e if _sub_e else "=0",
-         F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-    _set(ws_sum, f"F{r}", "=" + _sub_f if _sub_f else "=0",
-         F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-    names.append(("SUM_ERR2_F", "费用汇总", f"$F${r}"))
-    err2_r = r
-    r += 1
-    _set(ws_sum, f"B{r}", "预备费", F_BOLD, FILL_SUB, border=BORDER)
-    _set(ws_sum, f"C{r}", "=SUM_P1+SUM_ERR2_F", F_BASE, border=BORDER,
-         fmt=FMT_MONEY, align=AL_R)
-    _set(ws_sum, f"D{r}", f"×{sem['yb_rate']}%（IN_YB_RATE 可编辑）", F_NOTE, align=AL_L)
-    _set(ws_sum, f"E{r}", "=ROUND((SUM_P1+SUM_ERR2_F)*IN_YB_RATE/100,4)",
-         F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-    _set(ws_sum, f"F{r}", f"=E{r}", F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-    names.append(("SUM_YB", "费用汇总", f"$E${r}"))
-    yb_r = r
-    r += 1
-    _set(ws_sum, f"B{r}", "项目总投资", F_BOLD, FILL_INPUT, border=BORDER)
-    _set(ws_sum, f"C{r}", "=SUM_P1+SUM_ERR2_F", F_BOLD, FILL_INPUT, FMT_MONEY, BORDER)
-    _set(ws_sum, f"D{r}", "第一部分工程费＋折后二类费合计＋预备费", F_NOTE, align=AL_L)
-    _set(ws_sum, f"E{r}", "=SUM_P1+SUM_ERR2_F+SUM_YB", F_BOLD, FILL_INPUT,
-         FMT_MONEY, BORDER)
-    _set(ws_sum, f"F{r}", f"=E{r}", F_BOLD, FILL_INPUT, FMT_MONEY, BORDER)
+    _tj_row("工可批复（万元）", j_input=True)
+    gk_row = r - 1
+    _tj_row("初设批复（万元）", j_input=True)
+    cs_row = r - 1
+    _tj_row("批复差额（初设−工可）", f"=J{cs_row}-J{gk_row}")
+    _tj_row("与本次概算差额", f"=J{p4_row}-J{cs_row}")
+    _tj_row("差额占比", f'=IF(N(J{p4_row})>0,(J{p4_row}-J{cs_row})/J{p4_row},"")',
+            j_fmt="0.0%")
 
-    for col, w in [("A", 6), ("B", 26), ("C", 30), ("D", 30), ("E", 16),
-                   ("F", 14), ("G", 42), ("H", 46)]:
+    # ── 项目信息 ──
+    r += 1
+
+    def _info_row(label, value, fmt=None):
+        nonlocal r
+        _bordered_row(r)
+        _set(ws_sum, f"E{r}", label, F_HEAD_REF, align=AL_C)
+        ws_sum.merge_cells(f"F{r}:J{r}")
+        _set(ws_sum, f"F{r}", value, F_HEAD_REF, FILL_INPUT, border=BORDER, fmt=fmt,
+             align=AL_C)
+        r += 1
+
+    _info_row("项目类型", sem["project_type"])
+    _info_row("区域", "河北" if sem["hebei"] else "天津")
+    _info_row("交易服务费计费方", sem["jiaoyi_party"])
+    _info_row("计算日期", "=TODAY()", fmt="yyyy-mm-dd")
+
+    # ── 提示 ──
+    r += 1
+    ws_sum.merge_cells(f"A{r}:N{r}")
+    _set(ws_sum, f"A{r}",
+         "黄色单元格可直接修改（项目名称/建安费/设备费/合同价/预留行金额等），"
+         "全部费用公式自动重算；档位规则见「计算规则」，其余输入见「输入参数」。",
+         F_NOTE, align=AL_L)
+    r += 1
+    ws_sum.merge_cells(f"A{r}:N{r}")
+    _set(ws_sum, f"A{r}",
+         "若打开后费用为 0 或提示循环引用：请开启迭代计算（Excel：文件→选项→公式→启用迭代计算；"
+         "WPS：文件→选项→重新计算→迭代计算，最大迭代 100，误差 0.001）。本文件已内置该设置。",
+         F_NOTE, align=AL_L)
+    r += 1
+
+    for col, w in [("A", 4.5), ("B", 4.5), ("C", 5.5), ("D", 5.5), ("E", 30),
+                   ("F", 12), ("G", 8), ("H", 12), ("I", 12), ("J", 12),
+                   ("K", 7), ("L", 9), ("M", 10), ("N", 46)]:
         ws_sum.column_dimensions[col].width = w
 
     # ══════════════ Sheet2 计算过程 ══════════════
@@ -10283,8 +10302,15 @@ def build_excel_summary(ctx: dict) -> bytes:
                                  "TBL_JY_HI", "TBL_JY_FEE"), FMT_MONEY)
     _proc("PROC_JY_TOTAL", "交易服务费四类合计（元）",
           "=PROC_JY_SG+PROC_JY_SB+PROC_JY_JL+PROC_JY_SJ", FMT_MONEY)
-    _proc("PROC_SC_RAW", "施工图审查费（折前，引用费用汇总 E 列公式）",
-          "=SUM_SC_E" if sc_present else "=0")
+    if jy_present:
+        _proc("PROC_JY_RAW", "交易服务费（折前，×计费方比例，万元）",
+              "=ROUND(ROUND(PROC_JY_TOTAL*IN_JY_PARTY,2)/10000,4)")
+    if sc_present and sc_contract:
+        _proc("PROC_SC_RAW", "施工图审查费（合同价覆盖，折前）", "=SUM_SC_E")
+    elif sc_present:
+        _proc("PROC_SC_RAW", "施工图审查费（折前）", sc_pre_formula)
+    else:
+        _proc("PROC_SC_RAW", "施工图审查费（未选择）", "=0")
     _proc("PROC_ZD_HW", "招标代理·货物招标，基数=设备费",
           _formula_tiered_cumulative("SUM_SB", "TBL_ZD_LO", "TBL_ZD_HI", "TBL_ZD_HW"))
     _proc("PROC_ZD_GC", "招标代理·工程招标，基数=建安费",
@@ -10302,11 +10328,11 @@ def build_excel_summary(ctx: dict) -> bytes:
           "=PROC_ZD_HW+PROC_ZD_GC+PROC_ZD_KC+PROC_ZD_SJ+PROC_ZD_JL")
     _t1_parts = []
     if jy_present:
-        _t1_parts.append("SUM_JY_E")
+        _t1_parts.append("PROC_JY_RAW")
     if sc_present:
-        _t1_parts.append("SUM_SC_E")
+        _t1_parts.append("PROC_SC_RAW")
     if zd_present:
-        _t1_parts.append("SUM_ZD_E")
+        _t1_parts.append("PROC_ZD_TOTAL")
     _proc("PROC_T1_RAW", "T1 折前合计（交易＋审查＋招标代理）",
           "=" + "+".join(_t1_parts) if _t1_parts else "=0")
 
@@ -10390,13 +10416,20 @@ def build_excel_summary(ctx: dict) -> bytes:
     _proc("PROC_T2_RAW", "T2 折前合计（建管＋可研＋环评）",
           "=" + "+".join(_t2_parts) if _t2_parts else "=0")
 
-    _yb_parts = ["SUM_P1", "SUM_T0F", "PROC_T1_RAW", "PROC_T2_RAW"]
+    _proc("PROC_T0F", "T0 折后小计（费用汇总·第二部分 I 列，T0 折扣已折进）",
+          f"=SUM('费用汇总'!$I${t0_i_first}:$I${t0_i_last})"
+          if t0_i_first is not None else "=0")
+    _proc("PROC_CUSTOM_RAW", "自定义+预留行金额（费用汇总 I 列，不打折）",
+          f"=SUM('费用汇总'!$I${custom_i_first}:$I${custom_i_last})")
+    if sb_i_first is not None:
+        _proc("PROC_SB_RAW", "水保费用（费用汇总 I 列，不打折）",
+              f"=SUM('费用汇总'!$I${sb_i_first}:$I${sb_i_last})")
+
+    _yb_parts = ["SUM_P1", "PROC_T0F", "PROC_T1_RAW", "PROC_T2_RAW", "PROC_CUSTOM_RAW"]
     if cc_present:
         _yb_parts.append("PROC_CC_RAW")
-    if custom_present:
-        _yb_parts.append("SUM_CUSTOM")
-    if sb_bianzhi_present or sb_buchang_present:
-        _yb_parts.append("SUM_SB")
+    if sb_i_first is not None:
+        _yb_parts.append("PROC_SB_RAW")
     _proc("PROC_YB_RAW",
           "预备费（迭代中）=（P1＋T0折后＋T1折前＋T2折前＋造价咨询＋自定义＋水保）×预备费率",
           f"=ROUND(({'+'.join(_yb_parts)})*IN_YB_RATE/100,4)")
