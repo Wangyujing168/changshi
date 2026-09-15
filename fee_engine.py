@@ -9770,7 +9770,7 @@ def build_excel_summary(ctx: dict) -> bytes:
     # ══════════════ Sheet1 费用汇总 ══════════════
     r = 1
     ws_sum.merge_cells("A1:H1")
-    _set(ws_sum, "A1", "工程造价汇总表（活公式版）", F_TITLE, align=AL_C)
+    _set(ws_sum, "A1", "工程造价汇总表", F_TITLE, align=AL_C)
     ws_sum.merge_cells("A2:H2")
     _set(ws_sum, "A2",
          "黄色单元格可直接修改（建安费/设备费/折扣/费率/合同价等），全部费用公式自动重算；"
@@ -9954,9 +9954,9 @@ def build_excel_summary(ctx: dict) -> bytes:
 
     if t0_fr:
         _set(ws_sum, f"B{r}", "T0 小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", "=" + "+".join(f"E{x}" for x in t0_er),
+        _set(ws_sum, f"E{r}", f"=SUM(E{min(t0_er)}:E{max(t0_er)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", "=" + "+".join(f"F{x}" for x in t0_fr),
+        _set(ws_sum, f"F{r}", f"=SUM(F{min(t0_fr)}:F{max(t0_fr)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
         names.append(("SUM_T0F", "费用汇总", f"$F${r}"))
         t0_sub_r = r
@@ -10020,9 +10020,9 @@ def build_excel_summary(ctx: dict) -> bytes:
 
     if t1_fr:
         _set(ws_sum, f"B{r}", "T1 小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", "=" + "+".join(f"E{x}" for x in t1_er),
+        _set(ws_sum, f"E{r}", f"=SUM(E{min(t1_er)}:E{max(t1_er)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", "=" + "+".join(f"F{x}" for x in t1_fr),
+        _set(ws_sum, f"F{r}", f"=SUM(F{min(t1_fr)}:F{max(t1_fr)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
         names.append(("SUM_T1F", "费用汇总", f"$F${r}"))
         t1_sub_r = r
@@ -10093,9 +10093,9 @@ def build_excel_summary(ctx: dict) -> bytes:
 
     if t2_fr:
         _set(ws_sum, f"B{r}", "T2 小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", "=" + "+".join(f"E{x}" for x in t2_er),
+        _set(ws_sum, f"E{r}", f"=SUM(E{min(t2_er)}:E{max(t2_er)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", "=" + "+".join(f"F{x}" for x in t2_fr),
+        _set(ws_sum, f"F{r}", f"=SUM(F{min(t2_fr)}:F{max(t2_fr)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
         names.append(("SUM_T2F", "费用汇总", f"$F${r}"))
         t2_sub_r = r
@@ -10104,7 +10104,7 @@ def build_excel_summary(ctx: dict) -> bytes:
         t2_sub_r = None
 
     # ── 四、自定义费用 ──
-    _sec("四、自定义费用（不打折，参与合计与预备费基数；编辑黄色格）")
+    _sec("四、自定义费用（不打折，参与合计与预备费基数；黄色格可填，末 5 行为预留行）")
     custom_er, custom_fr = [], []
     for cf in sem["custom_fees"]:
         _name = str(cf.get("名称") or cf.get("name") or "自定义费用")
@@ -10113,11 +10113,27 @@ def build_excel_summary(ctx: dict) -> bytes:
                  "自定义费用，不打折", "用户自定义", static_e=_amt)
         custom_er.append(rowref[f"自定义：{_name}"]["E"])
         custom_fr.append(rowref[f"自定义：{_name}"]["F"])
+    # 预留 5 行空白自定义行（黄格可填，已在 SUM 区间内：留空不计入；用尽可在预留行之间插行）
+    for _ in range(5):
+        no += 1
+        _set(ws_sum, f"A{r}", no, F_BASE, border=BORDER, align=AL_C)
+        _set(ws_sum, f"B{r}", "", F_BASE, FILL_INPUT, border=BORDER, align=AL_L)
+        _set(ws_sum, f"C{r}", "", border=BORDER)
+        _set(ws_sum, f"D{r}", "", border=BORDER, align=AL_L)
+        _set(ws_sum, f"E{r}", "", F_BASE, FILL_INPUT, FMT_MONEY, BORDER)
+        _set(ws_sum, f"F{r}", f"=E{r}", F_BASE, fmt=FMT_MONEY, border=BORDER)
+        _set(ws_sum, f"G{r}",
+             "预留行：填名称＋金额（黄格）自动计入合计；留空不计；用尽可在预留行之间插行",
+             F_BASE, border=BORDER, align=AL_L)
+        _set(ws_sum, f"H{r}", "", border=BORDER, align=AL_L)
+        custom_er.append(r)
+        custom_fr.append(r)
+        r += 1
     if custom_fr:
         _set(ws_sum, f"B{r}", "自定义费用小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", "=" + "+".join(f"E{x}" for x in custom_er),
+        _set(ws_sum, f"E{r}", f"=SUM(E{min(custom_er)}:E{max(custom_er)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", "=" + "+".join(f"F{x}" for x in custom_fr),
+        _set(ws_sum, f"F{r}", f"=SUM(F{min(custom_fr)}:F{max(custom_fr)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
         names.append(("SUM_CUSTOM", "费用汇总", f"$F${r}"))
         custom_sub_r = r
@@ -10170,9 +10186,9 @@ def build_excel_summary(ctx: dict) -> bytes:
 
     if sb_fr:
         _set(ws_sum, f"B{r}", "水保费用小计", F_BOLD, FILL_SUB, border=BORDER)
-        _set(ws_sum, f"E{r}", "=" + "+".join(f"E{x}" for x in sb_er),
+        _set(ws_sum, f"E{r}", f"=SUM(E{min(sb_er)}:E{max(sb_er)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
-        _set(ws_sum, f"F{r}", "=" + "+".join(f"F{x}" for x in sb_fr),
+        _set(ws_sum, f"F{r}", f"=SUM(F{min(sb_fr)}:F{max(sb_fr)})",
              F_BOLD, FILL_SUB, FMT_MONEY, BORDER)
         names.append(("SUM_SB", "费用汇总", f"$F${r}"))
         sb_sub_r = r
@@ -10580,7 +10596,8 @@ def build_excel_summary(ctx: dict) -> bytes:
     _sec_in("十一、自定义费用与合同价覆盖")
     ws_in.merge_cells(f"A{ir}:C{ir}")
     _set(ws_in, f"A{ir}",
-         "自定义费用与合同价覆盖的费种直接编辑「费用汇总」表中黄色金额格，公式自动参与合计与预备费。",
+         "自定义费用与合同价覆盖的费种直接编辑「费用汇总」表中黄色金额格，公式自动参与合计与预备费；"
+         "末 5 行为预留空白行，填名称＋金额即生效，用尽可在预留行之间插行（勿在小计行正上方插行）。",
          F_NOTE, align=AL_L)
     ir += 1
 
