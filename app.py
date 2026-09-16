@@ -198,6 +198,115 @@ def _build_cascade_excel(ctx: dict) -> bytes:
     return build_excel_summary(ctx)
 
 
+# ===== 广联达 PDF 导入页 =====
+
+def _render_pdf_import_page():
+    """上传广联达 PDF → 解析「单位工程造价汇总表」→ 编辑分组 → 存专业清单。
+
+    清单保存到 st.session_state["zhuan_ye_list"]，Excel 导出的第一部分
+    工程费用按 组（一）→ 专业 → 节/细目 列示（见 fee_engine 导出区块）。
+    """
+    import pandas as pd
+    from pdf_import import parse_pdf, build_groups
+
+    st.title("📄 广联达 PDF 报表导入")
+    st.caption("只解析每个专业的「单位工程造价汇总表」：提取 工程名称 + 工程造价"
+               "（PDF 费用金额单位为元，已换算为万元，原值保留）。"
+               "同一工程名称出现多批时自动按（一）（二）…分组，可在下方编辑。")
+
+    up = st.file_uploader("上传广联达导出的 PDF 报表", type=["pdf"], key="pdf_up")
+    if up is not None and st.session_state.get("pdf_up_id") != up.file_id:
+        with st.spinner("正在解析 PDF…"):
+            try:
+                leaves = parse_pdf(up.getvalue())
+            except Exception as e:
+                st.error(f"PDF 解析失败：{e}")
+                st.stop()
+        if not leaves:
+            st.error("未识别到「单位工程造价汇总表」，请确认是广联达软件导出的报表。")
+            st.stop()
+        st.session_state.pdf_up_id = up.file_id
+        st.session_state.pdf_rows = [
+            {"组号": l["group_no"], "组名": "", "专业": l["zhuanye"], "节": l["jie"],
+             "细目": l["ximu"], "造价(万元)": l["amount_wan"],
+             "设备费(万元)": l["device_wan"], "电气专业": l["electrical"]}
+            for l in leaves
+        ]
+        st.rerun()
+
+    rows = st.session_state.get("pdf_rows")
+    if not rows:
+        st.info("请先上传 PDF。示例：工作区 参考2.PDF（河北雄安项目，577 页）。")
+        return
+
+    st.markdown("### 解析结果（可直接编辑）")
+    st.caption("组号=批次分组（同一次上传中同名工程第 2 次出现起算新组）；"
+               "电气专业（照明/智能交通/电气）造价放合计列＝安装＋设备，其余放建筑列。")
+    df = pd.DataFrame(rows)
+    edited = st.data_editor(
+        df,
+        key="pdf_editor",
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "组号": st.column_config.NumberColumn("组号", min_value=1, max_value=20,
+                                                step=1),
+            "组名": st.column_config.TextColumn("组名（工程或费用名称，自行填写）"),
+            "专业": st.column_config.TextColumn("专业（单项工程）"),
+            "节": st.column_config.TextColumn("节（单位工程）"),
+            "细目": st.column_config.TextColumn("细目"),
+            "造价(万元)": st.column_config.NumberColumn("造价(万元)", format="%.4f"),
+            "设备费(万元)": st.column_config.NumberColumn("设备费(万元)", format="%.4f"),
+            "电气专业": st.column_config.CheckboxColumn("电气专业"),
+        },
+    )
+
+    _cn = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+    # 编辑器中文列名 → build_groups 英文键
+    groups = build_groups([
+        {"group_no": r.get("组号"), "group_name": r.get("组名"),
+         "zhuanye": r.get("专业"), "jie": r.get("节"), "ximu": r.get("细目"),
+         "amount_wan": r.get("造价(万元)"), "device_wan": r.get("设备费(万元)"),
+         "electrical": r.get("电气专业")}
+        for r in edited.to_dict("records")
+    ])
+    tot = 0.0
+    dev_tot = 0.0
+    st.markdown("### 汇总预览")
+    for gi, g in enumerate(groups, 1):
+        gsum = sum(x["amount"] for it in g["items"] for x in it["leaves"])
+        gdev = sum(x["device"] for it in g["items"] for x in it["leaves"])
+        tot += gsum
+        dev_tot += gdev
+        title = f"（{_cn[gi - 1] if gi <= len(_cn) else gi}）{g['name'] or '未命名组'} — {gsum:,.2f} 万元"
+        with st.expander(title, expanded=True):
+            for it in g["items"]:
+                s = sum(x["amount"] for x in it["leaves"])
+                st.markdown(f"- {it['zhuanye']}：**{s:,.2f} 万元**"
+                            f"（{len(it['leaves'])} 行{'，电气专业' if it['electrical'] else ''}）")
+    st.markdown(f"**第一部分 工程费用合计：{tot:,.2f} 万元"
+                f"（其中设备费 {dev_tot:,.2f} 万元）**")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("💾 保存专业清单（用于 Excel 导出）", use_container_width=True,
+                     type="primary"):
+            st.session_state.zhuan_ye_list = groups
+            st.success("已保存。返回主页面发起二类费计算，导出 Excel 的第一部分"
+                       "将按 组→专业→细目 列示，各层自动求和。")
+    with c2:
+        if st.button("🚀 按合计发起二类费计算", use_container_width=True):
+            st.session_state.zhuan_ye_list = groups
+            st.session_state.pdf_import_mode = False
+            st.session_state.current_query = (
+                f"建安费{round(tot, 2)}万，设备费{round(dev_tot, 2)}万，帮我算全部费用")
+            st.rerun()
+
+    if st.session_state.get("zhuan_ye_list"):
+        st.caption("当前已保存的专业清单将在下次导出 Excel 时生效。")
+
+
 
 
 
@@ -1380,6 +1489,7 @@ def _render_result_payload(ctx: dict):
                     "jiaoyi_party": ctx.get("jiaoyi_party"),
                     "spec_overrides": ctx.get("spec_overrides"),
                     "discounts": ctx.get("discounts"),
+                    "zhuan_ye": st.session_state.get("zhuan_ye_list"),
                 })
                 st.download_button(
                     "📥 导出 Excel 汇总表",
@@ -1460,10 +1570,15 @@ with st.sidebar:
     st.markdown("### 功能导航")
     st.markdown("- 智能问答（已上线）")
     st.markdown("- 二类费计算（已上线）")
+    st.markdown("- 广联达 PDF 导入（已上线）")
     st.markdown("- 指标对比分析（开发中）")
     st.markdown("- 正反项目案例（开发中）")
     st.markdown("- 表格预处理（开发中）")
     st.markdown("- 政策文件说明（开发中）")
+
+    _pdf_mode = st.checkbox("📄 广联达 PDF 导入模式",
+                            value=st.session_state.get("pdf_import_mode", False))
+    st.session_state.pdf_import_mode = _pdf_mode
 
     st.divider()
 
@@ -1540,6 +1655,11 @@ with st.sidebar:
 
     st.divider()
     st.caption("Powered by DeepSeek v4")
+
+# ===== 广联达 PDF 导入模式：整页替换主界面 =====
+if st.session_state.get("pdf_import_mode"):
+    _render_pdf_import_page()
+    st.stop()
 
 # ===== 主界面 =====
 st.title("🏗️ 工程造价智能问答")

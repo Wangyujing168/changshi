@@ -9850,37 +9850,221 @@ def build_excel_summary(ctx: dict) -> bytes:
         # 技术经济指标：单位价值（元）= 合计×10000÷数量（数量留空则不显示）
         return f'=IF(N(L{rr})>0,J{rr}*10000/L{rr},"")'
 
-    # ── 一、第一部分 建筑安装工程费 ──
+    # ── 一、第一部分 工程费用 ──
     _bordered_row(r)
     _set(ws_sum, f"A{r}", "一", F_PART_BOLD, align=AL_C)
     _set(ws_sum, f"E{r}", "第一部分 工程费用", F_PART_BOLD, align=AL_C)
-    for _col in "FGHI":
-        _set(ws_sum, f"{_col}{r}", f"=SUM({_col}{r+1}:{_col}{r+2})",
-             F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
-    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
-    names.append(("SUM_P1", "费用汇总", f"$J${r}"))
     p1_row = r
     r += 1
-    _bordered_row(r)
-    _set(ws_sum, f"B{r}", 1, F_HEAD_REF, align=AL_C)
-    _set(ws_sum, f"E{r}", "建安工程费", F_HEAD_REF, align=AL_C)
-    _set(ws_sum, f"F{r}", sem["jianan"], F_HEAD_REF, FILL_INPUT, FMT_MONEY, align=AL_C)
-    names.append(("SUM_JA", "费用汇总", f"$F${r}"))
-    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
-    _set(ws_sum, f"K{r}", None, fill=FILL_INPUT, align=AL_C)
-    _set(ws_sum, f"L{r}", None, fill=FILL_INPUT, align=AL_C)
-    _set(ws_sum, f"M{r}", _unit_value(r), F_HEAD_REF, fmt="#,##0.00", align=AL_C)
-    r += 1
-    _bordered_row(r)
-    _set(ws_sum, f"B{r}", 2, F_HEAD_REF, align=AL_C)
-    _set(ws_sum, f"E{r}", "设备购置费", F_HEAD_REF, align=AL_C)
-    _set(ws_sum, f"H{r}", sem["shebei"], F_HEAD_REF, FILL_INPUT, FMT_MONEY, align=AL_C)
-    names.append(("SUM_SB", "费用汇总", f"$H${r}"))
-    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
-    _set(ws_sum, f"K{r}", None, fill=FILL_INPUT, align=AL_C)
-    _set(ws_sum, f"L{r}", None, fill=FILL_INPUT, align=AL_C)
-    _set(ws_sum, f"M{r}", _unit_value(r), F_HEAD_REF, fmt="#,##0.00", align=AL_C)
-    r += 1
+    _cn_num = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+
+    def _sum_row(row, first, last, font):
+        """汇总行：F-I 各列 =SUM(子行区间)，J=SUM(F:I)。
+        仅用于其下全是原始行（细目）的节行。"""
+        for _col in "FGHI":
+            _set(ws_sum, f"{_col}{row}", f"=SUM({_col}{first}:{_col}{last})",
+                 font, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"J{row}", f"=SUM(F{row}:I{row})", font, fmt=FMT_MONEY,
+             align=AL_C)
+
+    def _fmt_lit(x: float) -> str:
+        """金额字面值进公式（最多 6 位小数=分），去尾零。"""
+        s = f"{x:.6f}".rstrip("0").rstrip(".")
+        return s or "0"
+
+    def _agg_formula(col, first, last, extra):
+        """层级汇总公式：只累加原始行 + 直接落节行的金额（extra）。
+
+        细目行的 D 列有序号（>0），而区间内的专业行/节行小计等汇总行
+        D 列为空——SUMIFS 只取 D>0 的行，避免把已含求和公式的行再
+        加一遍（否则整体造价成倍虚增）；直接落节行的金额（如 管线工程
+        →雨水工程）以字面值并入。
+        """
+        f = f"=SUMIFS({col}{first}:{col}{last},$D${first}:$D${last},\">0\")"
+        if extra:
+            f += f"+{_fmt_lit(extra)}"
+        return f
+
+    def _agg_row(row, first, last, direct, font):
+        """层级汇总行（专业/组/第一部分）：F-I 用 _agg_formula，J=SUM(F:I)。"""
+        for _col in "FGHI":
+            _set(ws_sum, f"{_col}{row}",
+                 _agg_formula(_col, first, last, direct[_col]),
+                 font, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"J{row}", f"=SUM(F{row}:I{row})", font, fmt=FMT_MONEY,
+             align=AL_C)
+
+    zhuan_ye = ctx.get("zhuan_ye") or []
+    if zhuan_ye:
+        # PDF 专业清单模式：组（一）→ 专业 → 节/细目。层级汇总只累加原始行
+        # （_agg_formula：SUMIFS(D>0) + 直接落节行金额），专业行/节行小计已含
+        # 求和公式，整段 SUM 会重复累加。
+        # 电气专业（照明/智能交通/电气）造价放合计列：安装=合计-设备，设备单列；
+        # 其余专业造价放建筑列。金额原值写入，格式显示 2 位小数（#,##0.00）。
+        _sec_first = r
+        _d_sec = {"F": 0.0, "G": 0.0, "H": 0.0, "I": 0.0}  # 直接落节行金额
+        for _gi, _grp in enumerate(zhuan_ye):
+            _grp_row = r
+            _d_grp = {"F": 0.0, "G": 0.0, "H": 0.0, "I": 0.0}
+            _bordered_row(r)
+            _set(ws_sum, f"A{r}",
+                 f"（{_cn_num[_gi] if _gi < len(_cn_num) else _gi + 1}）",
+                 F_PART_BOLD, align=AL_C)
+            _set(ws_sum, f"E{r}", str(_grp.get("name") or ""), F_PART_BOLD,
+                 FILL_INPUT, align=AL_C)
+            r += 1
+            for _zi, _it in enumerate(_grp.get("items") or [], start=1):
+                _zy_row = r
+                _d_zy = {"F": 0.0, "G": 0.0, "H": 0.0, "I": 0.0}
+                _bordered_row(r)
+                _set(ws_sum, f"B{r}", _zi, F_HEAD_REF, align=AL_C)
+                _set(ws_sum, f"E{r}", str(_it.get("zhuanye") or ""),
+                     F_HEAD_REF, align=AL_C)
+                r += 1
+                _zy_first = r
+                _electrical = bool(_it.get("electrical"))
+                _jie_no = _d_no = 0
+                # 无节叶子：直接列在专业行下
+                for _leaf in _it.get("leaves") or []:
+                    _nm = str(_leaf.get("name") or "").strip() or _it.get("zhuanye", "")
+                    _jie = str(_leaf.get("jie") or "").strip()
+                    if _jie or _nm.endswith("工程"):
+                        continue
+                    _d_no += 1
+                    _amt = float(_leaf.get("amount") or 0)
+                    _dev = float(_leaf.get("device") or 0) if _electrical else 0.0
+                    _bordered_row(r)
+                    _set(ws_sum, f"D{r}", _d_no, F_HEAD_REF, align=AL_C)
+                    _set(ws_sum, f"E{r}", _nm, F_HEAD_REF, align=AL_C)
+                    if _electrical:
+                        _set(ws_sum, f"G{r}", _amt - _dev, F_HEAD_REF, fmt=FMT_MONEY,
+                             align=AL_C)
+                        _set(ws_sum, f"H{r}", _dev, F_HEAD_REF, fmt=FMT_MONEY,
+                             align=AL_C)
+                    else:
+                        _set(ws_sum, f"F{r}", _amt, F_HEAD_REF, fmt=FMT_MONEY,
+                             align=AL_C)
+                    _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF,
+                         fmt=FMT_MONEY, align=AL_C)
+                    r += 1
+                # 有节叶子：按节分组（节行 = 其细目求和），名称以「工程」结尾的
+                # 无节叶子作为节级行（C 列，金额直接落行）
+                _by_jie = {}
+                _order = []
+                for _leaf in _it.get("leaves") or []:
+                    _nm = str(_leaf.get("name") or "").strip() or _it.get("zhuanye", "")
+                    _jie = str(_leaf.get("jie") or "").strip()
+                    _key = _jie or (_nm if _nm.endswith("工程") else "")
+                    if not _key:
+                        continue
+                    if _key not in _by_jie:
+                        _by_jie[_key] = []
+                        _order.append(_key)
+                    _by_jie[_key].append(_leaf)
+                for _key in _order:
+                    _leaves = _by_jie[_key]
+                    _jie_no += 1
+                    _jie_row = r
+                    _jie_dir = {"F": 0.0, "G": 0.0, "H": 0.0, "I": 0.0}
+                    _bordered_row(r)
+                    _set(ws_sum, f"C{r}", _jie_no, F_HEAD_REF, align=AL_C)
+                    _set(ws_sum, f"E{r}", _key, F_HEAD_REF, align=AL_C)
+                    r += 1
+                    for _di, _leaf in enumerate(_leaves, start=1):
+                        _nm = str(_leaf.get("name") or "").strip() or _key
+                        if _key == _nm:
+                            # 节级叶子（如 管线工程→雨水工程）：金额直接落节行，
+                            # 并入各级汇总的字面值（该行 D 列为空，SUMIFS 不含）
+                            _amt = float(_leaf.get("amount") or 0)
+                            _dev = (float(_leaf.get("device") or 0)
+                                    if _electrical else 0.0)
+                            if _electrical:
+                                _prev_g = ws_sum[f"G{_jie_row}"].value or 0
+                                _prev_h = ws_sum[f"H{_jie_row}"].value or 0
+                                _set(ws_sum, f"G{_jie_row}",
+                                     _prev_g + (_amt - _dev), F_HEAD_REF,
+                                     fmt=FMT_MONEY, align=AL_C)
+                                _set(ws_sum, f"H{_jie_row}", _prev_h + _dev,
+                                     F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+                                for _d in (_jie_dir, _d_zy, _d_grp, _d_sec):
+                                    _d["G"] += _amt - _dev
+                                    _d["H"] += _dev
+                            else:
+                                _prev = ws_sum[f"F{_jie_row}"].value or 0
+                                _set(ws_sum, f"F{_jie_row}", _prev + _amt,
+                                     F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+                                for _d in (_jie_dir, _d_zy, _d_grp, _d_sec):
+                                    _d["F"] += _amt
+                            _set(ws_sum, f"J{_jie_row}",
+                                 f"=SUM(F{_jie_row}:I{_jie_row})", F_HEAD_REF,
+                                 fmt=FMT_MONEY, align=AL_C)
+                            continue
+                        _amt = float(_leaf.get("amount") or 0)
+                        _dev = float(_leaf.get("device") or 0) if _electrical else 0.0
+                        _bordered_row(r)
+                        _set(ws_sum, f"D{r}", _di, F_HEAD_REF, align=AL_C)
+                        _set(ws_sum, f"E{r}", _nm, F_HEAD_REF, align=AL_C)
+                        if _electrical:
+                            _set(ws_sum, f"G{r}", _amt - _dev, F_HEAD_REF, fmt=FMT_MONEY,
+                                 align=AL_C)
+                            _set(ws_sum, f"H{r}", _dev, F_HEAD_REF, fmt=FMT_MONEY,
+                                 align=AL_C)
+                        else:
+                            _set(ws_sum, f"F{r}", _amt, F_HEAD_REF, fmt=FMT_MONEY,
+                                 align=AL_C)
+                        _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF,
+                             fmt=FMT_MONEY, align=AL_C)
+                        r += 1
+                    if r - 1 > _jie_row:  # 节行下有细目 → 节行回填求和公式
+                        if any(_jie_dir.values()):
+                            # 节行同时有直接落行金额：=SUM(细目)+直接金额
+                            for _col in "FGHI":
+                                _s2 = f"=SUM({_col}{_jie_row + 1}:{_col}{r - 1})"
+                                if _jie_dir[_col]:
+                                    _s2 += f"+{_fmt_lit(_jie_dir[_col])}"
+                                _set(ws_sum, f"{_col}{_jie_row}", _s2, F_HEAD_REF,
+                                     fmt=FMT_MONEY, align=AL_C)
+                            _set(ws_sum, f"J{_jie_row}",
+                                 f"=SUM(F{_jie_row}:I{_jie_row})", F_HEAD_REF,
+                                 fmt=FMT_MONEY, align=AL_C)
+                        else:
+                            _sum_row(_jie_row, _jie_row + 1, r - 1, F_HEAD_REF)
+                if r - 1 >= _zy_first:  # 专业行回填汇总（只加原始行）
+                    _agg_row(_zy_row, _zy_first, r - 1, _d_zy, F_HEAD_REF)
+            _agg_row(_grp_row, _grp_row + 1, r - 1, _d_grp, F_PART_BOLD)
+        _agg_row(p1_row, _sec_first, r - 1, _d_sec, F_PART_BOLD)
+        names.append(("SUM_P1", "费用汇总", f"$J${p1_row}"))
+        names.append(("SUM_JA", "费用汇总", f"$F${p1_row}"))
+        names.append(("SUM_SB", "费用汇总", f"$H${p1_row}"))
+    else:
+        # 传统模式：建安工程费/设备购置费 两行黄色输入
+        for _col in "FGHI":
+            _set(ws_sum, f"{_col}{p1_row}",
+                 f"=SUM({_col}{p1_row + 1}:{_col}{p1_row + 2})",
+                 F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"J{p1_row}", f"=SUM(F{p1_row}:I{p1_row})", F_PART_BOLD,
+             fmt=FMT_MONEY, align=AL_C)
+        names.append(("SUM_P1", "费用汇总", f"$J${p1_row}"))
+        _bordered_row(r)
+        _set(ws_sum, f"B{r}", 1, F_HEAD_REF, align=AL_C)
+        _set(ws_sum, f"E{r}", "建安工程费", F_HEAD_REF, align=AL_C)
+        _set(ws_sum, f"F{r}", sem["jianan"], F_HEAD_REF, FILL_INPUT, FMT_MONEY, align=AL_C)
+        names.append(("SUM_JA", "费用汇总", f"$F${r}"))
+        _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"K{r}", None, fill=FILL_INPUT, align=AL_C)
+        _set(ws_sum, f"L{r}", None, fill=FILL_INPUT, align=AL_C)
+        _set(ws_sum, f"M{r}", _unit_value(r), F_HEAD_REF, fmt="#,##0.00", align=AL_C)
+        r += 1
+        _bordered_row(r)
+        _set(ws_sum, f"B{r}", 2, F_HEAD_REF, align=AL_C)
+        _set(ws_sum, f"E{r}", "设备购置费", F_HEAD_REF, align=AL_C)
+        _set(ws_sum, f"H{r}", sem["shebei"], F_HEAD_REF, FILL_INPUT, FMT_MONEY, align=AL_C)
+        names.append(("SUM_SB", "费用汇总", f"$H${r}"))
+        _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY, align=AL_C)
+        _set(ws_sum, f"K{r}", None, fill=FILL_INPUT, align=AL_C)
+        _set(ws_sum, f"L{r}", None, fill=FILL_INPUT, align=AL_C)
+        _set(ws_sum, f"M{r}", _unit_value(r), F_HEAD_REF, fmt="#,##0.00", align=AL_C)
+        r += 1
 
     # ── 二、第二部分 工程建设其他费 ──
     _bordered_row(r)
