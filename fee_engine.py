@@ -9685,7 +9685,7 @@ def build_excel_summary(ctx: dict) -> bytes:
     FILL_HEADER = PatternFill("solid", fgColor="4472C4")
     FILL_INPUT = PatternFill("solid", fgColor="FFF2CC")
     FILL_SUB = PatternFill("solid", fgColor="D9E2F3")
-    THIN = Side(style="thin", color="999999")
+    THIN = Side(style="thin")  # 不写颜色=默认黑，与概算表参考文件一致（灰线过浅易显「缺边」）
     BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
     # 概算表表头逐边复刻用（参考文件合并区内部格只画部分边，WPS 下照此渲染）
     _B_BOT = Border(bottom=THIN)
@@ -9816,6 +9816,8 @@ def build_excel_summary(ctx: dict) -> bytes:
     _set(ws_sum, "N3", "备    注", F_HEAD_REF, border=BORDER, align=AL_C)
     for _j in range(1, 6):  # A4-E4：垂直合并区内部，仅左右边
         _set(ws_sum, f"{get_column_letter(_j)}4", None, border=_B_LR)
+    for _j in range(1, 6):  # A5-E5：垂直合并区最下行，左右+下边（WPS 逐格渲染，缺则断线）
+        _set(ws_sum, f"{get_column_letter(_j)}5", None, border=_B_LRB)
     for _j, _t4, _t5 in [(6, "建   筑", "工   程"), (7, "安   装", "工   程"),
                          (8, "设备及工", "器具购置"), (9, "其   他", "费   用")]:
         _col = get_column_letter(_j)
@@ -9851,7 +9853,7 @@ def build_excel_summary(ctx: dict) -> bytes:
     # ── 一、第一部分 建筑安装工程费 ──
     _bordered_row(r)
     _set(ws_sum, f"A{r}", "一", F_PART_BOLD, align=AL_C)
-    _set(ws_sum, f"E{r}", "第一部分 建筑安装工程费", F_PART_BOLD, align=AL_C)
+    _set(ws_sum, f"E{r}", "第一部分 工程费用", F_PART_BOLD, align=AL_C)
     for _col in "FGHI":
         _set(ws_sum, f"{_col}{r}", f"=SUM({_col}{r+1}:{_col}{r+2})",
              F_PART_BOLD, fmt=FMT_MONEY, align=AL_C)
