@@ -299,8 +299,11 @@ def _render_pdf_import_page():
         if st.button("🚀 按合计发起二类费计算", use_container_width=True):
             st.session_state.zhuan_ye_list = groups
             st.session_state.pdf_import_mode = False
+            # tot 已含设备费（电气专业造价 = 安装 + 设备）→ 建安费须扣除设备费，
+            # 否则第一部分工程费 = 建安 + 设备 会把设备费双计（面板与 Excel 合计不符）
             st.session_state.current_query = (
-                f"建安费{round(tot, 2)}万，设备费{round(dev_tot, 2)}万，帮我算全部费用")
+                f"建安费{round(tot - dev_tot, 2)}万，设备费{round(dev_tot, 2)}万，"
+                f"帮我算全部费用")
             st.rerun()
 
     if st.session_state.get("zhuan_ye_list"):
@@ -1371,6 +1374,17 @@ def _finalize_confirm(ctx: dict):
         st.markdown(f"- {FEE_CATALOG.get(fn, {}).get('label', fn)}：打 {d:g} 折")
     for e in (ctx.get("custom_fees") or []):
         st.markdown(f"- 自定义：{e.get('名称')} {e.get('金额(万元)')} 万")
+
+    # 征地拆迁费单独列项：计算前确认口径（结算与 Excel 导出据此渲染）
+    _zc_sep = st.checkbox(
+        "🏗️ 征地拆迁费单独列项（与工程费、工程建设其他费并列；建管费基数仍扣除）",
+        value=bool(ctx.get("zhengchai_separate",
+                           st.session_state.get("zhengchai_separate", False))),
+        key=f"ck_zc_sep_input_{qno}",
+    )
+    ctx["zhengchai_separate"] = _zc_sep
+    st.session_state["zhengchai_separate"] = _zc_sep
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🚀 开始计算", key=f"ck_final_go_{qno}",
@@ -1382,12 +1396,112 @@ def _finalize_confirm(ctx: dict):
             _cancel_task(ctx)
 
 
+# ── 征地拆迁费单独列项：面板口径对齐 Excel 导出 ──
+# 识别规则与 fee_engine 导出区块、建管费基数扣除（_match_custom_fee_deductions）同源
+_ZD_RE = re.compile(r"征地|拆迁|建设用地|土地征用|用地费")
+
+
+def _zd_amount(custom_fees) -> float:
+    """自定义费用中征地拆迁类金额合计（万元）。"""
+    return round(sum(
+        float(e.get("amount_wan") or e.get("金额(万元)") or 0)
+        for e in (custom_fees or [])
+        if _ZD_RE.search(str(e.get("名称") or e.get("name") or ""))
+    ), 4)
+
+
+def _apply_zhengchai_panel(payload: dict, ctx: dict) -> bool:
+    """单独列项时调整面板汇总口径，与 Excel 导出五个部分一致：
+
+    工程建设其他费（原二类费合计）= 二类费合计 − 征地拆迁；
+    预备费 = (第一部分工程费 + 工程建设其他费) × 费率（基数不含征地拆迁）；
+    总投资 = 工程费 + 征地拆迁 + 工程建设其他费 + 预备费。
+    引擎各费种数值不动（建管/可研基数仍含征地拆迁，与导出迭代层口径一致）。
+    """
+    if not ctx.get("zhengchai_separate"):
+        return False
+    zd = _zd_amount(payload.get("custom_fees"))
+    if zd <= 0:
+        return False
+    preview = payload.get("preview") or {}
+    p1 = payload.get("total_part1") or 0.0
+    rate = float(ctx.get("yubei_rate") or 5.0)
+    fee_excl = round((preview.get("fee_total_with_custom") or 0.0) - zd, 4)
+    yb = preview.get("yubei_total") or 0.0
+    ctr_yb = (payload.get("contract_overrides") or {}).get("预备费") or {}
+    if ctr_yb.get("type") != "price":  # 合同一口价保持不变
+        yb = round((p1 + fee_excl) * rate / 100.0, 4)
+    preview["zhengchai_total"] = zd
+    preview["fee_total_with_custom"] = fee_excl
+    preview["yubei_total"] = yb
+    preview["project_total_with_custom"] = round(p1 + fee_excl + zd + yb, 4)
+    numerical = preview.get("numerical")
+    if numerical:
+        numerical["预备费(万元)"] = yb
+    yb_rr = (preview.get("raw") or {}).get("原始结果") or {}
+    if isinstance(yb_rr, dict):
+        yb_rr = yb_rr.get("预备费")
+    if isinstance(yb_rr, dict):
+        _src = yb_rr.get("预备费率来源") or "默认"
+        yb_rr["计算公式"] = (f"（{p1} + {round(fee_excl, 4)}）× "
+                             f"{rate}%（{_src}）")
+        yb_rr["结果(万元)"] = yb
+        for _s in yb_rr.get("计算步骤") or []:
+            if _s.get("步骤") == "计算":
+                _s["公式"] = yb_rr["计算公式"] + "，不含征地拆迁费"
+                _s["结果"] = f"{yb} 万元"
+                break
+    return True
+
+
+def _apply_zhengchai_scenarios(result: dict, ctx: dict) -> None:
+    """折扣情景对比：单独列项时各方案 二类费合计/预备费/总投资 同口径剔除征地拆迁。"""
+    zd = _zd_amount(ctx.get("custom_fees"))
+    if zd <= 0:
+        return
+    am = ctx.get("amounts") or {}
+    p1 = round(float(am.get("jianan") or 0) + float(am.get("shebei") or 0), 4)
+    rate = float(ctx.get("yubei_rate") or 5.0)
+    ctr_yb = (ctx.get("contract_overrides") or {}).get("预备费") or {}
+    is_price = ctr_yb.get("type") == "price"
+    for s in result.get("方案列表") or []:
+        fee_excl = round((s.get("二类费合计(万元)") or 0.0) - zd, 4)
+        d = s.get("各项费用") or {}
+        yb = d.get("预备费(万元)", 0.0) if is_price \
+            else round((p1 + fee_excl) * rate / 100.0, 4)
+        s["二类费合计(万元)"] = fee_excl
+        s["总投资(万元)"] = round(p1 + fee_excl + zd + yb, 4)
+        s["项目总投资(万元)"] = s["总投资(万元)"]
+        if d is not None:
+            d["预备费(万元)"] = yb
+    for row in result.get("对比表") or []:
+        fname = row.get("费用名称")
+        for i, s in enumerate(result.get("方案列表") or [], 1):
+            k = f"方案{i}"
+            if fname == "预备费(万元)":
+                row[k] = (s.get("各项费用") or {}).get("预备费(万元)")
+            elif fname == "二类费合计(万元)":
+                row[k] = s["二类费合计(万元)"]
+            elif fname in ("总投资(万元)", "项目总投资(万元)"):
+                row[k] = s["项目总投资(万元)"]
+
+
+def _gen_discount_scenarios(ctx: dict):
+    """折扣情景对比（单独列项时同步剔除征地拆迁口径）。"""
+    result = calc_discount_scenarios(ctx)
+    if ctx.get("zhengchai_separate"):
+        _apply_zhengchai_scenarios(result, ctx)
+    return result
+
+
 def _finalize_and_render(ctx: dict):
     """结算并进入 done 阶段（结果持久化在 pending_task["payload"]）。"""
     with st.spinner("正在计算..."):
         result = settle_checklist(ctx)
     if result["kind"] == "cascade":
         payload = result["payload"]
+        # 征地拆迁费单独列项：面板汇总口径对齐 Excel 导出（剔除征地拆迁）
+        _apply_zhengchai_panel(payload, ctx)
         ctx["payload"] = payload
         ctx["phase"] = "done"
         _record_calculation(ctx.get("query", ""), {
@@ -1396,13 +1510,25 @@ def _finalize_and_render(ctx: dict):
         })
         # 折扣情景：结算后自动生成对比（缓存防重复计算）
         if ctx.get("discount_scenario"):
-            ctx["_discount_scenarios"] = calc_discount_scenarios(ctx)
-        summary = (
-            f"## 二类费计算结果\n\n"
-            f"二类费合计 **{payload['preview']['fee_total_with_custom']:.2f} 万元**，"
-            f"项目总投资 **{payload['preview']['project_total_with_custom']:.2f} 万元**。\n\n"
-            f"详细结果见下方面板。"
-        )
+            ctx["_discount_scenarios"] = _gen_discount_scenarios(ctx)
+        _zd_disp = payload["preview"].get("zhengchai_total")
+        if _zd_disp:
+            summary = (
+                f"## 二类费计算结果\n\n"
+                f"工程费 **{payload['total_part1']:.2f} 万元**，"
+                f"征地拆迁费 **{_zd_disp:.2f} 万元**（单独列项），"
+                f"工程建设其他费 **{payload['preview']['fee_total_with_custom']:.2f} 万元**，"
+                f"预备费 **{payload['preview']['yubei_total']:.2f} 万元**，"
+                f"工程总投资 **{payload['preview']['project_total_with_custom']:.2f} 万元**。\n\n"
+                f"详细结果见下方面板。"
+            )
+        else:
+            summary = (
+                f"## 二类费计算结果\n\n"
+                f"二类费合计 **{payload['preview']['fee_total_with_custom']:.2f} 万元**，"
+                f"项目总投资 **{payload['preview']['project_total_with_custom']:.2f} 万元**。\n\n"
+                f"详细结果见下方面板。"
+            )
     else:
         ctx["phase"] = "done"
         ctx["simple_results"] = result["results"]
@@ -1430,12 +1556,19 @@ def _render_result_payload(ctx: dict):
     payload = ctx.get("payload")
     if payload:
         preview = payload["preview"]
+        _zd_disp = preview.get("zhengchai_total")
         st.markdown("## 二类费计算结果（程序精确计算）")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("第一部分工程费", f"{payload['total_part1']:.2f} 万元")
-        c2.metric("二类费合计", f"{preview['fee_total_with_custom']:.2f} 万元")
+        c2.metric("工程建设其他费" if _zd_disp else "二类费合计",
+                  f"{preview['fee_total_with_custom']:.2f} 万元")
         c3.metric("预备费", f"{preview['yubei_total']:.2f} 万元")
         c4.metric("项目总投资", f"{preview['project_total_with_custom']:.2f} 万元")
+        if _zd_disp:
+            st.info(
+                f"🏗️ 征地拆迁费 **{_zd_disp:,.2f} 万元**已单独列项，"
+                f"与工程费、工程建设其他费并列；预备费基数不含征地拆迁费。"
+            )
 
         numerical = preview.get("numerical", {})
         rows = []
@@ -1490,6 +1623,7 @@ def _render_result_payload(ctx: dict):
                     "spec_overrides": ctx.get("spec_overrides"),
                     "discounts": ctx.get("discounts"),
                     "zhuan_ye": st.session_state.get("zhuan_ye_list"),
+                    "zhengchai_separate": ctx.get("zhengchai_separate", False),
                 })
                 st.download_button(
                     "📥 导出 Excel 汇总表",
@@ -1505,7 +1639,7 @@ def _render_result_payload(ctx: dict):
             if st.button("📊 折扣方案对比", key=f"ck_scen_btn_{ctx.get('qno', 1)}",
                          use_container_width=True):
                 with st.spinner("正在生成折扣情景..."):
-                    ctx["_discount_scenarios"] = calc_discount_scenarios(ctx)
+                    ctx["_discount_scenarios"] = _gen_discount_scenarios(ctx)
                 st.rerun()
     else:
         # 纯独立费种直算结果
