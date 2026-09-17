@@ -624,6 +624,11 @@ def _step_back(ctx: dict, from_stage: str | None = None) -> None:
         ctx["fees_confirmed"] = False
     if target_idx <= 2:
         ctx["custom_answered"] = False
+        # 征地拆迁费提问重新确认（已填金额保留；已有识别费用时自动跳过提问）
+        ctx.pop("zd_asked", None)
+        ctx.pop("zd_exists", None)
+        ctx.pop("zd_placement", None)
+        ctx.pop("zd_refine_asked", None)
     if target_idx <= 3:
         ctx["params_done"] = False
         ctx["param_idx"] = 0
@@ -820,6 +825,158 @@ def _ask_amounts(ctx: dict):
             st.rerun()
 
 
+def _ask_zhengchai(ctx: dict, qno: int) -> bool:
+    """计算前主动询问征地拆迁费：是否存在 → 列示方式（单独列项/计入其他费）
+    → 是否需要细化 → 进入对应填写子流程。
+
+    Returns True 表示本回合正在提问征地拆迁费（调用方应立即返回，不渲染后续问题）。
+    查询已自带征地拆迁费时跳过提问，默认单独列项（确认页可取消）。
+    """
+    if _zd_amount(ctx.get("custom_fees")) > 0:
+        ctx["zd_asked"] = True
+        ctx["zd_exists"] = True
+        ctx.setdefault("zhengchai_separate", True)
+        return False
+    if not ctx.get("zd_asked"):
+        st.markdown(
+            "**🏗️ 是否有征地拆迁费？**"
+            "（如土地征用、房屋拆迁、青苗补偿等，通常不随其他费用打折）")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ 有征地拆迁费", key=f"ck_zd_yes_{qno}",
+                         use_container_width=True):
+                ctx["zd_asked"] = True
+                ctx["zd_exists"] = True
+                ctx["qno"] = qno + 1
+                st.rerun()
+        with c2:
+            if st.button("🚫 没有", key=f"ck_zd_no_{qno}",
+                         use_container_width=True):
+                ctx["zd_asked"] = True
+                ctx["zd_exists"] = False
+                ctx["qno"] = qno + 1
+                st.rerun()
+        return True
+    if ctx.get("zd_exists") and ctx.get("zd_placement") is None:
+        st.markdown("**🏗️ 征地拆迁费如何列示？**")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📑 单独列项（与工程费、工程建设其他费并列展示）",
+                         key=f"ck_zd_pl_sep_{qno}", use_container_width=True):
+                ctx["zd_placement"] = "separate"
+                ctx["zhengchai_separate"] = True
+                ctx["qno"] = qno + 1
+                st.rerun()
+        with c2:
+            if st.button("📦 计入工程建设其他费（作为二类费组成部分）",
+                         key=f"ck_zd_pl_in_{qno}", use_container_width=True):
+                ctx["zd_placement"] = "inside"
+                ctx["zhengchai_separate"] = False
+                ctx["qno"] = qno + 1
+                st.rerun()
+        return True
+    if ctx.get("zd_exists") and not ctx.get("zd_refine_asked"):
+        st.markdown(
+            "**🏗️ 征地拆迁费是否需要细化？**"
+            "（细化后逐项列示，如 房屋征收 / 青苗补偿 / 管线迁改）")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📋 需要细化（逐项填写）", key=f"ck_zd_refine_yes_{qno}",
+                         use_container_width=True):
+                ctx["zd_refine_asked"] = True
+                ctx["_subflow"] = "zd_detail"
+                ctx["qno"] = qno + 1
+                st.rerun()
+        with c2:
+            if st.button("💰 不需要，填一笔总额", key=f"ck_zd_refine_no_{qno}",
+                         use_container_width=True):
+                ctx["zd_refine_asked"] = True
+                ctx["_subflow"] = "zd_single"
+                ctx["qno"] = qno + 1
+                st.rerun()
+        return True
+    return False
+
+
+def _zd_detail_loop(ctx: dict):
+    """征地拆迁费细化填写：多行表格，逐项自动加「征地拆迁费·」前缀。
+
+    前缀保证各细项仍被识别为征地拆迁费（单独列项归组、建管费基数扣除、
+    预备费基数剔除均按 征地|拆迁 正则匹配）。
+    """
+    import pandas as pd
+    qno = ctx.get("qno", 1)
+    st.markdown("**📋 征地拆迁费明细填写**")
+    st.caption("每行一项：填「细项名称」与「金额（万元）」，留空行忽略；"
+               "名称自动加前缀「征地拆迁费·」。")
+    rows = st.session_state.get(f"zd_rows_{qno}")
+    if not rows:
+        rows = [{"细项名称": "", "金额(万元)": 0.0} for _ in range(3)]
+        st.session_state[f"zd_rows_{qno}"] = rows
+    edited = st.data_editor(
+        pd.DataFrame(rows),
+        key=f"ck_zd_editor_{qno}",
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "细项名称": st.column_config.TextColumn("细项名称", width="large"),
+            "金额(万元)": st.column_config.NumberColumn(
+                "金额(万元)", min_value=0.0, format="%.2f"),
+        },
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅ 添加明细", key=f"ck_zd_det_ok_{qno}",
+                     use_container_width=True):
+            added = 0
+            for r in edited.to_dict("records"):
+                nm = str(r.get("细项名称") or "").strip()
+                try:
+                    amt = float(r.get("金额(万元)") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if nm and amt > 0:
+                    ctx.setdefault("custom_fees", []).append(
+                        {"名称": f"征地拆迁费·{nm}",
+                         "金额(万元)": round(amt, 4)})
+                    added += 1
+            if added:
+                ctx["_subflow"] = None
+                ctx["qno"] = qno + 1
+                st.rerun()
+            else:
+                st.warning("请至少填写一项：细项名称 + 金额（万元）> 0。")
+    with c2:
+        if st.button("↩ 返回", key=f"ck_zd_det_back_{qno}",
+                     use_container_width=True):
+            ctx["_subflow"] = None
+            ctx["qno"] = qno + 1
+            st.rerun()
+
+
+def _zd_single_loop(ctx: dict):
+    qno = ctx.get("qno", 1)
+    st.markdown("**💰 征地拆迁费（一笔总额）**")
+    amount = st.number_input("金额（万元）", min_value=0.0, value=0.0, step=10.0,
+                             key=f"ck_zd_single_{qno}")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅ 添加", key=f"ck_zd_single_ok_{qno}",
+                     use_container_width=True, disabled=amount <= 0):
+            ctx.setdefault("custom_fees", []).append(
+                {"名称": "征地拆迁费", "金额(万元)": round(float(amount), 4)})
+            ctx["_subflow"] = None
+            ctx["qno"] = qno + 1
+            st.rerun()
+    with c2:
+        if st.button("↩ 返回", key=f"ck_zd_single_back_{qno}",
+                     use_container_width=True):
+            ctx["_subflow"] = None
+            ctx["qno"] = qno + 1
+            st.rerun()
+
+
 def _ask_custom(ctx: dict):
     qno = ctx.get("qno", 1)
     cf = ctx.get("custom_fees") or []
@@ -838,6 +995,14 @@ def _ask_custom(ctx: dict):
             st.markdown(f"- {FEE_CATALOG.get(fn, {}).get('label', fn)}：{desc}")
 
     sub = ctx.get("_subflow")
+    if sub == "zd_detail":
+        _zd_detail_loop(ctx)
+        return
+    if sub == "zd_single":
+        _zd_single_loop(ctx)
+        return
+    if _ask_zhengchai(ctx, qno):
+        return
     if sub == "custom_loop":
         _custom_fee_loop(ctx)
         return
