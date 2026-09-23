@@ -9660,7 +9660,7 @@ _CC_HB_COLS = {svc: i + 1 for i, svc in enumerate(_HEBEI_COST_CONSULTING_SERVICE
 
 
 def build_excel_summary(ctx: dict) -> bytes:
-    """导出「活公式」Excel 汇总表（四 sheet：费用汇总/输入参数/计算规则/计算过程）。
+    """导出「活公式」Excel 汇总表（五 sheet：费用汇总/输入参数/计算规则/计算过程/名称索引）。
 
     所有费用行为活公式：修改黄色输入格（建安费/设备费/折扣/费率/规则表档位），
     二类费用与总投资自动重算。循环引用集中在「计算过程」折前层，依赖 Excel
@@ -9671,6 +9671,7 @@ def build_excel_summary(ctx: dict) -> bytes:
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.datavalidation import DataValidation
     from openpyxl.workbook.defined_name import DefinedName
+    from openpyxl.comments import Comment
     import io
     import re
 
@@ -10485,7 +10486,9 @@ def build_excel_summary(ctx: dict) -> bytes:
     ws_sum.merge_cells(f"A{r}:N{r}")
     _set(ws_sum, f"A{r}",
          "黄色单元格可直接修改（项目名称/建安费/设备费/合同价/预留行金额等），"
-         "全部费用公式自动重算；档位规则见「计算规则」，其余输入见「输入参数」。",
+         "全部费用公式自动重算；档位规则见「计算规则」，其余输入见「输入参数」。"
+         "光标悬停公式格可查看公式中名称参数的位置（批注），按 Ctrl+[ 可直接跳转到引用单元格，"
+         "全部名称见「名称索引」表。",
          F_NOTE, align=AL_L)
     r += 1
     ws_sum.merge_cells(f"A{r}:N{r}")
@@ -11075,6 +11078,51 @@ def build_excel_summary(ctx: dict) -> bytes:
     # ── 命名区域注册 ──
     for _name, _sheet, _ref in names:
         wb.defined_names[_name] = DefinedName(_name, attr_text=f"'{_sheet}'!{_ref}")
+
+    # ── 公式格批注：名称 → 位置提示（悬停可见；名称原生不会被编辑态彩框高亮）──
+    _name_loc = {}
+    _name_row = {}
+    for _name, _sheet, _ref in names:
+        _name_loc[_name] = f"{_sheet}!{_ref.replace('$', '')}"
+        _m = re.search(r"\$([A-Z]+)\$(\d+)", _ref)
+        _name_row[_name] = int(_m.group(2)) if _m else 0
+    _name_re = re.compile(r"\b[A-Z][A-Z0-9_]*\b")
+    for _ws in wb.worksheets:
+        for _row in _ws.iter_rows():
+            for _c in _row:
+                _v = _c.value
+                if not (isinstance(_v, str) and _v.startswith("=")):
+                    continue
+                _hits = []
+                for _tok in _name_re.findall(_v):
+                    if _tok in _name_loc and _tok not in _hits:
+                        _hits.append(_tok)
+                if _hits:
+                    _c.comment = Comment(
+                        "\n".join(f"{_t} → {_name_loc[_t]}" for _t in _hits),
+                        "位置提示", width=230, height=16 + 13 * len(_hits))
+
+    # ── 名称索引表（第五 sheet）：全部名称 → 工作表!单元格 ──
+    _sheet_order = {_ws.title: _i for _i, _ws in enumerate(wb.worksheets)}
+    ws_idx = wb.create_sheet("名称索引")
+    ws_idx.merge_cells("A1:C1")
+    _set(ws_idx, "A1",
+         "名称位置索引 — 公式中的名称对应到具体单元格；在任一公式格按 Ctrl+[ 可直接跳转引用格。",
+         F_TITLE, align=AL_L)
+    for _j, _h in enumerate(["名称", "工作表", "单元格"]):
+        _set(ws_idx, f"{get_column_letter(_j + 1)}2", _h, F_WHITE_BOLD, FILL_HEADER,
+             border=BORDER)
+    _idx_rows = sorted(
+        {_name: (_sheet, _ref) for _name, _sheet, _ref in names}.items(),
+        key=lambda kv: (_sheet_order.get(kv[1][0], 99), _name_row.get(kv[0], 0)))
+    for _i, (_name, (_sheet, _ref)) in enumerate(_idx_rows):
+        _r = 3 + _i
+        _set(ws_idx, f"A{_r}", _name, F_BASE, border=BORDER, align=AL_L)
+        _set(ws_idx, f"B{_r}", _sheet, F_BASE, border=BORDER)
+        _set(ws_idx, f"C{_r}", _ref.replace("$", ""), F_BASE, border=BORDER)
+    ws_idx.column_dimensions["A"].width = 22
+    ws_idx.column_dimensions["B"].width = 12
+    ws_idx.column_dimensions["C"].width = 12
 
     buf = io.BytesIO()
     wb.save(buf)
