@@ -2499,13 +2499,14 @@ with st.sidebar:
 
     st.markdown("### 功能导航")
     st.markdown("- 智能问答（已上线）")
-    # 子项左对齐勾选框标签（padding-left = 勾选框盒 1.625rem，再与勾选框标签同构：全角空格 + 1.15em 项目符号列）
+    # 子项说明：小字号灰色、无项目符号、轻微缩进，与主条目区分层级
     st.markdown(
-        '<div style="font-size:0.875rem; line-height:2.2; padding-left:1.625rem;'
-        ' margin:0.3rem 0 0.5rem 0;">'
-        '　<span style="display:inline-block;width:1.15em;text-align:center;">·</span>&nbsp;查询苗木品种指标<br/>'
-        '　<span style="display:inline-block;width:1.15em;text-align:center;">·</span>&nbsp;查询二类费政策文件<br/>'
-        '　<span style="display:inline-block;width:1.15em;text-align:center;">·</span>&nbsp;查询定额说明'
+        '<div style="font-size:0.8rem; line-height:1.9; color:rgba(49,51,63,0.62);'
+        ' padding-left:0.9rem; border-left:2px solid rgba(49,51,63,0.18);'
+        ' margin:-0.9rem 0 0.55rem 0;">'
+        '查询苗木品种指标<br/>'
+        '查询二类费政策文件<br/>'
+        '查询定额说明'
         '</div>',
         unsafe_allow_html=True)
     st.markdown("- 概算助手（已上线）")
@@ -2518,9 +2519,63 @@ with st.sidebar:
     st.session_state.preprocess_mode = _pre_mode
     st.markdown("- 指标对比分析（开发中）")
     st.markdown("- 正反项目案例（已上线）")
+    # 侧边栏按钮文字左对齐（1.58 版按钮标签有内层 div/span flex 居中包装，需一并覆盖）
+    st.markdown(
+        "<style>"
+        '[data-testid="stSidebar"] [data-testid="stButton"] button,'
+        '[data-testid="stSidebar"] [data-testid="stButton"] button > div,'
+        '[data-testid="stSidebar"] [data-testid="stButton"] button > div > span {'
+        "  justify-content: flex-start;"
+        "}"
+        '[data-testid="stSidebar"] [data-testid="stButton"] button p {'
+        "  text-align: left;"
+        "  width: 100%;"
+        "}"
+        # 案例子项按钮：仿智能问答子项格式（小灰字+左竖线），保留可点击
+        '[data-testid="stSidebar"] [data-testid="stButton"] '
+        '[data-testid^="stBaseButton-primary"],'
+        '[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {'
+        "  background: transparent !important;"
+        "  color: rgba(49,51,63,0.62) !important;"
+        "  border: none !important;"
+        "  border-left: 2px solid rgba(49,51,63,0.18) !important;"
+        "  border-radius: 0 !important;"
+        "  box-shadow: none !important;"
+        "  font-size: 0.8rem !important;"
+        "  line-height: 1.9 !important;"
+        "  min-height: 0 !important;"
+        "  height: auto !important;"
+        "  padding: 0.05rem 0 0.05rem 0.9rem !important;"
+        "  justify-content: flex-start;"
+        "  text-align: left;"
+        "}"
+        '[data-testid="stSidebar"] [data-testid="stButton"] '
+        '[data-testid^="stBaseButton-primary"]:hover,'
+        '[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:hover {'
+        "  color: rgb(255,75,75) !important;"
+        "  background: rgba(49,51,63,0.05) !important;"
+        "  border-left: 2px solid rgb(255,75,75) !important;"
+        "}"
+        '[data-testid="stSidebar"] [data-testid="stButton"] '
+        '[data-testid^="stBaseButton-primary"] p {'
+        "  text-align: left;"
+        "  width: 100%;"
+        "}"
+        # 案例子项按钮容器：收紧纵向间距，贴近竖线分组效果
+        '[data-testid="stSidebar"] [data-testid="stButton"]:has('
+        '[data-testid^="stBaseButton-primary"]) {'
+        "  margin: 0.12rem 0;"
+        "}"
+        # 首个案例按钮：上移贴近「正反项目案例」标题（抵消标题 ul 的底部留白）
+        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(style)'
+        ' + [data-testid="stElementContainer"] {'
+        "  margin-top: -1.8rem;"
+        "}"
+        "</style>",
+        unsafe_allow_html=True)
     for _case in CASE_ITEMS:
-        if st.button(f"　· {_case['short']}", key=f"case_nav_{_case['key']}",
-                     use_container_width=True):
+        if st.button(_case["short"], key=f"case_nav_{_case['key']}",
+                     use_container_width=True, type="primary"):
             # 进入案例页时退出其他整页模式
             st.session_state.pdf_import_mode = False
             st.session_state.preprocess_mode = False
