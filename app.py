@@ -18,12 +18,18 @@ from fee_engine import (
     _preset_fee_numbers,
     build_excel_summary,
 )
+from ai_planner import (
+    PlannerError, available_keys, build_ctx_summary, question_done, run_planner,
+)
+from config import CASE_BASE_DIR
 
 # ===== 清单式任务流（checklist task flow）双轨开关 =====
 # _TASK_FLOW_START：接管「缺金额/缺费种」场景（旧路径会丢的场景）
 # _TASK_FLOW_CASCADE：金额齐全的 cascade 也进清单机（B3 已翻转，面板变死代码）
 _TASK_FLOW_START = True
 _TASK_FLOW_CASCADE = True
+# AI 对话式提问（概算助手）：默认开启；用户可手动切换传统清单模式（会话内记住）
+st.session_state.setdefault("ai_guide_pref", True)
 
 _TASK_STAGE_LABELS = {
     "fees": "费种确认",
@@ -308,6 +314,206 @@ def _render_pdf_import_page():
 
     if st.session_state.get("zhuan_ye_list"):
         st.caption("当前已保存的专业清单将在下次导出 Excel 时生效。")
+
+
+def _render_preprocess_page():
+    """表格预处理：① 数量总表 .xls → 解析映射 → 预览 → 下载填好的表格（模板已内置）；
+    ② 植物表 .xlsx → 把 胸（地）径/高度/冠幅 拼接进名称列 → 预览 → 下载改写后的表。
+
+    解析/填充逻辑分别在 quantity_import.py 与 plant_spec.py（纯逻辑模块）。
+    """
+    import pandas as pd
+
+    from plant_spec import process_plant_table, to_bytes as plant_to_bytes
+    from quantity_import import (QuantityImportError, fill_template,
+                                 load_builtin_template, mapping_rows,
+                                 parse_xls)
+
+    st.title("📋 表格预处理")
+
+    # ---------- ① 数量总表 → 填充模板 ----------
+    st.markdown("### ① 桥梁工程量表 → 填充模板")
+    st.caption("上传「主要工程数量总表.xls」，自动把桥梁下部结构各部位工程量填入"
+               "内置表格模板的信息输入表对应单元格（计价表与混凝土方量/凿桩头"
+               "为公式自动联动）。数量总表里模板没有的部位会自动新增分项。")
+
+    up_xls = st.file_uploader("上传数量总表 (.xls)", type=["xls"],
+                              key="pre_xls_up")
+    if up_xls is None:
+        st.info("请上传数量总表 .xls，解析后可在下方核对映射结果并下载。")
+    elif st.session_state.get("pre_src_id") != up_xls.file_id:
+        with st.spinner("正在解析并填充…"):
+            try:
+                m = parse_xls(up_xls.getvalue())
+                filled = fill_template(load_builtin_template(), m)
+                st.session_state.pre_xls_err = None
+            except QuantityImportError as e:
+                m = None
+                st.session_state.pre_xls_err = f"解析失败：{e}"
+        st.session_state.pre_mapping = m
+        st.session_state.pre_filled = filled
+        st.session_state.pre_src_id = up_xls.file_id
+        st.rerun()
+    else:
+        if st.session_state.get("pre_xls_err"):
+            st.error(st.session_state.pre_xls_err)
+        else:
+            m = st.session_state.pre_mapping
+            st.markdown("#### 映射结果核对")
+            rows = mapping_rows(m)
+            st.dataframe(pd.DataFrame(rows, columns=["单元格", "项目", "值"]),
+                         use_container_width=True, hide_index=True)
+            for w in m.get("warnings") or []:
+                st.warning(w)
+
+            st.download_button(
+                "⬇️ 下载填好的表格.xlsx", data=st.session_state.pre_filled,
+                file_name="表格_已导入.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+
+    st.divider()
+
+    # ---------- ② 植物表 → 规格写入名称 ----------
+    st.markdown("### ② 植物表 → 规格写入名称")
+    st.caption("上传植物表 .xlsx，把 胸（地）径/高度/冠幅 拼接进名称列，如"
+               "「法桐 胸径14-16cm 高度10m 冠幅3.5-4m」。乔木写胸径、灌木写地径，"
+               "拿不准的保留「胸（地）径」；缺哪项跳过哪项，三项全空的保留原名。")
+
+    up_plant = st.file_uploader("上传植物表 (.xlsx)", type=["xlsx"],
+                                key="pre_plant_up")
+    if up_plant is None:
+        st.info("请上传植物表 .xlsx，改写后的新表可在下方下载。")
+    elif st.session_state.get("pre_plant_src_id") != up_plant.file_id:
+        with st.spinner("正在改写名称列…"):
+            try:
+                changes, wb = process_plant_table(up_plant)
+                st.session_state.pre_plant_err = None
+            except Exception as e:
+                changes = []
+                st.session_state.pre_plant_err = f"解析失败：{e}"
+        st.session_state.pre_plant_changes = changes
+        st.session_state.pre_plant_file = plant_to_bytes(wb) if changes else None
+        st.session_state.pre_plant_src_id = up_plant.file_id
+        st.rerun()
+    else:
+        if st.session_state.get("pre_plant_err"):
+            st.error(st.session_state.pre_plant_err)
+        else:
+            changes = st.session_state.pre_plant_changes
+            st.markdown(f"#### 名称改写预览（共 {len(changes)} 行）")
+            if changes:
+                st.dataframe(pd.DataFrame(changes, columns=["行号", "原名称", "新名称"]),
+                             use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ 下载改写后的植物表.xlsx", data=st.session_state.pre_plant_file,
+                    file_name="植物表_已改写.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True)
+            else:
+                st.info("未找到可改写的苗木行（需 B 列名称、C 列表头含「径」的区块）。")
+
+
+# ===== 正反项目案例：子项注册表（侧边栏点击 → 案例页）=====
+CASE_ITEMS = [
+    {"key": "saimiyi", "short": "塞米伊环城公路（国外项目）",
+     "file": "案例_塞米伊环城公路.md"},
+    {"key": "yuxinqiao", "short": "于新桥拆除重建",
+     "file": "案例_于新桥拆除重建.md"},
+    {"key": "guogaowang", "short": "国高网高速概算",
+     "file": "案例_国高网高速概算.md"},
+    {"key": "dongcheng", "short": "湛江东盛大道全过程咨询",
+     "file": "案例_东盛大道全过程咨询.md"},
+]
+
+
+def _parse_case_md(path) -> dict:
+    """解析案例 md：按 ## 分节，返回 {'title': 主标题, 小节名: 内容}。"""
+    result = {}
+    cur, buf = "title", []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            result[cur] = "\n".join(buf).strip()
+            cur, buf = line[3:].strip(), []
+        else:
+            buf.append(line)
+    result[cur] = "\n".join(buf).strip()
+    if result.get("title", "").startswith("# "):
+        result["title"] = result["title"][2:].strip()
+    return result
+
+
+def _render_case_page(case_key: str):
+    """正反项目案例页：项目简介 + 经验总结 + 值得注意的点 + 关键指标 突出展示，
+    其余培训内容折叠；底部围绕本案例提问（本案例优先检索，查不到回退全库）。"""
+    item = next((c for c in CASE_ITEMS if c["key"] == case_key), None)
+    if item is None:
+        st.session_state.active_case = None
+        st.rerun()
+
+    if st.button("← 返回功能导航", use_container_width=True):
+        st.session_state.active_case = None
+        st.rerun()
+
+    st.title("🏗️ 正反项目案例")
+    st.header(item["short"])
+
+    sections = _parse_case_md(CASE_BASE_DIR / item["file"])
+    if sections.get("title"):
+        st.caption(sections["title"])
+
+    curated = {n: sections.get(n, "") for n in
+               ("项目简介", "经验总结", "值得注意的点", "关键指标")}
+    if curated["项目简介"]:
+        st.markdown(curated["项目简介"])
+    if curated["经验总结"]:
+        st.markdown("### 💡 经验总结")
+        st.markdown(curated["经验总结"])
+    if curated["值得注意的点"]:
+        st.markdown("### ⚠️ 值得注意的点")
+        st.markdown(curated["值得注意的点"])
+    if curated["关键指标"]:
+        st.markdown("### 📊 关键指标")
+        st.markdown(curated["关键指标"])
+
+    rest = [(t, c) for t, c in sections.items() if t not in curated and t != "title"]
+    if rest:
+        with st.expander("📖 查看完整培训内容"):
+            for t, c in rest:
+                st.markdown(f"#### {t}")
+                st.markdown(c)
+
+    st.divider()
+    st.markdown("### 💬 围绕本案例提问")
+    st.caption("优先在本案例培训资料中检索，查不到时回退全库（政策/定额/其他案例）。")
+
+    if st.session_state.get("case_history_owner") != case_key:
+        st.session_state.case_history = []
+        st.session_state.case_history_owner = case_key
+
+    for msg in st.session_state.case_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    engine = get_engine()
+    question = st.chat_input(f"关于「{item['short']}」有什么想问的？")
+    if question:
+        st.session_state.case_history.append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.markdown(question)
+        with st.chat_message("assistant"):
+            with st.spinner("正在检索本案例资料并生成回答..."):
+                history = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.case_history[:-1]
+                ]
+                answer = engine.chat(
+                    question, history,
+                    kb_chunks=engine.case_kb_chunks(item["file"]),
+                    kb_label=f"项目案例「{item['short']}」",
+                )
+            st.markdown(answer)
+        st.session_state.case_history.append({"role": "assistant", "content": answer})
 
 
 
@@ -672,6 +878,12 @@ def _task_progress_header(ctx: dict, stage: str | None):
 
 def _ask_bubble(ctx: dict):
     """ask 阶段总调度：按 current_stage 分发子渲染；全部完成 → 结算确认。"""
+    if ctx.get("ai_guided") and not ctx.get("_ai_fallback"):
+        _ask_ai_guide(ctx)
+        return
+    _msg = ctx.pop("_ai_fallback_msg", None)
+    if _msg:
+        st.warning(_msg)
     stage = current_stage(ctx)
     _task_progress_header(ctx, stage)
 
@@ -1518,6 +1730,420 @@ def _discount_loop(ctx: dict):
             st.rerun()
 
 
+# ══════════════ AI 对话式提问（概算助手）══════════════
+# AI 主导的信息确认：run_planner 动态决定要问什么，控件作答写入 ctx（与固定清单同源），
+# 异常或手动切换时降级传统 5 阶段清单（数据无损）。
+_AI_SUBFLOWS = ("zd_detail", "zd_single", "custom_loop", "contract_loop", "discount_loop")
+
+# 语义问题键的规范选项（AI 只定问题措辞，动作由固定选项保证可靠）
+_AI_CANON_OPTIONS: dict[str, list[tuple[str, object]]] = {
+    "zd_exists": [("✅ 有", True), ("🚫 没有", False)],
+    "zd_placement": [("📑 单独列项（与工程费、工程建设其他费并列）", "separate"),
+                     ("📦 计入工程建设其他费（作为二类费组成部分）", "inside")],
+    "zd_refine": [("📋 需要细化（逐项填写）", "detail"),
+                  ("💰 不需要，填一笔总额", "single")],
+    "custom_need": [("🚫 不需要", "none"), ("➕ 添加自定义费用", "custom"),
+                    ("📝 有合同价/合同费率", "contract")],
+    "discount_need": [("🚫 不需要", "none"), ("💸 指定费用打折", "discount"),
+                      ("📊 查看折扣情景对比", "scenario")],
+    "card:party": [("招标方", "招标方"), ("中标方", "中标方"), ("双方合计", None)],
+}
+
+_CARD_RENDERERS = {
+    "coef": _ask_coef_card, "rate": _ask_linear_rate_card, "shencha": _ask_shencha_card,
+    "service": _ask_service_card, "shuibao_comp": _ask_shuibao_comp_card,
+    "spec": _ask_spec_card,
+}
+
+_SUBFLOW_RENDERERS = {
+    "zd_detail": _zd_detail_loop, "zd_single": _zd_single_loop,
+    "custom_loop": _custom_fee_loop, "contract_loop": _contract_loop,
+    "discount_loop": _discount_loop,
+}
+
+
+def _ai_parse_card_key(key: str) -> dict:
+    parts = key.split(":", 2)
+    kind = parts[1]
+    if kind in ("coef", "rate", "service", "spec"):
+        return {"kind": kind, "fee": parts[2]}
+    fee_map = {"party": "交易服务费", "yubei_rate": "预备费",
+               "shuibao_comp": "水土保持补偿费", "shencha": "施工图审查费"}
+    return {"kind": kind, "fee": fee_map[kind]}
+
+
+def _ai_record_answer(ctx: dict, text: str, answer: str):
+    rounds = ctx.setdefault("_ai_rounds", [])
+    if not rounds:
+        rounds.append({"think": "", "qa": []})
+    rounds[-1]["qa"].append({"text": text, "answer": answer})
+
+
+def _ai_remaining(plan: dict, ctx: dict) -> list[dict]:
+    answered = ctx.get("_ai_answered") or []
+    return [q for q in plan.get("questions") or []
+            if q.get("key") not in answered and not question_done(ctx, q.get("key"))]
+
+
+def _ai_mark_done(ctx: dict, key: str, text: str, answer: str):
+    if key.startswith("card:"):
+        # 用户明确关闭的参数卡（✅已设置/⏭用默认值）→ 后续轮次不再重问
+        done_cards = ctx.setdefault("_ai_card_done", [])
+        if key not in done_cards:
+            done_cards.append(key)
+    answered = ctx.setdefault("_ai_answered", [])
+    if key not in answered:
+        answered.append(key)
+    _ai_record_answer(ctx, text, answer)
+    ctx["qno"] = ctx.get("qno", 1) + 1
+    if not _ai_remaining(ctx.get("_ai_plan") or {}, ctx):
+        ctx["_ai_dirty"] = True
+    st.rerun()
+
+
+def _ai_write(ctx: dict, key: str, value):
+    """语义键的 ctx 写入（镜像固定流程写入路径）。"""
+    if key == "zd_exists":
+        ctx["zd_asked"] = True
+        ctx["zd_exists"] = bool(value)
+    elif key == "zd_placement":
+        ctx["zd_placement"] = value
+        ctx["zhengchai_separate"] = (value == "separate")
+    elif key == "zd_refine":
+        ctx["zd_refine_asked"] = True
+        ctx["_subflow"] = "zd_detail" if value == "detail" else "zd_single"
+    elif key == "custom_need":
+        if value == "none":
+            ctx["custom_answered"] = True
+            ctx.pop("_reask", None)
+        elif value == "custom":
+            ctx["_subflow"] = "custom_loop"
+        else:
+            ctx["_subflow"] = "contract_loop"
+    elif key == "discount_need":
+        if value == "none":
+            ctx["discount_answered"] = True
+            ctx.pop("_reask", None)
+        elif value == "discount":
+            ctx["_subflow"] = "discount_loop"
+        else:
+            ctx["discount_scenario"] = True
+            ctx["discount_answered"] = True
+    elif key == "card:party":
+        ctx["jiaoyi_party"] = value  # None = 双方合计（也是有效答案）
+        ctx["_ai_party_done"] = True
+    else:
+        ctx.setdefault("ai_notes", []).append(f"{value}")
+
+
+# ── 控件渲染 ──
+
+def _ai_render_buttons(ctx: dict, q: dict, qno: int):
+    opts = _AI_CANON_OPTIONS.get(q["key"])
+    pairs = opts if opts else [(o, o) for o in q.get("options") or []]
+    cols = st.columns(min(len(pairs), 3))
+    for oi, (label, val) in enumerate(pairs):
+        with cols[oi % 3]:
+            if st.button(label, key=f"ai_btn_{q['key']}_{oi}_{qno}",
+                         use_container_width=True):
+                _ai_write(ctx, q["key"], val)
+                _ai_mark_done(ctx, q["key"], q["text"], label)
+
+
+def _ai_render_number(ctx: dict, q: dict, qno: int):
+    key = q["key"]
+    if key == "amounts_jianan":
+        am = ctx.setdefault("amounts", {})
+        v = st.number_input("建安工程费（万元）", min_value=0.0,
+                            value=float(am.get("jianan") or 0.0), step=100.0,
+                            key=f"ai_num_jianan_{qno}")
+        if st.button("✅ 确认", key=f"ai_num_ok_jianan_{qno}",
+                     use_container_width=True):
+            if v and v > 0:
+                am["jianan"] = float(v)
+                ctx.pop("_reask", None)
+                _ai_mark_done(ctx, key, q["text"], f"建安费 {v} 万元")
+            else:
+                st.warning("请输入大于 0 的金额")
+    elif key == "amounts_shebei":
+        am = ctx.setdefault("amounts", {})
+        v = st.number_input("设备购置费（万元）", min_value=0.0,
+                            value=float(am.get("shebei") or 0.0), step=50.0,
+                            key=f"ai_num_shebei_{qno}")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ 确认", key=f"ai_num_ok_shebei_{qno}",
+                         use_container_width=True):
+                am["shebei"] = float(v)
+                am["shebei_known"] = True
+                _ai_mark_done(ctx, key, q["text"], f"设备费 {v} 万元")
+        with c2:
+            if st.button("🚫 无设备费", key=f"ai_num_nosb_{qno}",
+                         use_container_width=True):
+                am["shebei"] = 0.0
+                am["shebei_known"] = True
+                _ai_mark_done(ctx, key, q["text"], "无设备费")
+    elif key == "card:yubei_rate":
+        v = st.number_input("预备费率（%）", min_value=0.0,
+                            value=float(ctx.get("yubei_rate", 5.0)), step=0.5,
+                            format="%.1f", key=f"ai_num_yubei_{qno}")
+        if st.button("✅ 使用该费率", key=f"ai_num_ok_yubei_{qno}",
+                     use_container_width=True):
+            ctx["yubei_rate"] = float(v)
+            ctx["_ai_yubei_done"] = True
+            _ai_mark_done(ctx, key, q["text"], f"预备费率 {v}%")
+
+
+def _ai_render_text(ctx: dict, q: dict, qno: int):
+    txt = st.text_input("（自由回答）", key=f"ai_txt_free_{qno}",
+                        placeholder="在此输入，或直接使用下方聊天输入框")
+    if st.button("✅ 发送", key=f"ai_txt_ok_free_{qno}",
+                 use_container_width=True, disabled=not txt):
+        # 复用自由文本解析；未识别的内容存为补充说明供 AI 参考
+        res = advance_checklist(ctx, txt, region=ctx.get("region"))
+        if not res.get("recognized"):
+            ctx.setdefault("ai_notes", []).append(txt)
+        ctx["_ai_dirty"] = True
+        _ai_mark_done(ctx, q["key"], q["text"], txt)
+
+
+def _ai_card_answer_text(ctx: dict, card: dict) -> str:
+    kind, fee = card["kind"], card["fee"]
+    label = FEE_CATALOG.get(fee, {}).get("label", fee)
+    try:
+        if kind in ("rate", "shencha"):
+            v = ctx.get("rate_overrides", {}).get("施工图审查费" if kind == "shencha" else fee)
+            return f"{label}：{v}"
+        if kind == "coef":
+            return f"{label}：{ctx.get('coef_overrides', {}).get(fee)}"
+        if kind == "service":
+            sv = ctx.get("service_selections", {}).get(fee) or ["默认"]
+            return f"{label}：{'、'.join(sv)}"
+        if kind == "shuibao_comp":
+            return f"{label}：{ctx.get('spec_overrides', {}).get('水土保持补偿费')}"
+        if kind == "spec":
+            return f"{label}：{ctx.get('spec_params', {}).get(fee)}"
+    except Exception:
+        pass
+    return f"{label}已设置"
+
+
+def _ai_render_card_question(ctx: dict, q: dict, qno: int):
+    card = _ai_parse_card_key(q["key"])
+    renderer = _CARD_RENDERERS.get(card["kind"])
+    if renderer is None:  # party 走按钮控件；未知 kind 兜底
+        _ai_render_buttons(ctx, q, qno)
+        return
+    renderer(ctx, card, qno)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅ 已设置，继续", key=f"ai_card_ok_{q['key']}_{qno}",
+                     use_container_width=True):
+            _ai_mark_done(ctx, q["key"], q["text"], _ai_card_answer_text(ctx, card))
+    with c2:
+        if st.button("⏭ 本卡用默认值", key=f"ai_card_def_{q['key']}_{qno}",
+                     use_container_width=True):
+            _clear_card_overrides(ctx, card)
+            _ai_mark_done(ctx, q["key"], q["text"], "用默认值")
+
+
+def _ai_render_fees_question(ctx: dict, q: dict, qno: int):
+    """费种确认/选择：镜像 _ask_fees 两分支，但完成动作走 _ai_mark_done。"""
+    if q["key"] == "fees_preset_confirm":
+        preset = _preset_fee_numbers()
+        excluded = ctx.get("fee_exclusions") or set()
+        st.caption("点击序号即可排除，或直接回复序号（如「不需要 3、5」）。")
+        cols = st.columns(3)
+        for n, name, label in preset:
+            is_ex = name in excluded
+            with cols[(n - 1) % 3]:
+                if st.button(f"{'🚫 ' if is_ex else ''}{n}. {label}",
+                             key=f"ai_fees_ex_{name}_{qno}",
+                             use_container_width=True,
+                             type="primary" if is_ex else "secondary"):
+                    if is_ex:
+                        excluded.discard(name)
+                        if name not in ctx["fees"]:
+                            ctx["fees"].append(name)
+                    else:
+                        excluded.add(name)
+                        if name in ctx["fees"]:
+                            ctx["fees"].remove(name)
+                    ctx["fee_exclusions"] = excluded
+                    ctx["qno"] = qno + 1
+                    st.rerun()
+        remain = len(ctx["fees"])
+        if st.button(f"✅ 确认，按剩余 {remain} 项计算",
+                     key=f"ai_fees_allok_{qno}", use_container_width=True,
+                     type="primary"):
+            ctx["fees_confirmed"] = True
+            ctx.pop("_reask", None)
+            _ai_mark_done(ctx, q["key"], q["text"], f"按剩余 {remain} 项计算")
+        return
+    # fees_select
+    defs = fee_catalog_for(ctx.get("region"))
+    selected = set(ctx.get("fees") or [])
+    cols = st.columns(3)
+    for i, fd in enumerate(defs):
+        is_sel = fd["name"] in selected
+        with cols[i % 3]:
+            if st.button(f"{'✅ ' if is_sel else ''}{fd['label']}",
+                         key=f"ai_fees_{i}_{qno}", use_container_width=True,
+                         type="primary" if is_sel else "secondary"):
+                if is_sel:
+                    selected.discard(fd["name"])
+                else:
+                    selected.add(fd["name"])
+                ctx["fees"] = [d["name"] for d in defs if d["name"] in selected]
+                ctx["qno"] = qno + 1
+                st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📦 全部二类费（不含交易服务费）", key=f"ai_fees_all_{qno}",
+                     use_container_width=True):
+            ctx["fees"] = [f for f in FEE_CATALOG if f != "交易服务费"]
+            ctx["preset_all"] = True
+            ctx["qno"] = qno + 1
+            st.rerun()
+    with col2:
+        if st.button("✅ 确认所选费种", key=f"ai_fees_ok_{qno}",
+                     use_container_width=True, disabled=not selected):
+            ctx["fees_confirmed"] = True
+            ctx.pop("_reask", None)
+            _ai_mark_done(ctx, q["key"], q["text"],
+                          "、".join(FEE_CATALOG.get(f, {}).get("label", f)
+                                    for f in ctx["fees"]))
+
+
+def _ai_render_question(ctx: dict, q: dict, qno: int):
+    key = q.get("key")
+    if key in ("fees_preset_confirm", "fees_select"):
+        _ai_render_fees_question(ctx, q, qno)
+    elif key in ("amounts_jianan", "amounts_shebei", "card:yubei_rate"):
+        _ai_render_number(ctx, q, qno)
+    elif key in _AI_CANON_OPTIONS:
+        _ai_render_buttons(ctx, q, qno)
+    elif key and key.startswith("card:"):
+        _ai_render_card_question(ctx, q, qno)
+    else:  # free（或 AI 自行给出的 buttons/text）
+        if q.get("type") == "buttons":
+            _ai_render_buttons(ctx, q, qno)
+        else:
+            _ai_render_text(ctx, q, qno)
+
+
+# ── 气泡渲染 ──
+
+def _ai_header_history(ctx: dict):
+    st.markdown("### 🧠 概算助手 — 信息确认")
+    st.caption("AI 将根据已提供的信息动态确认计算所需内容；点击选项、填写数字或直接自由输入均可。")
+    fees = ctx.get("fees") or []
+    if fees and ctx.get("fees_confirmed"):
+        # 未确认前费种问题卡已展示列表，头部不重复列
+        st.markdown("**已选费种**：" + "、".join(
+            FEE_CATALOG.get(f, {}).get("label", f) for f in fees))
+    am = ctx.get("amounts") or {}
+    bits = []
+    if am.get("jianan") is not None:
+        bits.append(f"建安费 {am['jianan']} 万")
+    if am.get("shebei_known"):
+        bits.append(f"设备费 {am.get('shebei', 0)} 万")
+    if bits:
+        st.markdown("**已识别金额**：" + "，".join(bits))
+    rounds = ctx.get("_ai_rounds") or []
+    if len(rounds) > 1:
+        with st.expander("📜 查看此前的问答记录"):
+            for rd in rounds[:-1]:
+                if rd.get("think"):
+                    st.markdown(f"💭 *{rd['think']}*")
+                for qa in rd.get("qa") or []:
+                    st.markdown(f"- 问：{qa.get('text')}\n  - 答：{qa.get('answer')}")
+    if rounds:
+        for qa in rounds[-1].get("qa") or []:
+            st.caption(f"✅ {qa.get('text')} → {qa.get('answer')}")
+    st.markdown("---")
+
+
+def _ai_footer(ctx: dict):
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔧 切换传统清单模式", key=f"ai_switch_{ctx.get('qno', 1)}",
+                     use_container_width=True):
+            ctx["ai_guided"] = False
+            st.session_state["ai_guide_pref"] = False
+            ctx["param_idx"] = 0
+            for k in ("_ai_plan", "_ai_answered", "_ai_dirty", "_ai_plan_region"):
+                ctx.pop(k, None)
+            st.rerun()
+    with c2:
+        if st.button("🗑 结束本次计算", key=f"ai_cancel_{ctx.get('qno', 1)}",
+                     use_container_width=True):
+            _cancel_task(ctx)
+
+
+def _ai_fallback(ctx: dict, msg: str):
+    ctx["_ai_fallback"] = True
+    ctx["_ai_fallback_msg"] = msg
+    st.rerun()
+
+
+def _ask_ai_guide(ctx: dict):
+    """AI 对话式提问主流程：规划 → 提问 → 作答 → 重规划，直至信息齐全进最终确认。"""
+    qno = ctx.get("qno", 1)
+    sub = ctx.get("_subflow")
+    last_sub = ctx.get("_ai_last_subflow")
+    if last_sub in _AI_SUBFLOWS and sub is None:
+        # 刚从子流程返回：有实际数据才补记完成标志，避免 AI 重复提问
+        # （固定流程里这些标志由阶段级「确认，无需更多」按钮置位，AI 模式没有该按钮）
+        if last_sub == "custom_loop" and ctx.get("custom_fees"):
+            ctx["custom_answered"] = True
+        elif last_sub == "contract_loop" and ctx.get("contract_overrides"):
+            ctx["custom_answered"] = True
+        ctx["_ai_dirty"] = True
+    ctx["_ai_last_subflow"] = sub
+    if sub in _AI_SUBFLOWS:
+        _ai_header_history(ctx)
+        _SUBFLOW_RENDERERS[sub](ctx)
+        _ai_footer(ctx)
+        return
+
+    plan = ctx.get("_ai_plan")
+    if (ctx.get("_ai_dirty") or plan is None
+            or ctx.get("_ai_plan_region") != ctx.get("region")):
+        avail = available_keys(ctx)
+        try:
+            with st.spinner("🧠 正在思考接下来需要确认的信息…"):
+                plan = run_planner(build_ctx_summary(ctx, avail), avail)
+        except PlannerError:
+            _ai_fallback(ctx, "AI 引导暂时不可用（接口异常），已切换为传统清单模式。")
+        ctx["_ai_plan"] = plan
+        ctx["_ai_plan_region"] = ctx.get("region")
+        ctx["_ai_answered"] = []
+        ctx["_ai_dirty"] = False
+        ctx.setdefault("_ai_rounds", []).append({"think": plan.get("think") or "", "qa": []})
+
+    if not plan.get("questions"):
+        if current_stage(ctx) is None:
+            _ai_header_history(ctx)
+            _finalize_confirm(ctx)
+            _ai_footer(ctx)
+            return
+        _ai_fallback(ctx, "AI 判断信息已齐全，但程序校验发现仍有缺失，已切换为传统清单模式。")
+
+    visible = _ai_remaining(plan, ctx)
+    if not visible:
+        _ai_fallback(ctx, "AI 提问与已确认信息重复，已切换为传统清单模式。")
+
+    _ai_header_history(ctx)
+    if plan.get("think"):
+        st.markdown(f"💭 *{plan['think']}*")
+    for q in visible:
+        st.markdown(f"**{q.get('text')}**")
+        _ai_render_question(ctx, q, qno)
+    _ai_footer(ctx)
+
+
 def _finalize_confirm(ctx: dict):
     qno = ctx.get("qno", 1)
     st.markdown("**✅ 信息已齐全**，点击开始计算。")
@@ -1837,6 +2463,11 @@ def _try_start_fee_task(query: str, *, force_task: bool = False) -> bool:
         return False
     if not _TASK_FLOW_START and not _TASK_FLOW_CASCADE:
         return False
+    if st.session_state.get("ai_guide_pref", True):
+        ctx["ai_guided"] = True
+        ctx["_ai_dirty"] = True
+        ctx.setdefault("_ai_rounds", [])
+        ctx.setdefault("ai_notes", [])
     st.session_state.pending_task = ctx
     return True
 
@@ -1868,15 +2499,33 @@ with st.sidebar:
 
     st.markdown("### 功能导航")
     st.markdown("- 智能问答（已上线）")
-    st.markdown("- 二类费计算（已上线）")
-    st.markdown("- 指标对比分析（开发中）")
-    st.markdown("- 正反项目案例（开发中）")
-    st.markdown("- 表格预处理（开发中）")
-    st.markdown("- 政策文件说明（开发中）")
-
-    _pdf_mode = st.checkbox("📄 广联达 PDF 导入模式",
+    # 子项左对齐勾选框标签（padding-left = 勾选框盒 1.625rem，再与勾选框标签同构：全角空格 + 1.15em 项目符号列）
+    st.markdown(
+        '<div style="font-size:0.875rem; line-height:2.2; padding-left:1.625rem;'
+        ' margin:0.3rem 0 0.5rem 0;">'
+        '　<span style="display:inline-block;width:1.15em;text-align:center;">·</span>&nbsp;查询苗木品种指标<br/>'
+        '　<span style="display:inline-block;width:1.15em;text-align:center;">·</span>&nbsp;查询二类费政策文件<br/>'
+        '　<span style="display:inline-block;width:1.15em;text-align:center;">·</span>&nbsp;查询定额说明'
+        '</div>',
+        unsafe_allow_html=True)
+    st.markdown("- 概算助手（已上线）")
+    _pdf_mode = st.checkbox("　📄 广联达 PDF 导入",
                             value=st.session_state.get("pdf_import_mode", False))
     st.session_state.pdf_import_mode = _pdf_mode
+    st.markdown("- 表格预处理（已上线）")
+    _pre_mode = st.checkbox("　📋 表格预处理",
+                            value=st.session_state.get("preprocess_mode", False))
+    st.session_state.preprocess_mode = _pre_mode
+    st.markdown("- 指标对比分析（开发中）")
+    st.markdown("- 正反项目案例（已上线）")
+    for _case in CASE_ITEMS:
+        if st.button(f"　· {_case['short']}", key=f"case_nav_{_case['key']}",
+                     use_container_width=True):
+            # 进入案例页时退出其他整页模式
+            st.session_state.pdf_import_mode = False
+            st.session_state.preprocess_mode = False
+            st.session_state.active_case = _case["key"]
+            st.rerun()
 
     st.divider()
 
@@ -1886,8 +2535,11 @@ with st.sidebar:
         total = len(engine.chunks)
         cats = len(engine.data)
         kb_count = len(engine.knowledge_chunks)
+        quota_count = len(engine.quota_chunks)
+        case_count = len(engine.case_chunks)
         st.success(f"已加载 {cats} 个类别，共 {total} 条记录")
-        st.caption(f"知识库：{kb_count} 个政策文件片段")
+        st.caption(f"知识库：{kb_count} 个片段（政策文件 + 定额说明 {quota_count} 段"
+                   f" + 项目案例 {case_count} 段）")
     except Exception as e:
         st.error(f"数据加载失败：{e}")
 
@@ -1957,6 +2609,16 @@ with st.sidebar:
 # ===== 广联达 PDF 导入模式：整页替换主界面 =====
 if st.session_state.get("pdf_import_mode"):
     _render_pdf_import_page()
+    st.stop()
+
+# ===== 表格预处理模式：整页替换主界面 =====
+if st.session_state.get("preprocess_mode"):
+    _render_preprocess_page()
+    st.stop()
+
+# ===== 正反项目案例：点击侧边栏子项整页替换 =====
+if st.session_state.get("active_case"):
+    _render_case_page(st.session_state.active_case)
     st.stop()
 
 # ===== 主界面 =====
@@ -2037,6 +2699,11 @@ if prompt:
                 pending_task, prompt, region=st.session_state.get("selected_region"))
             st.session_state.pending_task = pending_task
             if res.get("recognized"):
+                if pending_task.get("ai_guided"):
+                    pending_task["_ai_dirty"] = True
+                    pending_task.setdefault("_ai_rounds", [])
+                    pending_task["_ai_rounds"].append(
+                        {"think": "", "qa": [{"text": "（自由输入）", "answer": prompt}]})
                 st.rerun()
             if res.get("fee_domain_token"):
                 # 有费种/金额关键词但没解析出新信息 → 留在任务中提示
@@ -2045,6 +2712,11 @@ if prompt:
                     "content": "🤔 没有从这句话中识别出新的信息。"
                                "请回复当前步骤所需的内容，或点击「🗑 结束本次计算」重新提问。",
                 })
+                st.rerun()
+            if pending_task.get("ai_guided"):
+                # AI 模式：无关输入不杀任务，记为补充说明供 AI 参考并重新规划
+                pending_task.setdefault("ai_notes", []).append(prompt)
+                pending_task["_ai_dirty"] = True
                 st.rerun()
             # 完全无关输入 → 结束任务，落普通问答（消息已记录，继续走下方流程）
             st.session_state.pop("pending_task", None)

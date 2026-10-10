@@ -23,3 +23,10 @@ dist/
 Thumbs.db
 *.log
 recent_calculations.json
+
+# 真实项目数据（严禁提交）
+参考1.xlsx
+参考2.xlsx
+参考2.PDF
+概算汇总表.xlsx
+表格模板.xlsx

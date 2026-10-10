@@ -93,8 +93,8 @@ def search_knowledge_base(query: str, chunks: list[dict], top_k: int = 5) -> lis
     在知识库中搜索与查询相关的内容。
     使用简单的关键词匹配评分。
     """
-    # 提取查询中的关键词（两字组合 + 文件号）
-    keywords = re.findall(r'[一-鿿]{2}', query)  # 二字词
+    # 提取查询中的关键词（两字组合 + 文件号）；粘/黏 归一为「黏」做模糊匹配
+    keywords = re.findall(r'[一-鿿]{2}', query.replace("粘", "黏"))  # 二字词
 
     scored = []
     for chunk in chunks:
@@ -102,12 +102,14 @@ def search_knowledge_base(query: str, chunks: list[dict], top_k: int = 5) -> lis
         title = chunk.get("title", "")
         content = chunk.get("content", "")
         combined = title + " " + content
+        title_norm = title.replace("粘", "黏")
+        content_norm = content.replace("粘", "黏")
 
         # 标题匹配权重最高
         for kw in keywords:
-            if kw in title:
+            if kw in title_norm:
                 score += 5
-            if kw in content:
+            if kw in content_norm:
                 score += 1
 
         # 文件号匹配（如 "10号"、"670号"、"504号"）
@@ -134,6 +136,18 @@ def search_knowledge_base(query: str, chunks: list[dict], top_k: int = 5) -> lis
                     if p in combined:
                         score += 8
 
+        # 定额说明关键词匹配（quota_base 来源，文件名 省份_ 开头）
+        quota_keywords = ["定额", "消耗量", "章节说明", "计算规则", "预算基价",
+                          "栽植", "养护", "拆除工程", "消耗标准"]
+        src = chunk.get("source_file", "")
+        if any(k in query for k in quota_keywords) \
+                and src[:3] in ("天津", "河北", "河南", "湖北"):
+            score += 8
+
+        # 粘/黏 同义模糊匹配：查询提到黏土时，正文含「黏土」的分块直接加权
+        if "黏" in query.replace("粘", "黏") and "黏土" in content_norm:
+            score += 8
+
         if score > 0:
             scored.append((score, chunk))
 
@@ -158,7 +172,7 @@ def format_knowledge_context(results: list[dict]) -> str:
     if not results:
         return "未在知识库中检索到相关政策文件。"
 
-    parts = ["## 知识库检索结果（政策文件原文）", ""]
+    parts = ["## 知识库检索结果（政策文件／定额说明原文）", ""]
 
     # 按来源文件分组
     by_file: dict[str, list[dict]] = {}

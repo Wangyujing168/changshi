@@ -12,6 +12,8 @@ from config import (
     WEB_SEARCH_ENABLED,
     SCORE_THRESHOLD as CONFIG_SCORE_THRESHOLD,
     KNOWLEDGE_BASE_DIR,
+    QUOTA_BASE_DIR,
+    CASE_BASE_DIR,
 )
 from data_loader import load_all_data, get_text_chunks
 from fee_engine import detect_and_calculate, format_for_llm
@@ -20,7 +22,6 @@ from knowledge_loader import (
     search_knowledge_base,
     format_knowledge_context,
 )
-from config import KNOWLEDGE_BASE_DIR
 
 
 
@@ -141,9 +142,11 @@ class CostRAGEngine:
         self.data = load_all_data()
         self.chunks = get_text_chunks(self.data)
 
-        # 加载二类费知识库
+        # 加载二类费知识库（政策文件 + 定额说明 + 项目案例）
         self.knowledge = load_knowledge_base(KNOWLEDGE_BASE_DIR)
-        
+        self.quota_chunks = load_knowledge_base(QUOTA_BASE_DIR)
+        self.case_chunks = load_knowledge_base(CASE_BASE_DIR)
+
 
         # 构建品种名索引，用于快速匹配
         self._name_index = {}
@@ -156,8 +159,10 @@ class CostRAGEngine:
         # 联网搜索缓存
         self._web_cache: dict[str, str] = {}
 
-        # Load knowledge base
-        self.knowledge_chunks = load_knowledge_base(KNOWLEDGE_BASE_DIR)
+        # Load knowledge base（政策文件 + 定额说明 + 项目案例，合并供检索）
+        self.knowledge_chunks = load_knowledge_base(KNOWLEDGE_BASE_DIR) \
+            + load_knowledge_base(QUOTA_BASE_DIR) \
+            + self.case_chunks
 
         pass  # Engine initialized
 
@@ -555,9 +560,9 @@ class CostRAGEngine:
         # 6. 构建消息
         source_desc = "## 检索来源说明"
         if web_context:
-            source_desc += "\n- [数据库检索结果] 来自本地绿化工程造价指标数据库\n- [知识库检索结果] 来自政策文件知识库\n- [网络搜索结果] 来自互联网搜索，作为补充参考"
+            source_desc += "\n- [数据库检索结果] 来自本地绿化工程造价指标数据库\n- [知识库检索结果] 来自政策文件/定额说明知识库\n- [网络搜索结果] 来自互联网搜索，作为补充参考"
         else:
-            source_desc += "\n- [数据库检索结果] 来自本地绿化工程造价指标数据库\n- [知识库检索结果] 来自政策文件知识库"
+            source_desc += "\n- [数据库检索结果] 来自本地绿化工程造价指标数据库\n- [知识库检索结果] 来自政策文件/定额说明知识库"
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -590,10 +595,18 @@ class CostRAGEngine:
         except Exception as e:
             return f"❌ 调用 DeepSeek API 出错：{str(e)}\n\n请检查 API Key 是否正确配置。"
 
-    def chat(self, query: str, history: list[dict] = None) -> str:
+    def case_kb_chunks(self, case_file: str) -> list[dict]:
+        """取指定案例文件的分块列表（案例页提问用）。"""
+        return [c for c in self.case_chunks if c.get("source_file") == case_file]
+
+    def chat(self, query: str, history: list[dict] = None,
+             kb_chunks: list[dict] = None,
+             kb_label: str = "政策文件/定额说明") -> str:
         """
         多轮对话模式（保留对话历史）。
         本地数据库优先，查不到时自动联网搜索。
+        kb_chunks 指定时先限定在该分块范围内检索知识库（案例页=本案例优先），
+        检索不到再回退全库（政策+定额+案例）。
         """
         if history is None:
             history = []
@@ -669,8 +682,10 @@ class CostRAGEngine:
         max_score = max(r.get("_score", 0) for r in db_results) if db_results else 0
         needs_web = WEB_SEARCH_ENABLED and (not db_has_results or max_score < self.SCORE_THRESHOLD)
 
-        # 2. 检索知识库
-        kb_results = search_knowledge_base(query, self.knowledge_chunks, top_k=5)
+        # 2. 检索知识库（案例页限定本案例分块，检索不到回退全库）
+        kb_results = search_knowledge_base(query, kb_chunks if kb_chunks else self.knowledge_chunks, top_k=5)
+        if kb_chunks is not None and not kb_results:
+            kb_results = search_knowledge_base(query, self.knowledge_chunks, top_k=5)
         kb_context = format_knowledge_context(kb_results)
 
         # 3. 构建数据库上下文
@@ -706,7 +721,7 @@ class CostRAGEngine:
         # 添加当前查询和检索结果
         source_note = ""
         if web_context:
-            source_note = "\n（数据库检索结果来自本地绿化工程造价指标库，知识库检索结果来自政策文件，网络搜索结果来自互联网搜索作为补充。优先使用数据库和知识库数据。）"
+            source_note = f"\n（数据库检索结果来自本地绿化工程造价指标库，知识库检索结果来自{kb_label}，网络搜索结果来自互联网搜索作为补充。优先使用数据库和知识库数据。）"
 
         messages.append({
             "role": "user",
