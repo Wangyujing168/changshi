@@ -97,7 +97,8 @@ _BASE_BANK: dict[str, tuple[str, object, object]] = {
 _CARD_LABEL = {
     "coef": "系数设置", "rate": "费率档位", "shencha": "施工图审查档位",
     "service": "服务类型", "party": "交易服务费计费方", "yubei_rate": "预备费率",
-    "shuibao_comp": "水土保持补偿费参数", "spec": "参数设置",
+    "yubei_include": "预备费是否考虑", "shuibao_comp": "水土保持补偿费参数",
+    "spec": "参数设置",
 }
 
 
@@ -107,6 +108,8 @@ def _card_filled(ctx: dict, card: dict) -> bool:
     _ai_card_done：用户已明确关闭该卡（✅已设置/⏭用默认值）→ 后续轮次不再问。"""
     if _card_key(card) in (ctx.get("_ai_card_done") or []):
         return True
+    if card.get("fee") in (ctx.get("contract_overrides") or {}):
+        return True  # 已设合同价/合同费率 → 参数由合同锁定，无需再问
     kind = card.get("kind")
     fee = card.get("fee")
     if kind == "rate":
@@ -119,8 +122,13 @@ def _card_filled(ctx: dict, card: dict) -> bool:
         return fee in ctx.get("service_selections", {})
     if kind == "party":
         return bool(ctx.get("_ai_party_done")) or ctx.get("jiaoyi_party") is not None
+    if kind == "yubei_include":
+        return ctx.get("yubei_considered") is not None
     if kind == "yubei_rate":
-        return bool(ctx.get("_ai_yubei_done")) or ctx.get("yubei_rate", 5.0) != 5.0
+        # 用户已明确不考虑预备费 → 费率卡无需再问
+        return (bool(ctx.get("_ai_yubei_done"))
+                or ctx.get("yubei_rate", 5.0) != 5.0
+                or ctx.get("yubei_considered") is False)
     if kind == "shuibao_comp":
         return "水土保持补偿费" in ctx.get("spec_overrides", {})
     if kind == "spec":
@@ -158,6 +166,7 @@ def question_done(ctx: dict, key: str) -> bool:
         parts = key.split(":", 2)
         kind = parts[1]
         fee_map = {"party": "交易服务费", "yubei_rate": "预备费",
+                   "yubei_include": "预备费",
                    "shuibao_comp": "水土保持补偿费", "shencha": "施工图审查费"}
         if kind in ("coef", "rate", "service", "spec"):
             card = {"kind": kind, "fee": parts[2]}
@@ -227,7 +236,10 @@ def build_ctx_summary(ctx: dict, available: list[tuple[str, str]]) -> str:
         zd_txt = "未询问"
 
     party = ctx.get("jiaoyi_party") or "未设置"
-    yb = ctx.get("yubei_rate", 5.0)
+    if ctx.get("yubei_considered") is False:
+        yb_txt = "不考虑（用户已确认）"
+    else:
+        yb_txt = f"{ctx.get('yubei_rate', 5.0)}%"
     discs = ctx.get("discounts") or {}
     if not ctx.get("discount_answered"):
         disc_txt = "未确认"
@@ -253,7 +265,7 @@ def build_ctx_summary(ctx: dict, available: list[tuple[str, str]]) -> str:
             f"【征地拆迁】{zd_txt}\n"
             f"【参数】剩余卡：{_card_remaining(ctx)}\n"
             f"【交易服务费计费方】{party}\n"
-            f"【预备费率】{yb}%\n"
+            f"【预备费】{yb_txt}\n"
             f"【折扣】{disc_txt}\n"
             f"【用户补充说明】{notes_txt}\n"
             f"【对话历史】\n{hist_txt}")

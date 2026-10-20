@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""广联达 PDF 报表解析：只提取每个专业的「单位工程造价汇总表」。
+"""广联达 PDF 报表解析：提取每个单位工程的总造价。
 
-从每页报表中取：
-  - 工程名称（如「道路工程清表」「管线工程雨水工程」）
-  - 工程造价（汇总表最后一行金额，单位元，含税）
-  - 设备费（A5设备费 行金额，单位元）
+两种报表块：
+  - 「单位工程造价汇总表」页：取工程名称、工程造价（大写含税金额，缺失时
+    回退为块内首个两位小数）、设备费（A5设备费 行金额）；
+  - 「工程概(预)算书」封面页（一般计税单位工程没有汇总表，封面直接给出
+    工程造价）：取工程名称、工程造价（如 44,756.80 元）。
 
 金额转万元（原值不四舍五入，显示精度由 Excel 单元格格式控制）。
 
@@ -140,6 +141,30 @@ def _extract_device(text: str) -> float:
     return _unglue(m.group(1))
 
 
+_GAI_COVER_RE = re.compile(r"概[（(]预[）)]算书|工程概算书|工程预算书")
+
+
+def _extract_gai_cover(text: str) -> tuple[str, float, float] | None:
+    """「工程概(预)算书」封面页：返回 (工程名称, 工程造价元, 0)。
+
+    一般计税模板的单位工程没有「单位工程造价汇总表」，首页封面直接给出
+    工程造价（如「工程造价： 44,756.80 元」）。非封面页返回 None。
+    """
+    if not _GAI_COVER_RE.search(re.sub(r"\s+", "", text)):
+        return None
+    m = re.search(r"工程名称[:：]\s*(.+?)(?=建设单位|工程规模|工程造价|编制日期|\Z)",
+                  text, re.DOTALL)
+    if not m:
+        return None
+    name = re.sub(r"\s+", "", m.group(1))
+    if not name:
+        return None
+    m2 = re.search(r"工程造价[:：]\s*([\d,]+\.\d{2})", text)
+    if not m2:
+        return None
+    return name, _unglue(m2.group(1)), 0.0
+
+
 def parse_pdf(source) -> list[dict]:
     """解析广联达 PDF，返回叶子清单（每个「单位工程造价汇总表」一条）。
 
@@ -160,21 +185,28 @@ def parse_pdf(source) -> list[dict]:
     batch_seen: set = set()
     for page_no, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
-        if _BLOCK_HEADER not in re.sub(r"\s+", "", text):
-            continue
-        m = re.search(r"工程名称[:：]\s*(.+?)\s*第\s*\d+\s*页\s*共\s*\d+\s*页",
-                      text, re.DOTALL)
-        if m:
-            full_name = re.sub(r"\s+", "", m.group(1))
-        else:
-            m2 = re.search(r"工程名称[:：]\s*(\S+)", text)
-            if not m2:
+        if _BLOCK_HEADER in re.sub(r"\s+", "", text):
+            m = re.search(r"工程名称[:：]\s*(.+?)\s*第\s*\d+\s*页\s*共\s*\d+\s*页",
+                          text, re.DOTALL)
+            if m:
+                full_name = re.sub(r"\s+", "", m.group(1))
+            else:
+                m2 = re.search(r"工程名称[:：]\s*(\S+)", text)
+                if not m2:
+                    continue
+                full_name = m2.group(1)
+            amount_yuan = _extract_zaojia(text)
+            if amount_yuan is None:
                 continue
-            full_name = m2.group(1)
-        amount_yuan = _extract_zaojia(text)
-        if amount_yuan is None:
-            continue
-        device_yuan = _extract_device(text)
+            device_yuan = _extract_device(text)
+        else:
+            # 一般计税单位工程：封面「工程概(预)算书」直接给出工程造价
+            gai = _extract_gai_cover(text)
+            if gai is None:
+                continue
+            full_name, amount_yuan, device_yuan = gai
+            if full_name in batch_seen:
+                continue  # 该单位工程已有汇总表 → 封面不再重复计
         if full_name in batch_seen:  # 同名再现 → 进入下一批
             batch_no += 1
             batch_seen = set()

@@ -333,7 +333,7 @@ def _render_preprocess_page():
 
     # ---------- ① 数量总表 → 填充模板 ----------
     st.markdown("### ① 桥梁工程量表 → 填充模板")
-    st.caption("上传「主要工程数量总表.xls」，自动把桥梁下部结构各部位工程量填入"
+    st.caption("上传「主要工程数量总表.xls」，自动把桥梁上、下部结构各部位工程量填入"
                "内置表格模板的信息输入表对应单元格（计价表与混凝土方量/凿桩头"
                "为公式自动联动）。数量总表里模板没有的部位会自动新增分项。")
 
@@ -412,6 +412,248 @@ def _render_preprocess_page():
                     use_container_width=True)
             else:
                 st.info("未找到可改写的苗木行（需 B 列名称、C 列表头含「径」的区块）。")
+
+
+# ===== 桥梁定额匹配：上传定额库 + 海泰式数量总表 → 自动匹配天津桥梁定额 =====
+_STATUS_EMOJI = {"single": "✅", "multi": "🤔", "none": "❌"}
+
+
+def _render_bridge_match_page():
+    import pandas as pd
+    from bridge_match import (BridgeMatchError, parse_quota_library,
+                              parse_quantity_excel, parse_text_lines,
+                              match_quotas, build_result_excel, result_rows,
+                              ai_explain, _item_display, _grade_tag, TPL_RATIOS)
+
+    st.title("🌉 桥梁定额匹配")
+    st.caption("上传天津桥梁定额库 + 海泰式数量总表，按构件/工艺/材料/规格自动匹配定额子目；"
+               "严格以定额库文字为准，不编造子目；多候选全部列出并附差异说明；"
+               "特征缺失时给出需补充的信息清单。")
+
+    # ---------- ① 定额库 ----------
+    st.markdown("### ① 定额库")
+    up_lib = st.file_uploader("上传天津桥梁定额库 Excel（含定额编号/名称/单位/单价 + 套定额规则样例表）",
+                              type=["xlsx"], key="bm_lib_up")
+    if up_lib is not None and st.session_state.get("bm_lib_id") != up_lib.file_id:
+        try:
+            lib = parse_quota_library(up_lib.getvalue())
+            st.session_state.bm_lib = lib
+            st.session_state.bm_lib_id = up_lib.file_id
+            st.session_state.bm_lib_err = None
+        except BridgeMatchError as e:
+            st.session_state.bm_lib_err = str(e)
+            st.session_state.bm_lib = None
+            st.session_state.bm_lib_id = None
+        except Exception as e:  # 解析兜底
+            st.session_state.bm_lib_err = f"定额库解析失败：{e}"
+            st.session_state.bm_lib = None
+            st.session_state.bm_lib_id = None
+    if st.session_state.get("bm_lib_err"):
+        st.error(st.session_state.bm_lib_err)
+    elif st.session_state.get("bm_lib"):
+        lib = st.session_state.bm_lib
+        dup = lib.get("duplicates") or {}
+        st.success(f"已加载 {len(lib['entries'])} 条定额 + "
+                   f"{len(lib.get('rules', {}))} 组套定额规则样例"
+                   + (f"（⚠️ 库中重复编号：{'、'.join(dup)}）" if dup else ""))
+        with st.expander("定额库预览（前 10 条）"):
+            st.dataframe(pd.DataFrame(
+                [{"编号": e["code"], "名称": e["name"], "单位": e["unit"],
+                  "单价": e["price"]} for e in lib["entries"][:10]]),
+                use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ---------- ② 工程量 ----------
+    st.markdown("### ② 工程量清单")
+    tab_up, tab_text = st.tabs(["上传数量总表（替换）", "粘贴文本（追加）"])
+    with tab_up:
+        up_qty = st.file_uploader(
+            "上传海泰式数量总表（分项材料表：分项名/适用位置/备注/数量/材料列）",
+            type=["xls", "xlsx"], key="bm_qty_up",
+            help="旧版 .xls 与新版 .xlsx 均支持；上传后替换当前清单。")
+        if up_qty is not None and st.session_state.get("bm_qty_id") != up_qty.file_id:
+            try:
+                items = parse_quantity_excel(up_qty.getvalue())
+                st.session_state.bm_items = items
+                st.session_state.bm_qty_id = up_qty.file_id
+                st.session_state.bm_qty_err = None
+                st.session_state.bm_text_warns = None
+            except BridgeMatchError as e:
+                st.session_state.bm_qty_err = str(e)
+            except Exception as e:
+                st.session_state.bm_qty_err = f"数量表解析失败：{e}"
+        if st.session_state.get("bm_qty_err"):
+            st.error(st.session_state.bm_qty_err)
+    with tab_text:
+        st.text_area("每行一条：名称 数量 单位（如：钻孔灌注桩 φ1000 h≤40m 砂土 300 m）",
+                     key="bm_text_area", height=120,
+                     help="解析失败的行会跳过并提示；追加到当前清单末尾。")
+        if st.button("追加文本条目", key="bm_text_btn", use_container_width=True):
+            txt = st.session_state.bm_text_area.strip()
+            if not txt:
+                st.warning("请先粘贴文本。")
+            else:
+                items, warns = parse_text_lines(txt)
+                if not items and warns:
+                    st.session_state.bm_text_warns = warns
+                else:
+                    cur = st.session_state.get("bm_items") or []
+                    cur.extend(items)
+                    st.session_state.bm_items = cur
+                    st.session_state.bm_text_warns = warns
+                    st.session_state.bm_qty_id = None
+        if st.session_state.get("bm_text_warns"):
+            st.warning("部分行解析失败已跳过：" + "；".join(st.session_state.bm_text_warns))
+    if st.session_state.get("bm_items"):
+        items = st.session_state.bm_items
+        n_pile = sum(1 for it in items if it.get("kind") == "桩基参数")
+        st.success(f"已加载 {len(items)} 条清单条目（其中桩基参数块 {n_pile} 个）")
+        with st.expander("条目预览（前 20 条）"):
+            rows = []
+            for it in items[:20]:
+                if it.get("kind") == "桩基参数":
+                    rows.append({"部位": it["sheet"], "分项名": it["fenxiang"],
+                                 "材料": f"桩基参数 φ{it['dia']:g}/h{it['depth']:g}m",
+                                 "单位": "根", "数量": it["count"]})
+                else:
+                    rows.append({"部位": it["sheet"], "分项名": it["fenxiang"],
+                                 "材料": it.get("mat"), "单位": it.get("mat_unit"),
+                                 "数量": it.get("value")})
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ---------- ③ 开始匹配 ----------
+    st.markdown("### ③ 匹配")
+    ready = bool(st.session_state.get("bm_lib")) and bool(st.session_state.get("bm_items"))
+    if not ready:
+        st.info("请先完成 ① 定额库 与 ② 工程量清单 的上传。")
+    if st.button("🔍 开始匹配", key="bm_run", use_container_width=True, disabled=not ready):
+        with st.spinner("正在匹配定额..."):
+            results = match_quotas(st.session_state.bm_items, st.session_state.bm_lib)
+            st.session_state.bm_results = results
+            st.session_state.bm_results_key = (
+                f"{st.session_state.bm_lib_id}|{st.session_state.bm_qty_id}|"
+                f"{len(st.session_state.bm_items)}")
+            st.session_state.bm_ai_cache = {}
+
+    results = st.session_state.get("bm_results")
+    if results:
+        items = st.session_state.bm_items
+        cur_key = (f"{st.session_state.bm_lib_id}|{st.session_state.bm_qty_id}|"
+                   f"{len(items)}")
+        if st.session_state.get("bm_results_key") != cur_key:
+            st.warning("清单或定额库已变化，以下为上一次匹配结果，请重新点击「开始匹配」。")
+
+        # ---------- ④ 结果 ----------
+        st.markdown("### ④ 匹配结果")
+        n_single = sum(1 for r in results if r["status"] == "single")
+        n_multi = sum(1 for r in results if r["status"] == "multi")
+        n_none = sum(1 for r in results if r["status"] == "none")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("总条目", len(results))
+        c2.metric("唯一匹配", n_single)
+        c3.metric("多候选", n_multi)
+        c4.metric("无匹配", n_none)
+
+        st.dataframe(pd.DataFrame(result_rows(results)),
+                     use_container_width=True, hide_index=True, height=420)
+        # 弃运运距：土方与建筑垃圾分开设置，1-6-72（每增运1km）套 (运距-1) 次
+        c_soil, c_waste = st.columns(2)
+        with c_soil:
+            soil_km = int(st.number_input(
+                "🚛 土方弃运运距（km）", min_value=1, max_value=100, value=5,
+                step=1, key="bm_soil_haul_km",
+                help="土方弃运 1-6-72（每增运1km）套 (运距-1) 次"))
+        with c_waste:
+            waste_km = int(st.number_input(
+                "🚛 建筑垃圾弃运运距（km）", min_value=1, max_value=100, value=5,
+                step=1, key="bm_waste_haul_km",
+                help="凿桩头等建筑垃圾弃运 1-6-72 套 (运距-1) 次；弃运量按虚方×2"))
+        st.caption("凿桩头等建筑垃圾弃运套 1-6-71（运距1km）+ 1-6-72（每增运1km），"
+                   "弃运量按虚方 ×2；土方弃运量规则确定后按土方运距套用。")
+        # 模板系数：模板量=混凝土量×系数，默认参考表样例比例，可自行修改
+        st.markdown("**📐 模板系数**（模板量=混凝土量×系数，默认按参考表样例比例，可自行修改）")
+        tpl_ratios = {}
+        tcols = st.columns(4)
+        for i, (k, d) in enumerate(TPL_RATIOS):
+            with tcols[i % 4]:
+                tpl_ratios[k] = float(st.number_input(
+                    f"{k}模板系数", min_value=0.0, max_value=100.0, value=float(d),
+                    step=0.001, format="%.3f", key=f"bm_tpl_{k}"))
+        st.download_button(
+            "⬇️ 下载匹配结果 Excel",
+            data=build_result_excel(results, st.session_state.bm_lib,
+                                    waste_haul_km=waste_km,
+                                    tpl_ratios=tpl_ratios),
+            file_name="桥梁定额匹配结果.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+
+        st.markdown("#### 逐条明细")
+        for r in results:
+            it = r["item"]
+            mat = it.get("mat") or (f"桩基参数 φ{it['dia']:g}/h{it['depth']:g}m"
+                                    if it.get("kind") == "桩基参数" else "")
+            title = (f"{_STATUS_EMOJI.get(r['status'], '')} #{r['idx'] + 1} "
+                     f"[{it['sheet']}] {it['fenxiang']} {mat} "
+                     f"— {'唯一匹配' if r['status'] == 'single' else '多候选' if r['status'] == 'multi' else '无匹配'}")
+            with st.expander(title):
+                if r["matches"]:
+                    for c in r["matches"]:
+                        e = c["entry"]
+                        extra = ""
+                        if c.get("note_conv"):
+                            extra = f"（{c['note_conv']}）"
+                        elif c.get("qty_de") is not None:
+                            extra = f"→ 定额工程量 {c['qty_de']:g} {e['unit']}"
+                        g = _grade_tag(it, e["name"])
+                        st.markdown(
+                            f"- **{e['code']} {e['name']}**"
+                            f"{'（' + g + '）' if g else ''}"
+                            f"（{e['unit']}，"
+                            f"单价 {e['price'] if e['price'] is not None else '—'}）"
+                            f"　得分 {c['score']}{extra}")
+                        if c.get("reasons"):
+                            st.caption("　理由：" + "；".join(c["reasons"]))
+                for note in r.get("notes") or []:
+                    st.info(note)
+                if r.get("checklist"):
+                    st.warning("**需补充信息**：" + "；".join(r["checklist"]))
+                if r.get("rule_combo"):
+                    st.markdown("**该分部套定额样例组合（逐条状态）**")
+                    st.dataframe(pd.DataFrame([
+                        {"编号": x["code"], "名称": x["name"], "单位": x["unit"],
+                         "状态": x["status"], "补充说明": x.get("need", "")}
+                        for x in r["rule_combo"]]),
+                        use_container_width=True, hide_index=True)
+                if r["status"] == "multi" and len(r["matches"]) >= 2:
+                    ai_key = (f"{r['idx']}|"
+                              f"{'-'.join(sorted(c['entry']['code'] for c in r['matches']))}")
+                    ai_cache = st.session_state.get("bm_ai_cache") or {}
+                    if st.button("🤖 AI 生成说明", key=f"bm_ai_btn_{ai_key}"):
+                        with st.spinner("AI 正在对比候选定额..."):
+                            expl = ai_explain(_item_display(it), r["matches"])
+                            if expl:
+                                ai_cache[ai_key] = expl
+                            else:
+                                ai_cache[ai_key] = {"error": True}
+                            st.session_state.bm_ai_cache = ai_cache
+                    if ai_key in ai_cache:
+                        expl = ai_cache[ai_key]
+                        if expl.get("error"):
+                            st.warning("AI 说明生成失败，请参考上方规则命中理由。")
+                        else:
+                            for cand in expl.get("candidates") or []:
+                                i = int(cand.get("index", 0)) - 1
+                                if 0 <= i < len(r["matches"]):
+                                    e = r["matches"][i]["entry"]
+                                    st.markdown(f"- **{e['code']} {e['name']}**")
+                                    st.caption(f"　理由：{cand.get('reason', '')}")
+                                    st.caption(f"　差异：{cand.get('diff', '')}")
+                            if expl.get("overall"):
+                                st.info("综合建议：" + expl["overall"])
 
 
 # ===== 正反项目案例：子项注册表（侧边栏点击 → 案例页）=====
@@ -923,6 +1165,7 @@ def _ask_fees(ctx: dict):
             f"未指明具体费种，将**默认计算全部 {len(preset)} 项二类费**"
             f"（不含交易服务费）。\n\n**是否有不需要计算的费用？**"
             f"点击序号即可排除，或直接回复序号。")
+        st.caption("预备费默认计入（稍后单独确认是否考虑），不在以上可排除清单中。")
         cols = st.columns(3)
         for n, name, label in preset:
             is_ex = name in excluded
@@ -958,7 +1201,7 @@ def _ask_fees(ctx: dict):
             "全部都要算的话直接点上方确认即可。")
         return
     st.markdown("请问需要计算哪些**二类费**？（点击选择，可多选）")
-    defs = fee_catalog_for(ctx.get("region"))
+    defs = fee_catalog_for(ctx.get("region"), exclude_reserve=True)
     selected = set(ctx.get("fees") or [])
     cols = st.columns(3)
     for i, fd in enumerate(defs):
@@ -981,7 +1224,7 @@ def _ask_fees(ctx: dict):
     with col1:
         if st.button("📦 全部二类费（不含交易服务费）", key=f"ck_fees_all_{qno}",
                      use_container_width=True):
-            ctx["fees"] = [f for f in FEE_CATALOG if f != "交易服务费"]
+            ctx["fees"] = [f for f in FEE_CATALOG if f not in ("交易服务费", "预备费")]
             ctx["preset_all"] = True
             ctx["qno"] = qno + 1
             st.rerun()
@@ -1353,6 +1596,8 @@ def _clear_card_overrides(ctx: dict, card: dict):
     elif kind == "shencha":
         ctx.get("rate_overrides", {}).pop("施工图审查费", None)
         ctx.get("spec_overrides", {}).pop("施工图审查费", None)
+    elif kind == "yubei_include":
+        ctx["yubei_considered"] = True  # 默认：需要考虑
     elif kind == "yubei_rate":
         ctx["yubei_rate"] = 5.0
     elif kind == "shuibao_comp":
@@ -1384,6 +1629,8 @@ def _ask_params(ctx: dict):
         _ask_service_card(ctx, card, qno)
     elif kind == "party":
         _ask_party_card(ctx, card, qno)
+    elif kind == "yubei_include":
+        _ask_yubei_include_card(ctx, card, qno)
     elif kind == "yubei_rate":
         _ask_yubei_rate_card(ctx, card, qno)
     elif kind == "shuibao_comp":
@@ -1395,13 +1642,13 @@ def _ask_params(ctx: dict):
     with col1:
         if st.button("✅ 确认并继续", key=f"ck_params_ok_{qno}", use_container_width=True):
             ctx["qno"] = qno + 1
-            _params_advance(ctx, pidx, len(cards))
+            _params_advance(ctx, pidx, len(param_cards_for(ctx)))
             st.rerun()
     with col2:
         if st.button("⏭ 本卡用默认值", key=f"ck_params_skip_{qno}", use_container_width=True):
             _clear_card_overrides(ctx, card)
             ctx["qno"] = qno + 1
-            _params_advance(ctx, pidx, len(cards))
+            _params_advance(ctx, pidx, len(param_cards_for(ctx)))
             st.rerun()
     with col3:
         if st.button("⚡ 剩余全部用默认值", key=f"ck_params_alldef_{qno}",
@@ -1578,6 +1825,33 @@ def _ask_party_card(ctx: dict, card: dict, qno: int):
                 st.rerun()
 
 
+def _ask_yubei_include_card(ctx: dict, card: dict, qno: int):
+    """预备费是否考虑（默认要考虑；不考虑则跳过费率卡，结算时预备费=0）。"""
+    st.markdown("**是否要考虑预备费？**\n\n"
+                "预备费 =（第一部分工程费＋工程建设其他费）× 预备费率，"
+                "默认计入工程总投资。")
+    yc = ctx.get("yubei_considered")
+    if yc is True:
+        st.info("已确认：需要考虑预备费（可修改）。")
+    elif yc is False:
+        st.info("已确认：不考虑预备费（可修改）。")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅ 需要考虑预备费", key=f"ck_ybi_yes_{qno}",
+                     use_container_width=True, type="primary"):
+            ctx["yubei_considered"] = True
+            ctx["qno"] = qno + 1
+            _params_advance(ctx, ctx.get("param_idx", 0), len(param_cards_for(ctx)))
+            st.rerun()
+    with c2:
+        if st.button("🚫 不考虑预备费", key=f"ck_ybi_no_{qno}",
+                     use_container_width=True):
+            ctx["yubei_considered"] = False
+            ctx["qno"] = qno + 1
+            _params_advance(ctx, ctx.get("param_idx", 0), len(param_cards_for(ctx)))
+            st.rerun()
+
+
 def _ask_yubei_rate_card(ctx: dict, card: dict, qno: int):
     """预备费率卡（默认 5%）。"""
     cur = ctx.get("yubei_rate", 5.0)
@@ -1669,14 +1943,14 @@ def _ask_spec_card(ctx: dict, card: dict, qno: int):
 
 def _ask_discount(ctx: dict):
     qno = ctx.get("qno", 1)
+    if ctx.get("_subflow") == "discount_loop":
+        _discount_loop(ctx)
+        return
     discs = ctx.get("discounts") or {}
     if discs:
         st.markdown("**已设折扣**：")
         for fn, d in discs.items():
             st.markdown(f"- {FEE_CATALOG.get(fn, {}).get('label', fn)}：打 {d:g} 折")
-    if ctx.get("_subflow") == "discount_loop":
-        _discount_loop(ctx)
-        return
     st.markdown("是否有费用需要**打折**？")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -1703,6 +1977,11 @@ def _ask_discount(ctx: dict):
 def _discount_loop(ctx: dict):
     qno = ctx.get("qno", 1)
     st.markdown("**💸 指定费用打折**")
+    discs = ctx.get("discounts") or {}
+    if discs:
+        st.markdown("**已设折扣**：")
+        for fn, d in discs.items():
+            st.markdown(f"- {FEE_CATALOG.get(fn, {}).get('label', fn)}：打 {d:g} 折")
     fee_names = [f for f in ctx.get("fees") or []
                  if FEE_CATALOG.get(f, {}).get("tier") is not None and f != "预备费"]
     fee_options = [(f, FEE_CATALOG.get(f, {}).get("label", f)) for f in fee_names]
@@ -1710,20 +1989,34 @@ def _discount_loop(ctx: dict):
         st.info("当前费种无适用折扣项。")
         ctx["_subflow"] = None
         st.rerun()
-    fn = st.selectbox("费种", fee_options, format_func=lambda x: x[1],
-                      key=f"ck_dl_fee_{qno}")
+
+    def _lbl(x):
+        lab = x[1]
+        if x[0] in discs:
+            lab += f"（已设 {discs[x[0]]:g} 折）"
+        return lab
+
+    # 默认选中第一个尚未设折扣的费种，方便连续添加
+    default_idx = next((i for i, (f, _) in enumerate(fee_options)
+                        if f not in discs), 0)
+    fn = st.selectbox("费种（可连续添加多个）", fee_options, format_func=_lbl,
+                      index=default_idx, key=f"ck_dl_fee_{qno}")
     coef = st.number_input("折扣系数（0.8 = 打八折）", min_value=0.01, max_value=2.0,
                            value=0.8, step=0.05, format="%.2f", key=f"ck_dl_coef_{qno}")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("✅ 应用", key=f"ck_dl_ok_{qno}", use_container_width=True):
+        if st.button("✅ 添加/更新", key=f"ck_dl_ok_{qno}", use_container_width=True):
             ctx.setdefault("discounts", {})[fn[0]] = float(coef)
+            ctx["qno"] = qno + 1
+            st.rerun()  # 留在本流程，可继续添加下一个费种
+    with c2:
+        if st.button("🏁 完成", key=f"ck_dl_done_{qno}", use_container_width=True):
             ctx["discount_answered"] = True
             ctx.pop("_reask", None)
             ctx["_subflow"] = None
             ctx["qno"] = qno + 1
             st.rerun()
-    with c2:
+    with c3:
         if st.button("↩ 返回", key=f"ck_dl_back_{qno}", use_container_width=True):
             ctx["_subflow"] = None
             ctx["qno"] = qno + 1
@@ -1747,6 +2040,7 @@ _AI_CANON_OPTIONS: dict[str, list[tuple[str, object]]] = {
     "discount_need": [("🚫 不需要", "none"), ("💸 指定费用打折", "discount"),
                       ("📊 查看折扣情景对比", "scenario")],
     "card:party": [("招标方", "招标方"), ("中标方", "中标方"), ("双方合计", None)],
+    "card:yubei_include": [("✅ 需要考虑预备费", True), ("🚫 不考虑预备费", False)],
 }
 
 _CARD_RENDERERS = {
@@ -1832,6 +2126,8 @@ def _ai_write(ctx: dict, key: str, value):
     elif key == "card:party":
         ctx["jiaoyi_party"] = value  # None = 双方合计（也是有效答案）
         ctx["_ai_party_done"] = True
+    elif key == "card:yubei_include":
+        ctx["yubei_considered"] = bool(value)
     else:
         ctx.setdefault("ai_notes", []).append(f"{value}")
 
@@ -1981,7 +2277,7 @@ def _ai_render_fees_question(ctx: dict, q: dict, qno: int):
             _ai_mark_done(ctx, q["key"], q["text"], f"按剩余 {remain} 项计算")
         return
     # fees_select
-    defs = fee_catalog_for(ctx.get("region"))
+    defs = fee_catalog_for(ctx.get("region"), exclude_reserve=True)
     selected = set(ctx.get("fees") or [])
     cols = st.columns(3)
     for i, fd in enumerate(defs):
@@ -2001,7 +2297,7 @@ def _ai_render_fees_question(ctx: dict, q: dict, qno: int):
     with col1:
         if st.button("📦 全部二类费（不含交易服务费）", key=f"ai_fees_all_{qno}",
                      use_container_width=True):
-            ctx["fees"] = [f for f in FEE_CATALOG if f != "交易服务费"]
+            ctx["fees"] = [f for f in FEE_CATALOG if f not in ("交易服务费", "预备费")]
             ctx["preset_all"] = True
             ctx["qno"] = qno + 1
             st.rerun()
@@ -2216,7 +2512,8 @@ def _apply_zhengchai_panel(payload: dict, ctx: dict) -> bool:
         return False
     preview = payload.get("preview") or {}
     p1 = payload.get("total_part1") or 0.0
-    rate = float(ctx.get("yubei_rate") or 5.0)
+    rate = 0.0 if ctx.get("yubei_considered") is False \
+        else float(ctx.get("yubei_rate") or 5.0)
     fee_excl = round((preview.get("fee_total_with_custom") or 0.0) - zd, 4)
     yb = preview.get("yubei_total") or 0.0
     ctr_yb = (payload.get("contract_overrides") or {}).get("预备费") or {}
@@ -2252,7 +2549,8 @@ def _apply_zhengchai_scenarios(result: dict, ctx: dict) -> None:
         return
     am = ctx.get("amounts") or {}
     p1 = round(float(am.get("jianan") or 0) + float(am.get("shebei") or 0), 4)
-    rate = float(ctx.get("yubei_rate") or 5.0)
+    rate = 0.0 if ctx.get("yubei_considered") is False \
+        else float(ctx.get("yubei_rate") or 5.0)
     ctr_yb = (ctx.get("contract_overrides") or {}).get("预备费") or {}
     is_price = ctr_yb.get("type") == "price"
     for s in result.get("方案列表") or []:
@@ -2410,6 +2708,7 @@ def _render_result_payload(ctx: dict):
                     **payload,
                     "region": ctx.get("region"),
                     "yubei_rate": ctx.get("yubei_rate"),
+                    "yubei_considered": ctx.get("yubei_considered"),
                     "jiaoyi_party": ctx.get("jiaoyi_party"),
                     "spec_overrides": ctx.get("spec_overrides"),
                     "discounts": ctx.get("discounts"),
@@ -2501,7 +2800,7 @@ with st.sidebar:
     st.markdown("- 智能问答（已上线）")
     # 子项说明：小字号灰色、无项目符号、轻微缩进，与主条目区分层级
     st.markdown(
-        '<div style="font-size:0.8rem; line-height:1.9; color:rgba(49,51,63,0.62);'
+        '<div style="font-size:0.875rem; line-height:1.9; color:rgba(49,51,63,0.62);'
         ' padding-left:0.9rem; border-left:2px solid rgba(49,51,63,0.18);'
         ' margin:-0.9rem 0 0.55rem 0;">'
         '查询苗木品种指标<br/>'
@@ -2510,13 +2809,22 @@ with st.sidebar:
         '</div>',
         unsafe_allow_html=True)
     st.markdown("- 概算助手（已上线）")
-    _pdf_mode = st.checkbox("　📄 广联达 PDF 导入",
+    _pdf_mode = st.checkbox("📄 广联达 PDF 导入",
                             value=st.session_state.get("pdf_import_mode", False))
     st.session_state.pdf_import_mode = _pdf_mode
     st.markdown("- 表格预处理（已上线）")
-    _pre_mode = st.checkbox("　📋 表格预处理",
+    _pre_mode = st.checkbox("📋 表格预处理",
                             value=st.session_state.get("preprocess_mode", False))
     st.session_state.preprocess_mode = _pre_mode
+    st.markdown("- 桥梁定额匹配（已上线）")
+    _bm_mode = st.checkbox("🌉 桥梁定额匹配",
+                           value=st.session_state.get("bridge_match_mode", False))
+    st.session_state.bridge_match_mode = _bm_mode
+    if _bm_mode:
+        # 进入桥梁匹配页时退出其他整页模式
+        st.session_state.pdf_import_mode = False
+        st.session_state.preprocess_mode = False
+        st.session_state.active_case = None
     st.markdown("- 指标对比分析（开发中）")
     st.markdown("- 正反项目案例（已上线）")
     # 侧边栏按钮文字左对齐（1.58 版按钮标签有内层 div/span flex 居中包装，需一并覆盖）
@@ -2541,11 +2849,11 @@ with st.sidebar:
         "  border-left: 2px solid rgba(49,51,63,0.18) !important;"
         "  border-radius: 0 !important;"
         "  box-shadow: none !important;"
-        "  font-size: 0.8rem !important;"
+        "  font-size: 1rem !important;"
         "  line-height: 1.9 !important;"
         "  min-height: 0 !important;"
         "  height: auto !important;"
-        "  padding: 0.05rem 0 0.05rem 0.9rem !important;"
+        "  padding: 0 0 0 0.9rem !important;"
         "  justify-content: flex-start;"
         "  text-align: left;"
         "}"
@@ -2564,12 +2872,29 @@ with st.sidebar:
         # 案例子项按钮容器：收紧纵向间距，贴近竖线分组效果
         '[data-testid="stSidebar"] [data-testid="stButton"]:has('
         '[data-testid^="stBaseButton-primary"]) {'
-        "  margin: 0.12rem 0;"
+        "  margin: 0;"
+        "}"
+        # 案例按钮所在元素容器：抵消竖排块 16px 间距的一半，缩小项目名称之间的空隙
+        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has('
+        '[data-testid^="stBaseButton-primary"]) {'
+        "  margin-top: -0.5rem;"
         "}"
         # 首个案例按钮：上移贴近「正反项目案例」标题（抵消标题 ul 的底部留白）
         '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(style)'
         ' + [data-testid="stElementContainer"] {'
         "  margin-top: -1.8rem;"
+        "}"
+        # 导航勾选框（广联达 PDF 导入 / 表格预处理）：仿子项样式（左竖线+缩进），
+        # 方框左侧与子项文字左边缘对齐，文字贴紧方框
+        '[data-testid="stSidebar"] [data-testid="stCheckbox"] {'
+        "  border-left: 2px solid rgba(49,51,63,0.18);"
+        "  padding-left: 0.9rem;"
+        "  margin: 0.12rem 0;"
+        "}"
+        '[data-testid="stSidebar"] [data-testid="stCheckbox"] label > div {'
+        "  margin-left: 0.4rem !important;"
+        "  font-size: 1rem !important;"
+        "  color: rgba(49,51,63,0.62) !important;"
         "}"
         "</style>",
         unsafe_allow_html=True)
@@ -2579,6 +2904,7 @@ with st.sidebar:
             # 进入案例页时退出其他整页模式
             st.session_state.pdf_import_mode = False
             st.session_state.preprocess_mode = False
+            st.session_state.bridge_match_mode = False
             st.session_state.active_case = _case["key"]
             st.rerun()
 
@@ -2669,6 +2995,11 @@ if st.session_state.get("pdf_import_mode"):
 # ===== 表格预处理模式：整页替换主界面 =====
 if st.session_state.get("preprocess_mode"):
     _render_preprocess_page()
+    st.stop()
+
+# ===== 桥梁定额匹配模式：整页替换主界面 =====
+if st.session_state.get("bridge_match_mode"):
+    _render_bridge_match_page()
     st.stop()
 
 # ===== 正反项目案例：点击侧边栏子项整页替换 =====

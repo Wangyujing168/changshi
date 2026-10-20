@@ -7,6 +7,7 @@ streamlit>=1.28.0
 # 数据处理
 pandas>=2.0.0
 openpyxl>=3.1.0
+xlrd>=2.0.1
 
 # DeepSeek API 调用（兼容 OpenAI 接口）
 openai>=1.0.0
