@@ -3,6 +3,7 @@
 """
 import re
 import streamlit as st
+import streamlit.components.v1 as components
 from rag_engine import get_engine
 from fee_engine import (
     detect_and_calculate, is_hebei_region,
@@ -16,7 +17,7 @@ from fee_engine import (
     calc_discount_scenarios,
     _get_coef_config_simple,
     _preset_fee_numbers,
-    build_excel_summary,
+    build_excel_summary, TJ_TEMPLATE_XLSX,
 )
 from ai_planner import (
     PlannerError, available_keys, build_ctx_summary, question_done, run_planner,
@@ -207,7 +208,7 @@ def _build_cascade_excel(ctx: dict) -> bytes:
 # ===== 广联达 PDF 导入页 =====
 
 def _render_pdf_import_page():
-    """上传广联达 PDF → 解析「单位工程造价汇总表」→ 编辑分组 → 存专业清单。
+    """上传广联达 PDF → 解析「单位工程造价汇总表」/「工程费用汇总表」→ 编辑分组 → 存专业清单。
 
     清单保存到 st.session_state["zhuan_ye_list"]，Excel 导出的第一部分
     工程费用按 组（一）→ 专业 → 节/细目 列示（见 fee_engine 导出区块）。
@@ -216,7 +217,8 @@ def _render_pdf_import_page():
     from pdf_import import parse_pdf, build_groups
 
     st.title("📄 广联达 PDF 报表导入")
-    st.caption("只解析每个专业的「单位工程造价汇总表」：提取 工程名称 + 工程造价"
+    st.caption("只解析每个专业的「单位工程造价汇总表」（河北等地区）或"
+               "「工程费用汇总表」（河南等地区）：提取 工程名称 + 工程造价"
                "（PDF 费用金额单位为元，已换算为万元，原值保留）。"
                "同一工程名称出现多批时自动按（一）（二）…分组，可在下方编辑。")
 
@@ -229,7 +231,7 @@ def _render_pdf_import_page():
                 st.error(f"PDF 解析失败：{e}")
                 st.stop()
         if not leaves:
-            st.error("未识别到「单位工程造价汇总表」，请确认是广联达软件导出的报表。")
+            st.error("未识别到「单位工程造价汇总表」或「工程费用汇总表」，请确认是广联达软件导出的报表。")
             st.stop()
         st.session_state.pdf_up_id = up.file_id
         st.session_state.pdf_rows = [
@@ -293,6 +295,16 @@ def _render_pdf_import_page():
                             f"（{len(it['leaves'])} 行{'，电气专业' if it['electrical'] else ''}）")
     st.markdown(f"**第一部分 工程费用合计：{tot:,.2f} 万元"
                 f"（其中设备费 {dev_tot:,.2f} 万元）**")
+
+    if len(groups) > 1:
+        st.radio(
+            "概算表导出方式（多项工程）",
+            ["同一概算表拆项", "每单项单独一张概算表"],
+            key="split_mode", horizontal=True,
+            help="方式一：所有单项列在同一张概算表中（按单项 1/1.1/2/2.1 拆项列示）；"
+                 "方式二：每个单项单独一张概算表（只含该单项第一部分工程费），"
+                 "另附「项目汇总表」；二类费/预备费/总投资均按项目整体计算。",
+        )
 
     c1, c2 = st.columns(2)
     with c1:
@@ -421,19 +433,23 @@ _STATUS_EMOJI = {"single": "✅", "multi": "🤔", "none": "❌"}
 def _render_bridge_match_page():
     import pandas as pd
     from bridge_match import (BridgeMatchError, parse_quota_library,
+                              parse_rule_template, load_builtin_rule_template,
                               parse_quantity_excel, parse_text_lines,
                               match_quotas, build_result_excel, result_rows,
                               ai_explain, _item_display, _grade_tag, TPL_RATIOS)
 
     st.title("🌉 桥梁定额匹配")
-    st.caption("上传天津桥梁定额库 + 海泰式数量总表，按构件/工艺/材料/规格自动匹配定额子目；"
+    st.caption("上传导定额库 + 套定额模板（单位工程）+ 海泰式数量总表，"
+               "按构件/工艺/材料/规格自动匹配定额子目；"
                "严格以定额库文字为准，不编造子目；多候选全部列出并附差异说明；"
                "特征缺失时给出需补充的信息清单。")
 
     # ---------- ① 定额库 ----------
     st.markdown("### ① 定额库")
-    up_lib = st.file_uploader("上传天津桥梁定额库 Excel（含定额编号/名称/单位/单价 + 套定额规则样例表）",
-                              type=["xlsx"], key="bm_lib_up")
+    up_lib = st.file_uploader("上传定额库 Excel（导定额.xlsx 分页计价表，含定额编号/名称/单位/单价）",
+                              type=["xlsx"], key="bm_lib_up",
+                              help="新版导定额库为单表 38 页分页计价表；"
+                                   "旧版天津桥梁.xlsx（定额库+规则样例双表）也兼容。")
     if up_lib is not None and st.session_state.get("bm_lib_id") != up_lib.file_id:
         try:
             lib = parse_quota_library(up_lib.getvalue())
@@ -453,8 +469,11 @@ def _render_bridge_match_page():
     elif st.session_state.get("bm_lib"):
         lib = st.session_state.bm_lib
         dup = lib.get("duplicates") or {}
-        st.success(f"已加载 {len(lib['entries'])} 条定额 + "
-                   f"{len(lib.get('rules', {}))} 组套定额规则样例"
+        n_mat = len(lib.get("materials", []))
+        st.success(f"已加载 {len(lib['entries'])} 条定额"
+                   + (f" + {n_mat} 条材料行" if n_mat else "")
+                   + (f" + {len(lib.get('rules', {}))} 组套定额规则样例"
+                      if lib.get("rules") else "")
                    + (f"（⚠️ 库中重复编号：{'、'.join(dup)}）" if dup else ""))
         with st.expander("定额库预览（前 10 条）"):
             st.dataframe(pd.DataFrame(
@@ -464,8 +483,65 @@ def _render_bridge_match_page():
 
     st.divider()
 
-    # ---------- ② 工程量 ----------
-    st.markdown("### ② 工程量清单")
+    # ---------- ② 套定额模板（内置单位工程.xlsx，可上传自定义覆盖） ----------
+    st.markdown("### ② 套定额模板")
+    try:
+        builtin_rules = load_builtin_rule_template()
+    except BridgeMatchError as e:
+        builtin_rules = None
+        st.error(str(e))
+    up_rules = st.file_uploader(
+        "上传自定义套定额模板（可选）——默认使用内置 单位工程.xlsx 模板规则，上传后以自定义模板为准",
+        type=["xlsx"], key="bm_rules_up",
+        help="内置模板：quota_base/单位工程.xlsx（分部→分项→子组→明细行）；无需上传即可匹配。")
+    if up_rules is None and st.session_state.get("bm_rules_id"):
+        # 移除上传的自定义模板后回到内置规则
+        st.session_state.bm_rules = None
+        st.session_state.bm_rules_id = None
+    # 旧版解析结果（无 divs 分部结构）在代码升级后按同 file_id 残留于会话——
+    # 检测到缺 divs 时用 uploader 缓存的原始字节重新解析
+    if up_rules is not None and (
+            st.session_state.get("bm_rules_id") != up_rules.file_id
+            or "divs" not in (st.session_state.get("bm_rules") or {})):
+        try:
+            rules_data = parse_rule_template(up_rules.getvalue())
+            st.session_state.bm_rules = rules_data
+            st.session_state.bm_rules_id = up_rules.file_id
+            st.session_state.bm_rules_err = None
+        except BridgeMatchError as e:
+            st.session_state.bm_rules_err = str(e)
+            st.session_state.bm_rules = None
+            st.session_state.bm_rules_id = None
+        except Exception as e:
+            st.session_state.bm_rules_err = f"模板解析失败：{e}"
+            st.session_state.bm_rules = None
+            st.session_state.bm_rules_id = None
+    if st.session_state.get("bm_rules_err"):
+        st.error(st.session_state.bm_rules_err)
+    elif st.session_state.get("bm_rules"):
+        rules_data = st.session_state.bm_rules
+        n_rows = sum(len(v) for v in rules_data["rules"].values())
+        st.success(f"已加载自定义套定额模板：{len(rules_data['rules'])} 组分项规则"
+                   f"（共 {n_rows} 条样例）——将覆盖内置模板")
+        with st.expander("模板规则预览（按分项分组）"):
+            st.dataframe(pd.DataFrame(
+                [{"分项组": g, "样例条数": len(rs)}
+                 for g, rs in rules_data["rules"].items()]),
+                use_container_width=True, hide_index=True)
+    elif builtin_rules is not None:
+        n_rows = sum(len(v) for v in builtin_rules["rules"].values())
+        st.success(f"内置套定额模板：单位工程.xlsx（{len(builtin_rules['rules'])} 组分项规则，"
+                   f"共 {n_rows} 条样例）——无需上传，匹配时自动套用")
+        with st.expander("模板规则预览（按分项分组）"):
+            st.dataframe(pd.DataFrame(
+                [{"分项组": g, "样例条数": len(rs)}
+                 for g, rs in builtin_rules["rules"].items()]),
+                use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ---------- ③ 工程量 ----------
+    st.markdown("### ③ 工程量清单")
     tab_up, tab_text = st.tabs(["上传数量总表（替换）", "粘贴文本（追加）"])
     with tab_up:
         up_qty = st.file_uploader(
@@ -524,30 +600,81 @@ def _render_bridge_match_page():
 
     st.divider()
 
-    # ---------- ③ 开始匹配 ----------
-    st.markdown("### ③ 匹配")
+    # ---------- ④ 匹配 ----------
+    st.markdown("### ④ 匹配")
+    has_tpl = bool(st.session_state.get("bm_rules"))
+    # 内置模板规则兜底：② 未上传时也按内置 单位工程.xlsx 规则套用
     ready = bool(st.session_state.get("bm_lib")) and bool(st.session_state.get("bm_items"))
     if not ready:
-        st.info("请先完成 ① 定额库 与 ② 工程量清单 的上传。")
+        st.info("请先完成 ① 定额库 与 ③ 工程量清单 的上传（② 模板可选，默认内置）。")
+    elif not has_tpl and builtin_rules is not None:
+        st.info("当前将按**内置模板规则**（单位工程.xlsx）套用；"
+                "如需自定义，上传 ② 模板覆盖后重新匹配。")
+    # 钢绞线束长：按一跨桥长计，默认 30m（→ 40m 以内档）；量表有锚具→后张法（孔数=锚具），无锚具→先张法
+    # 钻孔地层：按所选地层优先匹配钻孔子目；砂土/黏土 分开可选，唯一匹配对应变体
+    # （2026-10-27 用户口径：如 φ≤1000 h≤40m 砂土 / 黏土 两定额靠选地层唯一命中）
+    # 桥梁宽度：沥青摊铺宽度档取 ≥W 的最小档，默认 8.5 → 8.5m 以内档（2026-10-27 用户口径）
+    c_span, c_soil, c_width = st.columns([1, 1, 1])
+    with c_span:
+        span_len = float(st.number_input(
+            "🌉 钢绞线束长/一跨桥长（m）", min_value=1.0, max_value=200.0, value=30.0,
+            step=1.0, key="bm_span_len",
+            help="钢绞线束长按一跨桥长计，默认 30m → 套 40m 以内档（≤20m 套 20m 以内档）。"
+                 "量表有锚具按后张法（孔数与锚具一致），无锚具按先张法。"))
+    with c_soil:
+        soil = st.selectbox(
+            "🪨 钻孔地层条件", ["砂土/黏土", "砂土", "黏土", "砂砾", "岩石"],
+            key="bm_soil",
+            help="定额名称含所选地层者优先，含所选以外地层的变体不进候选；"
+                 "默认 砂土/黏土（砂土、黏土变体并列）；单独选 砂土 或 黏土 可唯一命中对应变体"
+                 "（如 冲击式钻机钻孔 φ≤1000 h≤40m 砂土 / 黏土）。")
+    with c_width:
+        bridge_width = float(st.number_input(
+            "🌉 桥梁宽度（m）", min_value=1.0, max_value=100.0, value=8.5,
+            step=0.5, key="bm_bridge_width",
+            help="沥青混凝土摊铺宽度档按桥梁宽度取 ≥宽度 的最小档（默认 8.5 → 摊铺宽度8.5m以内）；"
+                 "量表含 改性/SBS 套改性沥青混凝土，否则套普通沥青混凝土。"))
     if st.button("🔍 开始匹配", key="bm_run", use_container_width=True, disabled=not ready):
         with st.spinner("正在匹配定额..."):
-            results = match_quotas(st.session_state.bm_items, st.session_state.bm_lib)
+            lib = dict(st.session_state.bm_lib)
+            # 规则优先级：② 上传模板 > 内置模板（单位工程.xlsx）> 库自带规则样例
+            rules_data = st.session_state.get("bm_rules") or builtin_rules
+            if rules_data:
+                lib["rules"] = rules_data["rules"]
+                if rules_data.get("divs"):
+                    lib["tpl_divs"] = rules_data["divs"]
+            results = match_quotas(st.session_state.bm_items, lib,
+                                   span_len=span_len, soil=soil,
+                                   bridge_width=bridge_width)
             st.session_state.bm_results = results
+            st.session_state.bm_lib_merged = lib
+            st.session_state.bm_rules_src = (
+                "单位工程.xlsx 模板（上传）" if st.session_state.get("bm_rules")
+                else "内置单位工程.xlsx 模板" if rules_data
+                else "定额库自带规则样例" if lib.get("rules")
+                else "全库文本匹配（无模板）")
             st.session_state.bm_results_key = (
-                f"{st.session_state.bm_lib_id}|{st.session_state.bm_qty_id}|"
-                f"{len(st.session_state.bm_items)}")
+                f"{st.session_state.bm_lib_id}|{st.session_state.get('bm_rules_id') or 'builtin'}|"
+                f"{st.session_state.bm_qty_id}|{len(st.session_state.bm_items)}|"
+                f"{'v2' if (rules_data or {}).get('divs') else 'v1'}|span={span_len:g}"
+                f"|soil={soil}|width={bridge_width:g}")
             st.session_state.bm_ai_cache = {}
 
     results = st.session_state.get("bm_results")
     if results:
         items = st.session_state.bm_items
-        cur_key = (f"{st.session_state.bm_lib_id}|{st.session_state.bm_qty_id}|"
-                   f"{len(items)}")
+        cur_key = (f"{st.session_state.bm_lib_id}|{st.session_state.get('bm_rules_id') or 'builtin'}|"
+                   f"{st.session_state.bm_qty_id}|{len(items)}|"
+                   f"{'v2' if ((st.session_state.get('bm_rules') or builtin_rules) or {}).get('divs') else 'v1'}"
+                   f"|span={st.session_state.get('bm_span_len', 30):g}"
+                   f"|soil={st.session_state.get('bm_soil', '砂土/黏土')}"
+                   f"|width={st.session_state.get('bm_bridge_width', 8.5):g}")
         if st.session_state.get("bm_results_key") != cur_key:
-            st.warning("清单或定额库已变化，以下为上一次匹配结果，请重新点击「开始匹配」。")
+            st.error("⚠️ 清单、定额库或模板已变化，以下为**上一次**匹配结果（旧规则），"
+                     "请重新点击「开始匹配」后查看。")
 
-        # ---------- ④ 结果 ----------
-        st.markdown("### ④ 匹配结果")
+        # ---------- ⑤ 结果 ----------
+        st.markdown(f"### ⑤ 匹配结果（规则来源：{st.session_state.get('bm_rules_src', '—')}）")
         n_single = sum(1 for r in results if r["status"] == "single")
         n_multi = sum(1 for r in results if r["status"] == "multi")
         n_none = sum(1 for r in results if r["status"] == "none")
@@ -559,20 +686,33 @@ def _render_bridge_match_page():
 
         st.dataframe(pd.DataFrame(result_rows(results)),
                      use_container_width=True, hide_index=True, height=420)
+        # 土方规则（用户 2026-10-26 口径）：填方=压实方、挖方=自然方（清单量原样）；
+        # 土方不利用 → 买土 1-6-20=填方×1.22（自然方）；余土外运=挖方×1.32（松方）
+        earth_reuse_opt = st.selectbox(
+            "⛰️ 土方利用情况",
+            ["不利用（需外购土）", "利用（不外购）"],
+            key="bm_earth_reuse",
+            help="土方不利用时套买土定额 1-6-20，买土量=填方（压实方）×1.22（自然方），"
+                 "余土外运=挖方（自然方）×1.32（松方）；"
+                 "土方利用时不外购土，余土外运=(挖方−填方×1.22)×1.32（松方）。")
+        earth_reuse = earth_reuse_opt == "利用（不外购）"
         # 弃运运距：土方与建筑垃圾分开设置，1-6-72（每增运1km）套 (运距-1) 次
         c_soil, c_waste = st.columns(2)
         with c_soil:
             soil_km = int(st.number_input(
                 "🚛 土方弃运运距（km）", min_value=1, max_value=100, value=5,
                 step=1, key="bm_soil_haul_km",
-                help="土方弃运 1-6-72（每增运1km）套 (运距-1) 次"))
+                help="余土外运 1-6-72（每增运1km）套 (运距-1) 次"))
         with c_waste:
             waste_km = int(st.number_input(
                 "🚛 建筑垃圾弃运运距（km）", min_value=1, max_value=100, value=5,
                 step=1, key="bm_waste_haul_km",
                 help="凿桩头等建筑垃圾弃运 1-6-72 套 (运距-1) 次；弃运量按虚方×2"))
-        st.caption("凿桩头等建筑垃圾弃运套 1-6-71（运距1km）+ 1-6-72（每增运1km），"
-                   "弃运量按虚方 ×2；土方弃运量规则确定后按土方运距套用。")
+        st.caption("土方：挖方=自然方、填方=压实方（清单量原样套用）。"
+                   "土方不利用 → 买土 1-6-20=填方×1.22（自然方），"
+                   "余土外运 1-6-71/72=挖方×1.32（松方）；"
+                   "土方利用 → 不外购土，余土外运=(挖方−填方×1.22)×1.32。"
+                   "凿桩头等建筑垃圾弃运按虚方 ×2、运距按上方建筑垃圾运距。")
         # 模板系数：模板量=混凝土量×系数，默认参考表样例比例，可自行修改
         st.markdown("**📐 模板系数**（模板量=混凝土量×系数，默认按参考表样例比例，可自行修改）")
         tpl_ratios = {}
@@ -584,8 +724,10 @@ def _render_bridge_match_page():
                     step=0.001, format="%.3f", key=f"bm_tpl_{k}"))
         st.download_button(
             "⬇️ 下载匹配结果 Excel",
-            data=build_result_excel(results, st.session_state.bm_lib,
+            data=build_result_excel(results, st.session_state.get("bm_lib_merged"),
                                     waste_haul_km=waste_km,
+                                    soil_haul_km=soil_km,
+                                    earth_reuse=earth_reuse,
                                     tpl_ratios=tpl_ratios),
             file_name="桥梁定额匹配结果.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1613,6 +1755,14 @@ def _ask_params(ctx: dict):
         ctx["params_done"] = True
         st.rerun()
     pidx = min(ctx.get("param_idx", 0), len(cards) - 1)
+    if ctx.get("_ai_fallback") and not ctx.pop("_params_back", False):
+        # AI 模式降级而来：已填过的参数卡不再重问，顺延到第一个未填卡
+        while pidx < len(cards) and question_done(ctx, _card_qkey(cards[pidx])):
+            pidx += 1
+        if pidx >= len(cards):
+            ctx["params_done"] = True
+            st.rerun()
+        ctx["param_idx"] = pidx
     card = cards[pidx]
     label = FEE_CATALOG.get(card["fee"], {}).get("label", card["fee"])
     st.markdown(f"### ⚙️ 参数设置（{pidx + 1}/{len(cards)}）")
@@ -1641,6 +1791,7 @@ def _ask_params(ctx: dict):
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("✅ 确认并继续", key=f"ck_params_ok_{qno}", use_container_width=True):
+            _commit_card_widgets(ctx, card, qno)
             ctx["qno"] = qno + 1
             _params_advance(ctx, pidx, len(param_cards_for(ctx)))
             st.rerun()
@@ -1660,6 +1811,8 @@ def _ask_params(ctx: dict):
     if pidx > 0:
         if st.button("⬅ 上一项参数（返回修改上一个费种的设置）",
                      key=f"ck_params_prev_{qno}", use_container_width=True):
+            if ctx.get("_ai_fallback"):
+                ctx["_params_back"] = True  # 降级模式允许回看已填卡（不做跳过）
             ctx["param_idx"] = pidx - 1
             ctx["qno"] = qno + 1
             st.rerun()
@@ -1770,15 +1923,31 @@ def _ask_shencha_card(ctx: dict, card: dict, qno: int):
     choice = st.radio("选择适用档位", labels, index=idx,
                       key=f"ck_shencha_{qno}", label_visibility="collapsed")
     chosen = sopts["rate_options"][labels.index(choice)]
-    if chosen["key"] != cur:
-        ctx.setdefault("rate_overrides", {})["施工图审查费"] = chosen["key"]
-        st.rerun()
+    # 不在渲染时写 ctx：渲染即写默认值会让 question_done 提前成立（AI 模式
+    # 该提问一闪而过，用户看不到）。档位/面积仅在用户点「✅ 确认」时由
+    # _commit_shencha_card 写入。
     if chosen.get("billing") == "area":
-        area = st.number_input("建筑面积（m²）", min_value=0.0, value=0.0, step=1000.0,
-                               key=f"ck_shencha_area_{qno}")
-        if area > 0:
+        st.number_input("建筑面积（m²）", min_value=0.0, value=0.0, step=1000.0,
+                        key=f"ck_shencha_area_{qno}")
+
+
+def _commit_shencha_card(ctx: dict, card: dict, qno: int):
+    """施工图审查卡确认：把当前档位/面积写入 ctx（唯一写入点）。"""
+    sopts = _build_shencha_rate_options(ctx.get("region"))
+    labels = [o["label"] for o in sopts["rate_options"]]
+    keys = [o["key"] for o in sopts["rate_options"]]
+    choice = st.session_state.get(f"ck_shencha_{qno}")
+    if choice not in labels:
+        choice = labels[keys.index(sopts["default_key"])]
+    chosen = sopts["rate_options"][labels.index(choice)]
+    ctx.setdefault("rate_overrides", {})["施工图审查费"] = chosen["key"]
+    if chosen.get("billing") == "area":
+        area = st.session_state.get(f"ck_shencha_area_{qno}") or 0.0
+        if float(area) > 0:
             ctx.setdefault("spec_overrides", {}).setdefault(
                 "施工图审查费", {})["area_m2"] = float(area)
+        else:
+            ctx.setdefault("spec_overrides", {}).pop("施工图审查费", None)
 
 
 def _ask_service_card(ctx: dict, card: dict, qno: int):
@@ -1803,9 +1972,24 @@ def _ask_service_card(ctx: dict, card: dict, qno: int):
         names, default=list(cur) if cur else list(default),
         key=f"ck_svc_{fee_name}_{qno}",
         format_func=lambda n: labels[names.index(n)])
-    ctx.setdefault("service_selections", {})[fee_name] = list(picked)
+    # 不在渲染时写 ctx：渲染即写默认值会让 question_done 提前成立（AI 模式
+    # 该提问一闪而过，用户看不到）。选择值仅在用户点「✅ 确认」时由
+    # _commit_service_card 写入。
     if not picked:
-        st.warning("未选择任何服务类型，该费种将计为 0 元。")
+        if fee_name == "造价咨询费":
+            st.warning(f"未选择任何服务类型，确认后将按默认服务"
+                       f"（{'、'.join(default)}）计算。")
+        else:
+            st.warning("未选择任何服务类型，该费种将计为 0 元。")
+
+
+def _commit_service_card(ctx: dict, card: dict, qno: int):
+    """服务多选卡确认：把当前勾选写入 ctx（唯一写入点）。"""
+    fee_name = card["fee"]
+    picked = st.session_state.get(f"ck_svc_{fee_name}_{qno}")
+    if picked is None:
+        return
+    ctx.setdefault("service_selections", {})[fee_name] = list(picked)
 
 
 def _ask_party_card(ctx: dict, card: dict, qno: int):
@@ -1899,20 +2083,38 @@ def _ask_shuibao_comp_card(ctx: dict, card: dict, qno: int):
     if sbp.get("calc_type") in ("mining_oil_gas", "mining_other"):
         c5, c6, c7 = st.columns(3)
         with c5:
-            ev = st.number_input("开采量（m³）", min_value=0.0,
-                                 value=float(sbp.get("extract_vol", 0.0) or 0.0),
-                                 step=1000.0, key=f"ck_sb_ev_{qno}")
-            sbp["extract_vol"] = float(ev)
+            st.number_input("开采量（m³）", min_value=0.0,
+                            value=float(sbp.get("extract_vol", 0.0) or 0.0),
+                            step=1000.0, key=f"ck_sb_ev_{qno}")
         with c6:
-            mv = st.number_input("材料量（m³）", min_value=0.0,
-                                 value=float(sbp.get("material_vol", 0.0) or 0.0),
-                                 step=1000.0, key=f"ck_sb_mv_{qno}")
-            sbp["material_vol"] = float(mv)
+            st.number_input("材料量（m³）", min_value=0.0,
+                            value=float(sbp.get("material_vol", 0.0) or 0.0),
+                            step=1000.0, key=f"ck_sb_mv_{qno}")
         with c7:
-            wv = st.number_input("弃方量（m³）", min_value=0.0,
-                                 value=float(sbp.get("waste_vol", 0.0) or 0.0),
-                                 step=1000.0, key=f"ck_sb_wv_{qno}")
-            sbp["waste_vol"] = float(wv)
+            st.number_input("弃方量（m³）", min_value=0.0,
+                            value=float(sbp.get("waste_vol", 0.0) or 0.0),
+                            step=1000.0, key=f"ck_sb_wv_{qno}")
+    # 不在渲染时写 ctx：渲染即写默认值会让 question_done 提前成立（AI 模式
+    # 该提问一闪而过，用户看不到）。参数仅在用户点「✅ 确认」时由
+    # _commit_shuibao_comp_card 写入。
+
+
+def _commit_shuibao_comp_card(ctx: dict, card: dict, qno: int):
+    """水土保持补偿费卡确认：从控件值组装参数写入 ctx（唯一写入点）。"""
+    type_label = st.session_state.get(f"ck_sb_type_{qno}")
+    type_map = dict((t[0], t[1]) for t in _SBUBAO_TYPES)
+    calc_type = type_map.get(type_label, "general")
+    sbp = {
+        "calc_type": calc_type,
+        "land_input": float(st.session_state.get(f"ck_sb_land_{qno}") or 0.0),
+        "land_unit": st.session_state.get(f"ck_sb_unit_{qno}") or "m²",
+        "well_cnt": int(st.session_state.get(f"ck_sb_wells_{qno}") or 0),
+        "add_wells": int(st.session_state.get(f"ck_sb_addwells_{qno}") or 0),
+    }
+    if calc_type in ("mining_oil_gas", "mining_other"):
+        sbp["extract_vol"] = float(st.session_state.get(f"ck_sb_ev_{qno}") or 0.0)
+        sbp["material_vol"] = float(st.session_state.get(f"ck_sb_mv_{qno}") or 0.0)
+        sbp["waste_vol"] = float(st.session_state.get(f"ck_sb_wv_{qno}") or 0.0)
     ctx.setdefault("spec_overrides", {})["水土保持补偿费"] = sbp
 
 
@@ -1934,11 +2136,50 @@ def _ask_spec_card(ctx: dict, card: dict, qno: int):
         else:
             default_v = params.get(ps["key"], ps.get("default", 0.0))
             step = 0.01 if ps.get("unit") == "亿元" else 100.0
-            v = st.number_input(f"{ps['label']}（{ps.get('unit', '')}）",
-                                min_value=0.0, value=float(default_v or 0.0),
-                                step=step, key=f"ck_spec_{fn}_{ps['key']}_{qno}")
-            params[ps["key"]] = float(v)
+            st.number_input(f"{ps['label']}（{ps.get('unit', '')}）",
+                            min_value=0.0, value=float(default_v or 0.0),
+                            step=step, key=f"ck_spec_{fn}_{ps['key']}_{qno}")
+    # 不在渲染时写 ctx：渲染即写默认值会让 question_done 提前成立（AI 模式
+    # 该提问一闪而过，用户看不到）。参数仅在用户点「✅ 确认」时由
+    # _commit_spec_card 写入。
+
+
+def _commit_spec_card(ctx: dict, card: dict, qno: int):
+    """通用 spec 参数卡确认：从控件值组装参数写入 ctx（唯一写入点）。"""
+    fn = card["fee"]
+    spec = FEE_PARAM_SPECS.get(fn)
+    if spec is None:
+        return
+    params = dict(ctx.get("spec_params", {}).get(fn, {}))
+    for ps in spec["params"]:
+        raw = st.session_state.get(f"ck_spec_{fn}_{ps['key']}_{qno}")
+        if raw is None:
+            continue
+        if ps.get("type") == "select":
+            opts = ps.get("options", [])
+            labels = [o[0] for o in opts]
+            vals = [o[1] for o in opts]
+            params[ps["key"]] = vals[labels.index(raw)] if raw in labels else ps.get("default")
+        else:
+            params[ps["key"]] = float(raw)
     ctx.setdefault("spec_params", {})[fn] = params
+
+
+def _commit_card_widgets(ctx: dict, card: dict, qno: int):
+    """确认按钮统一提交：把卡内控件当前值写入 ctx（各卡唯一写入点）。
+
+    服务/施工图审查/水保补偿/spec 四类卡渲染时不再写 ctx（防渲染即写
+    默认值导致 AI 模式提问一闪而过），只在用户点确认时在这里提交。
+    """
+    kind = card["kind"]
+    if kind == "service":
+        _commit_service_card(ctx, card, qno)
+    elif kind == "shencha":
+        _commit_shencha_card(ctx, card, qno)
+    elif kind == "shuibao_comp":
+        _commit_shuibao_comp_card(ctx, card, qno)
+    elif kind == "spec":
+        _commit_spec_card(ctx, card, qno)
 
 
 def _ask_discount(ctx: dict):
@@ -2062,8 +2303,17 @@ def _ai_parse_card_key(key: str) -> dict:
     if kind in ("coef", "rate", "service", "spec"):
         return {"kind": kind, "fee": parts[2]}
     fee_map = {"party": "交易服务费", "yubei_rate": "预备费",
-               "shuibao_comp": "水土保持补偿费", "shencha": "施工图审查费"}
+               "yubei_include": "预备费", "shuibao_comp": "水土保持补偿费",
+               "shencha": "施工图审查费"}
     return {"kind": kind, "fee": fee_map[kind]}
+
+
+def _card_qkey(card: dict) -> str:
+    """参数卡 → 问题键（与 ai_planner._card_key 同格式，供 question_done 判定）。"""
+    kind = card["kind"]
+    if kind in ("coef", "rate", "service", "spec"):
+        return f"card:{kind}:{card['fee']}"
+    return f"card:{kind}"
 
 
 def _ai_record_answer(ctx: dict, text: str, answer: str):
@@ -2235,6 +2485,7 @@ def _ai_render_card_question(ctx: dict, q: dict, qno: int):
     with c1:
         if st.button("✅ 已设置，继续", key=f"ai_card_ok_{q['key']}_{qno}",
                      use_container_width=True):
+            _commit_card_widgets(ctx, card, qno)
             _ai_mark_done(ctx, q["key"], q["text"], _ai_card_answer_text(ctx, card))
     with c2:
         if st.button("⏭ 本卡用默认值", key=f"ai_card_def_{q['key']}_{qno}",
@@ -2381,6 +2632,10 @@ def _ai_footer(ctx: dict):
 def _ai_fallback(ctx: dict, msg: str):
     ctx["_ai_fallback"] = True
     ctx["_ai_fallback_msg"] = msg
+    # AI 模式卡内按钮曾调用 _params_advance 污染过 param_idx/params_done，
+    # 这里复位：传统清单从参数卡起点重走（已填卡由 _ask_params 跳过）
+    ctx["param_idx"] = 0
+    ctx["params_done"] = False
     st.rerun()
 
 
@@ -2396,6 +2651,10 @@ def _ask_ai_guide(ctx: dict):
             ctx["custom_answered"] = True
         elif last_sub == "contract_loop" and ctx.get("contract_overrides"):
             ctx["custom_answered"] = True
+        elif last_sub == "discount_loop":
+            # 折扣子流程返回（含「↩ 返回」）即视为已作答：子流程内已给过
+            # 添加机会，结果（discounts 有无）就是答案，避免 AI 重复提问
+            ctx["discount_answered"] = True
         ctx["_ai_dirty"] = True
     ctx["_ai_last_subflow"] = sub
     if sub in _AI_SUBFLOWS:
@@ -2419,6 +2678,27 @@ def _ask_ai_guide(ctx: dict):
         ctx["_ai_dirty"] = False
         ctx.setdefault("_ai_rounds", []).append({"think": plan.get("think") or "", "qa": []})
 
+    # params 阶段完成标志与参数卡实际填写状态同步：AI 模式卡内控件直接写
+    # ctx（不依赖 param_idx 推进），避免 current_stage 误判「params 未完成」
+    # 而降级传统清单重问参数卡
+    ctx["params_done"] = all(
+        question_done(ctx, _card_qkey(c)) for c in param_cards_for(ctx))
+
+    # 卡内控件直接写入 ctx 的问题（未走「✅已设置/⏭默认值」按钮）→ 补记
+    # 完成标志与问答记录，避免同一费种参数在重规划或降级时被重复提问
+    for q in plan.get("questions") or []:
+        key = q.get("key") or ""
+        if key not in (ctx.get("_ai_answered") or []) and question_done(ctx, key):
+            ctx.setdefault("_ai_answered", []).append(key)
+            if key.startswith("card:"):
+                done_cards = ctx.setdefault("_ai_card_done", [])
+                if key not in done_cards:
+                    done_cards.append(key)
+                _ai_record_answer(ctx, q.get("text"),
+                                  _ai_card_answer_text(ctx, _ai_parse_card_key(key)))
+            else:
+                _ai_record_answer(ctx, q.get("text"), "已通过页面设置")
+
     if not plan.get("questions"):
         if current_stage(ctx) is None:
             _ai_header_history(ctx)
@@ -2429,7 +2709,11 @@ def _ask_ai_guide(ctx: dict):
 
     visible = _ai_remaining(plan, ctx)
     if not visible:
-        _ai_fallback(ctx, "AI 提问与已确认信息重复，已切换为传统清单模式。")
+        # 本轮问题已全部通过卡内控件答完：重新规划（可用问题库已排除
+        # 已填参数卡），不再降级传统清单——传统模式会从 param_idx 重放
+        # 参数卡，导致已答费种被重复提问
+        ctx["_ai_dirty"] = True
+        st.rerun()
 
     _ai_header_history(ctx)
     if plan.get("think"):
@@ -2714,15 +2998,30 @@ def _render_result_payload(ctx: dict):
                     "discounts": ctx.get("discounts"),
                     "zhuan_ye": st.session_state.get("zhuan_ye_list"),
                     "zhengchai_separate": ctx.get("zhengchai_separate", False),
+                    "split_mode": ("per_item"
+                                   if st.session_state.get("split_mode")
+                                   == "每单项单独一张概算表"
+                                   and len(st.session_state.get("zhuan_ye_list") or []) > 1
+                                   else "one_sheet"),
                 })
+                _is_tj = str(ctx.get("region") or DEFAULT_REGION) == "天津"
+                _per_item = (st.session_state.get("split_mode")
+                             == "每单项单独一张概算表"
+                             and len(st.session_state.get("zhuan_ye_list") or []) > 1)
+                # 文件名随所选省份：XX-总概算表（如 天津-总概算表.xlsx）
+                _region = str(ctx.get("region") or DEFAULT_REGION)
+                _fname = (f"{_region}-总概算表(分单项).xlsx" if _per_item
+                          else f"{_region}-总概算表.xlsx")
                 st.download_button(
                     "📥 导出 Excel 汇总表",
                     data=excel_bytes,
-                    file_name="二类费计算汇总.xlsx",
+                    file_name=_fname,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"ck_excel_{ctx.get('qno', 1)}",
                     use_container_width=True,
                 )
+                if _is_tj and not TJ_TEMPLATE_XLSX.exists():
+                    st.caption("⚠ 未找到天津模板文件，导出将回退为通用布局。")
             except Exception as e:
                 st.error(f"Excel 生成失败：{e}")
         with col2:
@@ -2797,34 +3096,153 @@ with st.sidebar:
     st.divider()
 
     st.markdown("### 功能导航")
-    st.markdown("- 智能问答（已上线）")
+    # 「智能问答」勾选框 = 主界面选中态（单选互斥中的一项）：
+    # 其他功能都未开启时勾选；点它 = 回主界面（退出所有整页模式）并保持勾选
+    _main_on = not (st.session_state.get("pdf_import_mode", False)
+                    or st.session_state.get("preprocess_mode", False)
+                    or st.session_state.get("bridge_match_mode", False)
+                    or st.session_state.get("active_case"))
+
+    def _chat_nav_clicked():
+        # 在回调里（控件尚未实例化，改自身 key 合法）：退出所有整页模式，
+        # 并保持自身勾选——点选后本运行直接渲染主界面，无需 rerun
+        st.session_state.pdf_import_mode = False
+        st.session_state.preprocess_mode = False
+        st.session_state.bridge_match_mode = False
+        st.session_state.active_case = None
+        st.session_state.chat_mode_cb = True
+
+    if "chat_mode_cb" in st.session_state:
+        # 每次运行在实例化前把勾选状态与主界面态同步
+        # （勾其他功能后的 rerun 会让它自动取消勾选）
+        st.session_state.chat_mode_cb = _main_on
+        st.checkbox("💬 智能问答（已上线）", key="chat_mode_cb",
+                    on_change=_chat_nav_clicked)
+    else:
+        # 首次运行：主界面即智能问答，默认勾选
+        st.checkbox("💬 智能问答（已上线）", value=True, key="chat_mode_cb",
+                    on_change=_chat_nav_clicked)
+    # 子项勾选框样式：用 <style> 元素兼作范围标记——此标记之后出现的 checkbox
+    # （PDF 导入/表格预处理/桥梁定额匹配）才套子项样式；「智能问答」在其之前，
+    # 保持主条目默认样式（正常字号、正常颜色、无竖线缩进）
+    st.markdown(
+        "<style>"
+        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(style)'
+        ' ~ [data-testid="stElementContainer"] [data-testid="stCheckbox"] {'
+        "  border-left: 2px solid rgba(49,51,63,0.18);"
+        "  padding-left: 0.9rem;"
+        "  margin: 0.12rem 0;"
+        "}"
+        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(style)'
+        ' ~ [data-testid="stElementContainer"] [data-testid="stCheckbox"] label > div {'
+        "  margin-left: 0.4rem !important;"
+        "  font-size: 1rem !important;"
+        "  color: rgba(49,51,63,0.62) !important;"
+        "}"
+        # 「智能问答」勾选框：紧邻本 <style> 标记的容器，恢复主条目字号/行高/颜色，
+        # 与「概算助手」等导航标题一致。字号必须打到最内层 p/stWidgetLabel 上——
+        # Streamlit 1.58 勾选框标签文本 p 自带 emotion 字号，父级继承会被覆盖
+        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has('
+        '[data-testid="stCheckbox"]):has(+ [data-testid="stElementContainer"]:has(style))'
+        ' [data-testid="stCheckbox"] label > div,'
+        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has('
+        '[data-testid="stCheckbox"]):has(+ [data-testid="stElementContainer"]:has(style))'
+        ' [data-testid="stCheckbox"] label [data-testid="stWidgetLabel"],'
+        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has('
+        '[data-testid="stCheckbox"]):has(+ [data-testid="stElementContainer"]:has(style))'
+        ' [data-testid="stCheckbox"] label p {'
+        "  font-size: 1rem !important;"
+        "  line-height: 1.6 !important;"
+        "  color: rgb(49,51,63) !important;"
+        "}"
+        "</style>",
+        unsafe_allow_html=True)
     # 子项说明：小字号灰色、无项目符号、轻微缩进，与主条目区分层级
     st.markdown(
         '<div style="font-size:0.875rem; line-height:1.9; color:rgba(49,51,63,0.62);'
         ' padding-left:0.9rem; border-left:2px solid rgba(49,51,63,0.18);'
-        ' margin:-0.9rem 0 0.55rem 0;">'
+        ' margin:-1rem 0 0.55rem 0;">'
         '查询苗木品种指标<br/>'
         '查询二类费政策文件<br/>'
         '查询定额说明'
         '</div>',
         unsafe_allow_html=True)
+    # 渲染完成后做三件事（不依赖 CSS 选择器，直接改元素内联样式；放在说明块之后，
+    # 避免零高度 iframe 挤在勾选框与说明块之间撑大间距）：
+    # 1) 把「概算助手」等导航标题的实际字号/行高/颜色复制到「智能问答」勾选框文字上；
+    # 2) 等整页渲染完（案例按钮在本 iframe 之后才出现，轮询等待），量出
+    #    「智能问答→子项说明」与「正反项目案例→首个案例按钮」两个实际间距，
+    #    把差值补偿到首个案例按钮容器上，使两者完全一致；
+    # 3) 量出相邻案例按钮的实际行距，设到子项说明块 line-height 上，
+    #    使说明块三行子项之间的间距与案例按钮子项间距一致
+    components.html(
+        "<script>"
+        "(function _fit(_n){"
+        "const _d = parent.document;"
+        "const _li = _d.querySelector('[data-testid=\"stSidebar\"] li');"
+        "const _p = _d.querySelector('[data-testid=\"stSidebar\"] [data-testid=\"stCheckbox\"] label p');"
+        "const _desc = _d.querySelector('[data-testid=\"stSidebar\"] [data-testid=\"stMarkdownContainer\"] div[style*=\"0.875rem\"]');"
+        "const _caseLi = Array.from(_d.querySelectorAll('[data-testid=\"stSidebar\"] li')).find(function(x){return x.textContent.indexOf('正反项目案例')>=0;});"
+        "const _btn = _d.querySelector('[data-testid=\"stSidebar\"] [data-testid^=\"stBaseButton-primary\"]');"
+        "if (!(_li && _p && _desc && _caseLi && _btn)) { if (_n < 50) setTimeout(function(){_fit(_n+1);}, 100); return; }"
+        "const _cs = getComputedStyle(_li);"
+        "for (const _k of ['fontSize','lineHeight','color','fontFamily','fontWeight']) { _p.style[_k] = _cs[_k]; }"
+        "const _r = function(e){ return e.getBoundingClientRect(); };"
+        "const _btns = _d.querySelectorAll('[data-testid=\"stSidebar\"] [data-testid^=\"stBaseButton-primary\"]');"
+        "if (_btns.length >= 2) {"
+        "  const _bgap = _r(_btns[1].querySelector('p')).top - _r(_btns[0].querySelector('p')).top;"
+        "  _desc.style.lineHeight = _bgap + 'px';"
+        "}"
+        "const _gapA = _r(_desc).top - _r(_p).bottom;"
+        "const _gapB = _r(_btn.querySelector('p')).top - _r(_caseLi).bottom;"
+        "const _c = _btn.closest('[data-testid=\"stElementContainer\"]');"
+        "_c.style.marginTop = (parseFloat(getComputedStyle(_c).marginTop) + (_gapA - _gapB)) + 'px';"
+        "})(0);"
+        "</script>",
+        height=0)
     st.markdown("- 概算助手（已上线）")
-    _pdf_mode = st.checkbox("📄 广联达 PDF 导入",
-                            value=st.session_state.get("pdf_import_mode", False))
-    st.session_state.pdf_import_mode = _pdf_mode
+    # 三个功能勾选框带 key，勾选状态由模式标志唯一决定（_mode_cb 只作显示镜像，
+    # 每次实例化前从模式标志同步）。互斥在 on_change 回调里做。
+    # 注意不能用 keyless 勾选框：其自身状态跨运行残留，会把回调复位的模式
+    # 又写回 True（曾导致「从功能页回不到智能问答」——点智能问答后 PDF 页纹丝不动）
+    def _pdf_nav_clicked():
+        _on = st.session_state.pdf_mode_cb          # 交互后的新值
+        st.session_state.pdf_import_mode = _on
+        if _on:
+            st.session_state.preprocess_mode = False
+            st.session_state.bridge_match_mode = False
+            st.session_state.active_case = None
+
+    def _pre_nav_clicked():
+        _on = st.session_state.pre_mode_cb
+        st.session_state.preprocess_mode = _on
+        if _on:
+            st.session_state.pdf_import_mode = False
+            st.session_state.bridge_match_mode = False
+            st.session_state.active_case = None
+
+    def _bm_nav_clicked():
+        _on = st.session_state.bm_mode_cb
+        st.session_state.bridge_match_mode = _on
+        if _on:
+            st.session_state.pdf_import_mode = False
+            st.session_state.preprocess_mode = False
+            st.session_state.active_case = None
+
+    if "pdf_mode_cb" in st.session_state:
+        st.session_state.pdf_mode_cb = st.session_state.get("pdf_import_mode", False)
+    if "pre_mode_cb" in st.session_state:
+        st.session_state.pre_mode_cb = st.session_state.get("preprocess_mode", False)
+    if "bm_mode_cb" in st.session_state:
+        st.session_state.bm_mode_cb = st.session_state.get("bridge_match_mode", False)
+    st.checkbox("📄 广联达 PDF 导入", key="pdf_mode_cb",
+                on_change=_pdf_nav_clicked)
     st.markdown("- 表格预处理（已上线）")
-    _pre_mode = st.checkbox("📋 表格预处理",
-                            value=st.session_state.get("preprocess_mode", False))
-    st.session_state.preprocess_mode = _pre_mode
+    st.checkbox("📋 表格预处理", key="pre_mode_cb",
+                on_change=_pre_nav_clicked)
     st.markdown("- 桥梁定额匹配（已上线）")
-    _bm_mode = st.checkbox("🌉 桥梁定额匹配",
-                           value=st.session_state.get("bridge_match_mode", False))
-    st.session_state.bridge_match_mode = _bm_mode
-    if _bm_mode:
-        # 进入桥梁匹配页时退出其他整页模式
-        st.session_state.pdf_import_mode = False
-        st.session_state.preprocess_mode = False
-        st.session_state.active_case = None
+    st.checkbox("🌉 桥梁定额匹配", key="bm_mode_cb",
+                on_change=_bm_nav_clicked)
     st.markdown("- 指标对比分析（开发中）")
     st.markdown("- 正反项目案例（已上线）")
     # 侧边栏按钮文字左对齐（1.58 版按钮标签有内层 div/span flex 居中包装，需一并覆盖）
@@ -2879,22 +3297,13 @@ with st.sidebar:
         '[data-testid^="stBaseButton-primary"]) {'
         "  margin-top: -0.5rem;"
         "}"
-        # 首个案例按钮：上移贴近「正反项目案例」标题（抵消标题 ul 的底部留白）
+        # 首个案例按钮：间距与「概算助手」等标题下的勾选框一致（不再上移，
+        # 覆写上方案例按钮容器 -0.5rem 规则）。限定后继容器含 primary 按钮，
+        # 避免误伤功能导航区 <style> 标记之后的「概算助手」等标题容器
         '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(style)'
-        ' + [data-testid="stElementContainer"] {'
-        "  margin-top: -1.8rem;"
-        "}"
-        # 导航勾选框（广联达 PDF 导入 / 表格预处理）：仿子项样式（左竖线+缩进），
-        # 方框左侧与子项文字左边缘对齐，文字贴紧方框
-        '[data-testid="stSidebar"] [data-testid="stCheckbox"] {'
-        "  border-left: 2px solid rgba(49,51,63,0.18);"
-        "  padding-left: 0.9rem;"
-        "  margin: 0.12rem 0;"
-        "}"
-        '[data-testid="stSidebar"] [data-testid="stCheckbox"] label > div {'
-        "  margin-left: 0.4rem !important;"
-        "  font-size: 1rem !important;"
-        "  color: rgba(49,51,63,0.62) !important;"
+        ' + [data-testid="stElementContainer"]:has('
+        '[data-testid^="stBaseButton-primary"]) {'
+        "  margin-top: 0;"
         "}"
         "</style>",
         unsafe_allow_html=True)

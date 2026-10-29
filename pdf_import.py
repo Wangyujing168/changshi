@@ -2,8 +2,10 @@
 """广联达 PDF 报表解析：提取每个单位工程的总造价。
 
 两种报表块：
-  - 「单位工程造价汇总表」页：取工程名称、工程造价（大写含税金额，缺失时
-    回退为块内首个两位小数）、设备费（A5设备费 行金额）；
+  - 「单位工程造价汇总表」/「工程费用汇总表」页（河北用前者，河南等地区
+    用后者，布局相同：序号/费用名称/取费基础/费率/金额）：取工程名称、
+    工程造价（大写含税金额，缺失时回退为「含税工程造价」行后首个两位
+    小数）、设备费（A5设备费 行金额）；
   - 「工程概(预)算书」封面页（一般计税单位工程没有汇总表，封面直接给出
     工程造价）：取工程名称、工程造价（如 44,756.80 元）。
 
@@ -33,8 +35,8 @@ _TUFANG_NAMES = {"清表", "填方", "挖方"}
 # 总造价放「合计」列、设备费单独提取、安装列=合计-设备费 的专业
 ELECTRICAL_SPECIALTIES = {"照明工程", "智能交通工程", "电气工程"}
 
-_BLOCK_HEADER = "单位工程造价汇总表"  # 与压缩空白后的文本比对
-_NUM_RE = re.compile(r"[\d,]+\.\d{2}")
+_BLOCK_HEADERS = ("单位工程造价汇总表", "工程费用汇总表")  # 与压缩空白后的文本比对
+_NUM_RE = re.compile(r"[\d,]+\.\d{1,2}")
 _CN_DIGITS = {"零": 0, "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5, "陆": 6,
               "柒": 7, "捌": 8, "玖": 9, "一": 1, "二": 2, "三": 3, "四": 4,
               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "两": 2}
@@ -116,18 +118,26 @@ def split_engine_name(full: str):
 
 
 def _extract_zaojia(text: str) -> float | None:
-    """工程造价（含税）：优先解析「含税工程造价：壹佰…」大写金额行；
-    缺失时回退为「工程造价」块后的首个两位小数（含费率粘连剥离）。"""
-    idx = text.find("含税工程造价")
-    if idx >= 0:
-        val = _parse_cn_amount(text[idx:])
+    """工程造价（含税）：优先「含税工程造价(总计)」行的大写金额，缺失时取
+    该行后首个两位小数；再无则回退「工程造价」块后的首个两位小数。
+
+    郑州等「工程费用汇总表」无大写金额，且表中先出现「不含税工程造价」行
+    （是「含税工程造价」的子串），须跳过「不」前缀匹配，否则会取到不含税额。
+    """
+    for m in re.finditer(r"含税工程造价(?:总计)?", text):
+        if m.start() > 0 and text[m.start() - 1] == "不":
+            continue  # 「不含税工程造价」行
+        tail = text[m.end():]
+        val = _parse_cn_amount(tail[:200])
         if val is not None and val > 0:
             return val
+        n = _NUM_RE.search(tail)
+        if n:
+            return _unglue(n.group(0))
     idx = text.find("工程造价")
     if idx < 0:
         return None
-    tail = text[idx:]
-    m = _NUM_RE.search(tail)
+    m = _NUM_RE.search(text[idx:])
     if not m:
         return None
     return _unglue(m.group(0))
@@ -166,7 +176,7 @@ def _extract_gai_cover(text: str) -> tuple[str, float, float] | None:
 
 
 def parse_pdf(source) -> list[dict]:
-    """解析广联达 PDF，返回叶子清单（每个「单位工程造价汇总表」一条）。
+    """解析广联达 PDF，返回叶子清单（每个「单位工程造价汇总表」/「工程费用汇总表」一条）。
 
     source：文件路径 或 bytes。返回元素：
       {full_name, zhuanye, jie, ximu, amount_wan, device_wan,
@@ -185,7 +195,7 @@ def parse_pdf(source) -> list[dict]:
     batch_seen: set = set()
     for page_no, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
-        if _BLOCK_HEADER in re.sub(r"\s+", "", text):
+        if any(h in re.sub(r"\s+", "", text) for h in _BLOCK_HEADERS):
             m = re.search(r"工程名称[:：]\s*(.+?)\s*第\s*\d+\s*页\s*共\s*\d+\s*页",
                           text, re.DOTALL)
             if m:
