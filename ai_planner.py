@@ -48,7 +48,22 @@ def _ai_needs_jianan(ctx: dict) -> bool:
     return False
 
 
+def _stage_amounts_ready(c: dict) -> bool:
+    """金额阶段已齐（无派生费种则无需收集金额）。"""
+    if not _ai_needs_jianan(c):
+        return True
+    am = c.get("amounts") or {}
+    return am.get("jianan") is not None and bool(am.get("shebei_known"))
+
+
+def _stage_zd_answered(c: dict) -> bool:
+    """征地拆迁提问已作答（或已随自定义费用提供金额）。"""
+    return bool(c.get("zd_asked")) or _zd_amount(c.get("custom_fees")) > 0
+
+
 # ── 问题库定义：key → (describe 供AI, done, avail)；渲染/写入在 app.py ──
+# avail 按阶段门控（费种→金额→征地→自定义→参数→折扣）：未到阶段的问题
+# 不暴露给 LLM，杜绝「是否有费用需要打折」之类的问题被提前/乱序提问。
 _BASE_BANK: dict[str, tuple[str, object, object]] = {
     "fees_preset_confirm": (
         "全量预设费种确认（用户可排除某些费种）",
@@ -61,16 +76,19 @@ _BASE_BANK: dict[str, tuple[str, object, object]] = {
     "amounts_jianan": (
         "建安工程费金额（万元）",
         lambda c: (c.get("amounts") or {}).get("jianan") is not None,
-        lambda c: _ai_needs_jianan(c) and (c.get("amounts") or {}).get("jianan") is None),
+        lambda c: bool(c.get("fees_confirmed")) and _ai_needs_jianan(c)
+                  and (c.get("amounts") or {}).get("jianan") is None),
     "amounts_shebei": (
         "设备购置费金额（万元，可为 0）",
         lambda c: bool((c.get("amounts") or {}).get("shebei_known")),
-        lambda c: (c.get("amounts") or {}).get("jianan") is not None
+        lambda c: bool(c.get("fees_confirmed"))
+                  and (c.get("amounts") or {}).get("jianan") is not None
                   and not (c.get("amounts") or {}).get("shebei_known")),
     "zd_exists": (
         "是否有征地拆迁费",
         lambda c: bool(c.get("zd_asked")) or _zd_amount(c.get("custom_fees")) > 0,
-        lambda c: not c.get("zd_asked") and _zd_amount(c.get("custom_fees")) == 0),
+        lambda c: bool(c.get("fees_confirmed")) and _stage_amounts_ready(c)
+                  and not c.get("zd_asked") and _zd_amount(c.get("custom_fees")) == 0),
     "zd_placement": (
         "征地拆迁费如何列示（单独列项 / 计入工程建设其他费）",
         lambda c: bool(c.get("zd_asked"))
@@ -86,11 +104,14 @@ _BASE_BANK: dict[str, tuple[str, object, object]] = {
     "custom_need": (
         "是否需要添加自定义费用或合同价/合同费率",
         lambda c: bool(c.get("custom_answered")),
-        lambda c: not c.get("custom_answered")),
+        lambda c: bool(c.get("fees_confirmed")) and _stage_amounts_ready(c)
+                  and _stage_zd_answered(c) and not c.get("custom_answered")),
     "discount_need": (
         "是否有费用需要打折",
         lambda c: bool(c.get("discount_answered")),
-        lambda c: not c.get("discount_answered")),
+        lambda c: bool(c.get("fees_confirmed")) and _stage_amounts_ready(c)
+                  and _stage_zd_answered(c) and bool(c.get("custom_answered"))
+                  and bool(c.get("params_done")) and not c.get("discount_answered")),
 }
 
 
@@ -144,17 +165,32 @@ def _card_key(card: dict) -> str:
 
 
 def available_keys(ctx: dict) -> list[tuple[str, str]]:
-    """当前可用的问题键（按计算依赖排序）→ (key, describe)。"""
+    """当前可用的问题键（按计算依赖排序）→ (key, describe)。
+
+    参数卡按费种分组暴露：只暴露第一个尚有未填卡的费种的全部卡
+    （服务卡在系数卡前，见 param_cards_for）。LLM 无法与其他费种
+    的参数卡穿插提问，也保证同费种多卡不遗漏。
+    """
     out: list[tuple[str, str]] = []
     for key, (desc, _done, avail) in _BASE_BANK.items():
         if avail(ctx) and not _done(ctx):
             out.append((key, desc))
-    for card in param_cards_for(ctx):
-        if _card_filled(ctx, card):
-            continue
-        fee_label = FEE_CATALOG.get(card["fee"], {}).get("label", card["fee"])
-        out.append((_card_key(card), f"{fee_label}—{_CARD_LABEL.get(card['kind'], card['kind'])}"))
-    out.append(("free", "开放问题（自由描述）"))
+    # 参数卡阶段门控：费种确认 + 金额齐 + 征地已答 + 自定义已答后才暴露，
+    # 与提示词规则 5 的「…→ 参数 → 折扣」顺序一致，防止参数卡被提前提问
+    params_gate = (bool(ctx.get("fees_confirmed")) and _stage_amounts_ready(ctx)
+                   and _stage_zd_answered(ctx) and bool(ctx.get("custom_answered")))
+    first_fee = None
+    if params_gate:
+        for card in param_cards_for(ctx):
+            if _card_filled(ctx, card):
+                continue
+            if first_fee is None:
+                first_fee = card["fee"]
+            if card["fee"] != first_fee:
+                continue  # 只暴露当前费种的卡，防止与其他费种穿插
+            fee_label = FEE_CATALOG.get(card["fee"], {}).get("label", card["fee"])
+            out.append((_card_key(card), f"{fee_label}—{_CARD_LABEL.get(card['kind'], card['kind'])}"))
+    out.append(("free", "开放问题（自由描述；禁止用于询问参数/系数/费率）"))
     return out
 
 
@@ -287,7 +323,11 @@ _AI_SYSTEM_PROMPT = (
     "3. key 必须从「可用问题键」中选取，禁止编造；可用键为空时 questions 返回 []。\n"
     "4. think 用一句话（≤50字）说明你打算确认什么、为什么。\n"
     "5. 提问顺序按计算依赖：费种与金额 → 征地拆迁/自定义费用/合同价 → 参数（费率/系数/服务等）→ 折扣。\n"
-    "6. 金额单位统一为万元，费率单位为 %。"
+    "6. 同一费种的多张参数卡（如服务类型、系数设置）必须按「可用问题键」列表顺序连续提问、紧邻排列，不得与其他费种的参数卡穿插。\n"
+    "7. 金额单位统一为万元，费率单位为 %。\n"
+    "8. 参数信息（费率/系数/服务类型/预备费口径等）优先用 card: 开头的可用问题键逐个提问，"
+    "让用户通过选项卡选择；用户尚未选择时禁止用 free 让用户整段填写参数。"
+    "用户选择完成后，若对其选择有疑问或需确认某个参数，可用 free 提问澄清。"
 )
 
 _REPAIR_HINT = "（你上次的输出格式不正确。请只输出一个 JSON 对象，不要包含任何其他文字或代码围栏。）"

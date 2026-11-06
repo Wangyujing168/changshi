@@ -2360,6 +2360,7 @@ _TJ_PROF_KEYWORDS = (
 # 造价咨询服务 → 其他费用计算表辅助区块（B118:I118）列映射（按关键字，顺序敏感）
 _TJ_CC_SERVICES = (
     ("审核概算", "G118"), ("审核预算", "H118"), ("审核结算", "I118"),
+    ("审核竣工", "I118"),
     ("标底", "C118"), ("清单", "B118"), ("预算", "D118"),
     ("结算", "E118"), ("全过程", "F118"),
 )
@@ -6456,12 +6457,17 @@ def _calc_all_fees(
     raw_results["建设管理费"] = gl_r
     numerical["建设管理费(万元)"] = _gl_new
 
-    # 可行性研究费
-    keyan_ind, keyan_coef = _detect_keyan_industry(query)
+    # 可行性研究费（系数卡覆盖优先：行业/复杂程度；无覆盖 → 查询检测）
+    keyan_ind, _keyan_det_coef = _detect_keyan_industry(query)
+    _ky_ov = (coef_overrides or {}).get("可行性研究费", {})
+    _ky_ov_ind = _ky_ov.get("industry_coef")
+    keyan_coef = float(_ky_ov_ind) if _ky_ov_ind not in (None, "") else _keyan_det_coef
+    keyan_comp = float(_ky_ov.get("complexity_coef", 1.0) or 1.0)
     amount_yi = total_investment / 10000.0
     # 取可研报告中值
     keyan_r_all = calc_keyan(amount_yi, service_type="编制可研报告",
-                             industry_coef=keyan_coef, industry_name=keyan_ind)
+                             industry_coef=keyan_coef, industry_name=keyan_ind,
+                             complexity_coef=keyan_comp)
     raw_results["可行性研究费"] = keyan_r_all
     numerical["可行性研究费(万元)"] = _extract_numeric_value(keyan_r_all)
 
@@ -6591,7 +6597,8 @@ def _calc_all_fees(
         if not _ky_contracted:
             _ky_amount_yi2 = project_total / 10000.0
             _ky_r2 = calc_keyan(_ky_amount_yi2, service_type="编制可研报告",
-                                industry_coef=keyan_coef, industry_name=keyan_ind)
+                                industry_coef=keyan_coef, industry_name=keyan_ind,
+                                complexity_coef=keyan_comp)
             _ky_new2 = _extract_numeric_value(_ky_r2)
         else:
             _ky_new2 = numerical.get("可行性研究费(万元)", 0)
@@ -7762,14 +7769,16 @@ def param_cards_for(ctx: dict) -> list[dict]:
         if fn == "施工图审查费":
             cards.append({"kind": "shencha", "fee": fn})
             continue
+        # 服务选择卡先于系数卡（先选计算哪几项内容，再设对应系数）；
+        # 同费种多卡保持紧邻，AI 模式按费种分组提问依赖此顺序
+        if conf.get("services"):
+            cards.append({"kind": "service", "fee": fn})
         if conf.get("coefs"):
             cards.append({"kind": "coef", "fee": fn})
         if conf.get("coefs_hebei") and is_hebei_region(ctx.get("region")):
             cards.append({"kind": "coef", "fee": fn})
         if conf.get("rates"):
             cards.append({"kind": "rate", "fee": fn})
-        if conf.get("services"):
-            cards.append({"kind": "service", "fee": fn})
         if "party" in conf.get("specials", []):
             cards.append({"kind": "party", "fee": fn})
         if "shuibao_comp" in conf.get("specials", []):
@@ -8574,6 +8583,7 @@ def compute_selected_fees(
     yubei_rate: float = 5.0,
     jiaoyi_party: str | None = None,
     total_investment_override: float | None = None,
+    sheji_extra_separate: dict | None = None,
 ) -> dict:
     """按选中的费种 + 全部覆盖配置做最终结算。
 
@@ -8876,12 +8886,14 @@ def compute_selected_fees(
                         numerical["建设管理费(万元)"] = _extract_numeric_value(_gl_r)
                         preview_raw["原始结果"]["建设管理费"] = _gl_r
 
-                    # 2) 重算可行性研究费
+                    # 2) 重算可行性研究费（系数卡覆盖优先：行业/复杂程度）
                     if "可行性研究费" not in (contract_overrides or {}):
-                        _keyan_ind, _keyan_coef = _detect_keyan_industry(query)
-                        _ky_comp_coef = ((coef_overrides or {})
-                                         .get("可行性研究费", {})
-                                         .get("complexity_coef", 1.0))
+                        _keyan_ind, _keyan_det_coef = _detect_keyan_industry(query)
+                        _ky_ov = (coef_overrides or {}).get("可行性研究费", {})
+                        _ky_ov_ind = _ky_ov.get("industry_coef")
+                        _keyan_coef = (float(_ky_ov_ind) if _ky_ov_ind not in (None, "")
+                                       else _keyan_det_coef)
+                        _ky_comp_coef = float(_ky_ov.get("complexity_coef", 1.0) or 1.0)
                         _ky_svcs = (service_selections or {}).get("可行性研究费", [])
                         if _ky_svcs and _ky_svcs != ["编制可研报告"]:
                             _ky_multi = calc_keyan_multi(
@@ -8890,12 +8902,15 @@ def compute_selected_fees(
                                 complexity_coef=_ky_comp_coef,
                             )
                             numerical["可行性研究费(万元)"] = _ky_multi.get("合计(万元)", 0)
+                            preview_raw["原始结果"]["可行性研究费"] = _ky_multi
                         else:
                             _keyan_r = calc_keyan(
                                 _curr_total / 10000.0, service_type="编制可研报告",
                                 industry_coef=_keyan_coef, industry_name=_keyan_ind,
+                                complexity_coef=_ky_comp_coef,
                             )
                             numerical["可行性研究费(万元)"] = _extract_numeric_value(_keyan_r)
+                            preview_raw["原始结果"]["可行性研究费"] = _keyan_r
 
                     # 3) 更新 T2
                     _t2_keys = ["建设管理费", "可行性研究费", "环境影响咨询费"]
@@ -8994,6 +9009,36 @@ def compute_selected_fees(
         preview_raw["T2小计(万元)"] = round(_nt2, 4)
         preview_raw["二类费合计(万元)"] = round(
             _nt0 + _nt1 + _nt2 + _nt_custom + sb_fee_wan, 4)
+
+    # ── 设计费附加项单独计算（施工图预算编制费 10% / 竣工图编制费 8%）──
+    # 用户勾选「单独计算」才计入；不参与 CC/建管收敛基数，只在合计层追加；
+    # 折扣已折入工程设计费(万元)，附加项跟随折后值（计价格[2002]10号 1.0.16）。
+    _sep = sheji_extra_separate or {}
+    if _sep.get("施工图预算编制费") or _sep.get("竣工图编制费"):
+        _sj_final = numerical.get("工程设计费(万元)", 0) or 0
+        _sep_items = []
+        if _sep.get("施工图预算编制费"):
+            _v1 = round(_sj_final * 0.10, 4)
+            numerical["施工图预算编制费(万元)"] = _v1
+            _sep_items.append({"服务类型": "施工图预算编制费（设计费×10%）",
+                               "费用(万元)": _v1})
+        if _sep.get("竣工图编制费"):
+            _v2 = round(_sj_final * 0.08, 4)
+            numerical["竣工图编制费(万元)"] = _v2
+            _sep_items.append({"服务类型": "竣工图编制费（设计费×8%）",
+                               "费用(万元)": _v2})
+        _sep_sum = round(sum(_i["费用(万元)"] for _i in _sep_items), 4)
+        if _sep_sum > 0:
+            preview_raw["二类费合计(万元)"] = round(
+                preview_raw.get("二类费合计(万元)", 0) + _sep_sum, 4)
+            preview_raw.setdefault("原始结果", {})["设计费附加项"] = {
+                "费种": "设计费附加项（单独计算）",
+                "依据": "计价格[2002]10号 1.0.16",
+                "计算公式": "施工图预算编制费=工程设计费×10%；"
+                             "竣工图编制费=工程设计费×8%",
+                "结果(万元)": _sep_sum,
+                "明细": _sep_items,
+            }
 
     # ── 最终汇总（预备费仅当选中；与旧面板展示逻辑一致）──
     _yb_ctr = (contract_overrides or {}).get("预备费", {})
@@ -9189,6 +9234,7 @@ def settle_checklist(ctx: dict) -> dict:
             else ctx.get("yubei_rate", 5.0),
             jiaoyi_party=ctx.get("jiaoyi_party"),
             total_investment_override=ctx["amounts"].get("total_investment"),
+            sheji_extra_separate=ctx.get("sheji_extra_separate") or None,
         )
         return {"kind": "cascade", "payload": payload, "fees": fees}
 
@@ -9245,6 +9291,7 @@ def calc_discount_scenarios(
             else ctx.get("yubei_rate", 5.0),
             jiaoyi_party=ctx.get("jiaoyi_party"),
             total_investment_override=ctx["amounts"].get("total_investment"),
+            sheji_extra_separate=ctx.get("sheji_extra_separate") or None,
         )
         numerical = payload["preview"]["numerical"]
         if target_fee is None:
@@ -9538,29 +9585,36 @@ def _excel_semantic_model(ctx: dict) -> dict:
     cc_loop = ("造价咨询费" in selected_fees
                and "造价咨询费" not in contract_overrides and bool(cc_svcs))
 
-    # 可研系数与引擎最终数值同源：
-    #   单服务 → 恒为查询检测行业系数×1.0（_calc_all_fees 6435 / CC 循环 8790）；
-    #   多服务+CC 循环 → 循环重算用查询检测行业系数×覆盖复杂度（8790-8793）；
-    #   多服务+无 CC 循环 → 覆盖值即最终值（8685-8690，参数权威）。
+    # 可研系数与引擎最终数值同源（系数卡覆盖优先 → 查询检测兜底）：
+    #   单服务 → 行业×复杂（覆盖或检测，与 _calc_all_fees 6460 / CC 循环 8881 一致）；
+    #   多服务+CC 循环 → 循环重算用同样口径（8881-8893）；
+    #   多服务+无 CC 循环 → orig 参数即最终值（8746-8751，覆盖优先）。
     ky_mode, ky_services, ky_ind, ky_comp = "none", [], 1.0, 1.0
     if ky_present:
         ky_mode = "const" if ky_contract else "loop"
         _ky_svcs = list((service_selections or {}).get("可行性研究费", []) or [])
+        _ky_ov = (coef_overrides or {}).get("可行性研究费", {})
+        _ky_ov_ind = _ky_ov.get("industry_coef")
+        _ky_ind_ov = float(_ky_ov_ind) if _ky_ov_ind not in (None, "") else None
+        _ky_comp_ov = float(_ky_ov.get("complexity_coef", 1.0) or 1.0)
         multi = bool(_ky_svcs and _ky_svcs != ["编制可研报告"])
         if multi and not cc_loop and not ky_contract:
             ky_services = _ky_svcs
             _p = (orig.get("可行性研究费") or {}).get("参数") or {}
-            ky_ind = float(_p.get("行业调整系数", 1.0) or 1.0)
-            ky_comp = float(_p.get("复杂程度系数", 1.0) or 1.0)
+            ky_ind = (_ky_ind_ov if _ky_ind_ov is not None
+                      else float(_p.get("行业调整系数", 1.0) or 1.0))
+            ky_comp = (_ky_comp_ov if _ky_comp_ov is not None
+                       else float(_p.get("复杂程度系数", 1.0) or 1.0))
         elif multi:
             ky_services = _ky_svcs
-            ky_ind = float(_detect_keyan_industry(query)[1])
-            ky_comp = float((coef_overrides or {}).get("可行性研究费", {})
-                            .get("complexity_coef", 1.0) or 1.0)
+            ky_ind = (_ky_ind_ov if _ky_ind_ov is not None
+                      else float(_detect_keyan_industry(query)[1]))
+            ky_comp = _ky_comp_ov
         else:
             ky_services = ["编制可研报告"]
-            ky_ind = float(_detect_keyan_industry(query)[1])
-            ky_comp = 1.0
+            ky_ind = (_ky_ind_ov if _ky_ind_ov is not None
+                      else float(_detect_keyan_industry(query)[1]))
+            ky_comp = _ky_comp_ov
     ky_total_coef = round(ky_ind * ky_comp, 4)
 
     cc_mode, cc_prof = None, 1.0
@@ -9769,6 +9823,8 @@ _PART2_ORDER = [
     "水土保持咨询服务费",    # 建设项目前期费·水土保持方案报告及监测报告编制费
     "勘察费",                # 工程勘察设计费·勘察费
     "工程设计费",            # 工程勘察设计费·设计费
+    "施工图预算编制费",       # 设计费附加项（单独计算，用户勾选才列出）
+    "竣工图编制费",           # 设计费附加项（单独计算，用户勾选才列出）
     "造价咨询费",            # 建设工程全过程造价咨询服务费
     "场地准备费及临时设施费",
     "工程保险费",
@@ -9809,6 +9865,38 @@ def _tj_insert_rows(ws, idx: int, amount: int) -> None:
         if _mc.min_row >= idx:
             _new.append(f"{get_column_letter(_mc.min_col)}{_mc.min_row + amount}:"
                         f"{get_column_letter(_mc.max_col)}{_mc.max_row + amount}")
+        else:
+            _new.append(str(_mc))
+    ws.merged_cells.ranges.clear()
+    for _rng in _new:
+        ws.merged_cells.ranges.add(MergedCellRange(ws, _rng))
+
+
+def _tj_delete_rows(ws, idx: int, amount: int) -> None:
+    """删行：openpyxl delete_rows 只搬移单元格，行属性/合并区需手动搬移
+    （与 _tj_insert_rows 对应：行属性 idx..idx+amount-1 丢弃，≥idx+amount
+    上移 amount）。"""
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.dimensions import RowDimension
+    from openpyxl.worksheet.merge import MergedCellRange
+    ws.delete_rows(idx, amount)
+    for r in sorted((r for r in ws.row_dimensions if r >= idx), reverse=True):
+        d = ws.row_dimensions[r]
+        del ws.row_dimensions[r]
+        if r >= idx + amount:
+            nd = RowDimension(worksheet=ws, index=r - amount)
+            nd.height = d.height          # 赋值 height 会连带置 customHeight=True
+            nd.hidden = d.hidden
+            nd.outlineLevel = d.outlineLevel
+            nd.collapsed = d.collapsed
+            ws.row_dimensions[r - amount] = nd
+    _new = []
+    for _mc in list(ws.merged_cells.ranges):
+        if _mc.min_row >= idx + amount:
+            _new.append(f"{get_column_letter(_mc.min_col)}{_mc.min_row - amount}:"
+                        f"{get_column_letter(_mc.max_col)}{_mc.max_row - amount}")
+        elif _mc.min_row >= idx:
+            continue   # 整个合并区落在被删行内 → 丢弃
         else:
             _new.append(str(_mc))
     ws.merged_cells.ranges.clear()
@@ -10080,8 +10168,11 @@ def _build_excel_summary_tianjin(ctx: dict, part1_rows=None,
             ws[f"C{r}"] = (pr.get("c_link")
                            or ("=" + "+".join(f"C{_rr}" for _rr in _prof_here)
                                if _prof_here else None))
-            _setv(ws, f"D{r}", None)
-            _setv(ws, f"E{r}", None)
+            # 方式二：D/E 列链接单项表的安装/设备列——费表口径依赖 C/D/E 列拆分
+            # （建安=总概算表!C4+D4、设备=E4：B66/F711/G711/D724/F724 都按此读），
+            # 不能把全额都堆在 C 列
+            ws[f"D{r}"] = pr.get("d_link")
+            ws[f"E{r}"] = pr.get("e_link")
             if r > 10:   # 插出来的 label 行：补合计公式 + 样式
                 ws[f"G{r}"] = f"=SUM(C{r}:F{r})"
                 _copy_row_style(ws, 10, r, range(1, 15))
@@ -10238,6 +10329,13 @@ def _build_excel_summary_tianjin(ctx: dict, part1_rows=None,
         _setv(ws_fee, f"B{73 + n}", float(_b73) if _b73 is not None else None)
     else:
         _setv(ws_fee, "D23", _v)
+    # 设计费附加项（施工图预算 D24 / 竣工图 D25）：模板活公式 =ROUND(D23*G/100,2)
+    # 自动跟随 D23；用户未勾选「单独计算」→ 费率参数 G24/G25 写 0 归零，
+    # 勾选 → 保持模板原值（10/8），与引擎 extras 数值一致
+    _sep_tj = ctx.get("sheji_extra_separate") or {}
+    for _g, _k in (("G24", "施工图预算编制费"), ("G25", "竣工图编制费")):
+        if not _sep_tj.get(_k):
+            _setv(ws_fee, _g, 0)
     # 审查：D26='=ROUND(D21*G26/100,2)'（D21=勘察+设计活链，G26=引擎费率）
     _v = _dval("施工图审查费")
     ws_fee["D26"] = "=ROUND(D21*G26/100,2)" if _v is None else _v
@@ -10285,27 +10383,36 @@ def _build_excel_summary_tianjin(ctx: dict, part1_rows=None,
     _v = _dval("招标代理费")
     ws_fee["D29"] = f"=G{115 + n}" if _v is None else _v
     # 可研：D18='=C70+E70'（建议书编+建议书评）/D19='=D70+F70'（可研编+
-    # 可研评），C69/D69/E69/F69 写引擎各服务基准价（计价格 1283 号文
-    # 内插，基数=引擎收敛总投资；单/多服务模式均从引擎重算取新鲜值），
-    # C70=ROUND(C69*A70,2) 链自乘专业系数。合同价/折扣 → D18=0、D19=静态。
+    # 可研评）。基准行 C/D/E/F{69+n} 恢复模板活链接 =H/J/L/N{665+n}
+    # （隐藏内插表链，选中服务才链，未选中写 0 防 D18/D19 混入）。
+    # B{69+n} 写引擎收敛总投资静态值断环：链 总概算表!G{17+k} 会成环
+    # D17→D58→总投资→B70，openpyxl 保存的循环公式 Excel 装载后不迭代
+    # → 全链 #VALUE。C70=ROUND(C69*A70,2) 链自乘专业系数（A70=行业×
+    # 复杂，引擎口径）。合同价/折扣 → D18=0、D19=静态。
     if "可行性研究费(万元)" in numerical:
         if "可行性研究费" in co or abs(float(_fds.get("可行性研究费", 1.0) or 1.0) - 1.0) >= 0.005:
             _setv(ws_fee, "D18", 0)
             _setv(ws_fee, "D19", float(numerical["可行性研究费(万元)"] or 0))
+            for _c in ("C", "D", "E", "F"):
+                _setv(ws_fee, f"{_c}{69 + n}", None)
         else:
-            _kx = float(sem["raw"].get("项目总投资(万元)")
-                        or evaluate_excel_semantics(sem).get("总投资") or 0)
-            _ky_map = {}
-            for _svc in sem["ky_services"]:
-                _r = calc_keyan(_kx / 10000.0, service_type=_svc,
-                                industry_coef=sem["ky_total_coef"],
-                                complexity_coef=1.0)
-                _base = (_r or {}).get("基准价(万元)")
-                if _base is not None:
-                    _ky_map[_svc] = float(_base)
-            for _svc, _cell in (("编制项目建议书", "C69"), ("编制可研报告", "D69"),
-                                ("评估项目建议书", "E69"), ("评估可研报告", "F69")):
-                _setv(ws_fee, f"{_cell[0]}{int(_cell[1:]) + n}", _ky_map.get(_svc))
+            # 基数=引擎可研实际计费额（orig 参数），非 preview 总投资——
+            # 收敛循环内可研基数=含预备费 project_total，preview 总投资
+            # 不含预备费时两者差一个预备费，用错档位会算出不同基准价。
+            _kx = ((orig.get("可行性研究费") or {}).get("参数") or {}).get("估算投资额(亿元)")
+            _kx = (float(_kx) * 10000.0) if _kx is not None else (
+                float(sem["raw"].get("项目总投资(万元)")
+                      or evaluate_excel_semantics(sem).get("总投资") or 0))
+            _setv(ws_fee, f"B{69 + n}", _kx)
+            _sel = set(sem["ky_services"] or ["编制可研报告"])
+            for _svc, _col, _src in (("编制项目建议书", "C", "H"),
+                                     ("编制可研报告", "D", "J"),
+                                     ("评估项目建议书", "E", "L"),
+                                     ("评估可研报告", "F", "N")):
+                if _svc in _sel:
+                    ws_fee[f"{_col}{69 + n}"] = f"={_src}{665 + n}"
+                else:
+                    _setv(ws_fee, f"{_col}{69 + n}", 0)
             ws_fee["D18"] = f"=C{70 + n}+E{70 + n}"
             ws_fee["D19"] = f"=D{70 + n}+F{70 + n}"
     else:
@@ -10313,81 +10420,118 @@ def _build_excel_summary_tianjin(ctx: dict, part1_rows=None,
             _setv(ws_fee, f"{_c}{69 + n}", None)
         _setv(ws_fee, "D18", 0)
         _setv(ws_fee, "D19", 0)
-    # 环评：模板 D34='=ROUND(C78*E34+E78,2)' 是报告书×下浮+评估口径，
-    # 引擎是报告表+评估报告表、无下浮 → D34 写显式公式（各服务
-    # 基准价×行业×敏感相加）；E34=1（C34 依据文字自动渲染"下浮0%"）
+    # 内插链 G/I/K 列 ROUND(...,1) → ROUND(...,2) 对齐引擎
+    # _keyan_interpolate 2 位口径（M 列模板已是 2 位；1 位会让基准价与
+    # 引擎差到角位，×系数后与面板金额对不上）
+    for _r in range(658, 665):
+        for _col in ("G", "I", "K"):
+            _f = ws_fee[f"{_col}{_r + n}"].value
+            if isinstance(_f, str) and ",1)" in _f:
+                ws_fee[f"{_col}{_r + n}"] = re.sub(
+                    r"ROUND\((.+?),1\)", r"ROUND(\1,2)", _f)
+    # 环评：模板链 B77(=G34→G17)→隐藏内插表(740-746)→C77:F77→×A78(行业系数)
+    # →D34。恢复活链接并对齐引擎口径：B77 写引擎静态总投资（G17=基数+建管费
+    # ≠引擎收敛总投资，且链总投资会成环）；C/D/E/F77 选中服务才链
+    # =H/J/L/N{746+n}，未选 0；D34='=ROUND((C78+D78+E78+F78)*敏感,2)'
+    # （引擎=Σ服务基准×行业×敏感、无模板 0.8 下浮；C78=ROUND(C77*A78,2)
+    # 模板公式保留自动联动）；E34=1（C34 依据文字自动渲染"下浮0%"）。
+    _hp_rr = orig.get("环境影响咨询费") or {}
+    _hp_sel = [s for s in (sem["service_selections"] or {}).get("环境影响咨询费", []) or []]
+    if not _hp_sel and isinstance(_hp_rr.get("明细"), list):
+        _hp_sel = [d.get("服务类型") for d in _hp_rr["明细"] if d.get("服务类型")]
+    _hp_sel = [s for s in _hp_sel if s in _HP_TABLE_INDEX] or ["编制报告书"]
+    _hp_sens = float((_hp_rr.get("参数") or {}).get("环境敏感程度系数") or 1.0)
+    for _d in (_hp_rr.get("明细") or []):
+        _aj = _d.get("调整系数明细") or {}
+        if _aj.get("敏感度系数") not in (None, 1.0):
+            _hp_sens = float(_aj["敏感度系数"])
+            break
     if "环境影响咨询费(万元)" in numerical:
-        if "环境影响咨询费" in co or abs(float(_fds.get("环境影响咨询费", 1.0) or 1.0) - 1.0) >= 0.005:
+        if ("环境影响咨询费" in co
+                or abs(float(_fds.get("环境影响咨询费", 1.0) or 1.0) - 1.0) >= 0.005):
             _setv(ws_fee, "D34", float(numerical["环境影响咨询费(万元)"] or 0))
+            for _c in ("C", "D", "E", "F"):
+                _setv(ws_fee, f"{_c}{77 + n}", None)
         else:
-            _hp_terms = []
-            for _d in (orig.get("环境影响咨询费") or {}).get("明细") or []:
-                _aj = _d.get("调整系数明细") or {}
-                _b = float(_d.get("基准价(万元)") or 0)
-                if _b:
-                    _hp_terms.append(
-                        f"{_b}*{float(_aj.get('行业系数') or 1)}*{float(_aj.get('敏感度系数') or 1)}")
-            if _hp_terms:
-                ws_fee["D34"] = "=ROUND(" + "+".join(_hp_terms) + ",2)"
+            _hp_kyx = (_hp_rr.get("参数") or {}).get("估算投资额(万元)")
+            _setv(ws_fee, f"B{77 + n}",
+                  float(_hp_kyx) if _hp_kyx is not None
+                  else float(sem["raw"].get("项目总投资(万元)") or 0))
+            for _svc, _col, _src in (("编制报告书", "C", "H"),
+                                     ("编制报告表", "D", "J"),
+                                     ("评估报告书", "E", "L"),
+                                     ("评估报告表", "F", "N")):
+                if _svc in _hp_sel:
+                    ws_fee[f"{_col}{77 + n}"] = f"={_src}{746 + n}"
+                else:
+                    _setv(ws_fee, f"{_col}{77 + n}", 0)
+            if abs(_hp_sens - 1.0) < 0.005:
+                ws_fee["D34"] = (f"=ROUND(C{78 + n}+D{78 + n}+E{78 + n}"
+                                 f"+F{78 + n},2)")
             else:
-                _setv(ws_fee, "D34", float(numerical["环境影响咨询费(万元)"] or 0))
+                ws_fee["D34"] = (f"=ROUND((C{78 + n}+D{78 + n}+E{78 + n}"
+                                 f"+F{78 + n})*{_hp_sens},2)")
         ws_fee["E34"] = 1.0
     else:
         _setv(ws_fee, "D34", 0)
+        for _c in ("C", "D", "E", "F"):
+            _setv(ws_fee, f"{_c}{77 + n}", None)
+    # 隐藏内插链 G/I/K 列 ROUND(...,1) → ROUND(...,2) 对齐引擎 2 位；
+    # 报告表/评估报告表档位 >10 亿封顶（引擎 7/2 万，模板旧标准延伸到 15-20/4.5-5）
+    for _r in range(740, 747):
+        for _col in ("G", "I", "K"):
+            _f = ws_fee[f"{_col}{_r + n}"].value
+            if isinstance(_f, str) and ",1)" in _f:
+                ws_fee[f"{_col}{_r + n}"] = re.sub(
+                    r"ROUND\((.+?),1\)", r"ROUND(\1,2)", _f)
+    for _r in (744, 745):
+        _setv(ws_fee, f"D{_r + n}", 7)
+        _setv(ws_fee, f"F{_r + n}", 2)
 
-    # ── 造价咨询：校验链 M 槽保留模板活公式（=IF($B$774<=B768,$B$774,0) 等
-    #    部分档位检测，B774=总概算表!G4 活值；插行后 openpyxl 已自动移位）。
-    #    此前误清 M 槽导致「不足整档」的顶档计费丢失（3000 万只算到 1000 万档，
-    #    1000~5000 档部分被丢）——不清即可，无需任何写入。
-    #    B118:I118 指校验链合计（8 服务全量），D30 = 8 项合计 ──
+    # ── 造价咨询：槽位 B118:I118（B清单/C标底/D编预算/E编结算/F全过程/
+    #    G审核概算/H审核预算标底/I审核结算）按引擎明细写静态值（未选 0）。
+    #    模板默认挂 774/782 隐藏校验链活公式，但引擎口径更权威（含折扣、
+    #    收敛基数），且 G118（审核概算，基数=总投资）必须静态切断 Excel 循环链
+    #    B775→J776:781→J782→G118→D30→D58→总概算表!F{11+k}→G{17+k}→B775
+    #    （openpyxl 保存的循环公式装载后不迭代，实测全链 #VALUE）。
+    #    可见子项行 31-33（模板固定 概算审查/标底编制/结算审核）按用户勾选
+    #    动态列出（31..30+m，名称=引擎服务类型，D=槽链接）：函数尾部按
+    #    Δ=m-3 插/删行并整体移位行≥34 引用，D30=SUM(D31:D{30+m})。
+    _cc_detail = (orig.get("造价咨询费") or {}).get("明细") or []
+    _cc_rows: list[tuple[str, str | None, float]] = []
     if "造价咨询费(万元)" in numerical or "造价咨询费" in co:
-        # 按程序中选择的服务子项写槽：未选服务置 0（模板 8 服务费率全默认，
-        # 不置 0 会把每一项都算进 D30）；未显式选择且非合同价时按区域默认
-        # 服务口径写槽（天津→编制施工图预算），与程序数值预览口径一致
-        _cc_svcs = {s for s in sem["cc_services"] if s in _COST_CONSULTING_RATES}
-        if not _cc_svcs and "造价咨询费" not in co:
-            _cc_svcs = set(FEE_CATALOG["造价咨询费"]["conf"]["default_tianjin"] or [])
-        _picked = {"BCDEFGHI"[_i]: _svc
-                   for _i, _svc in enumerate(_COST_CONSULTING_RATES.keys())
-                   if _svc in _cc_svcs}
-        for _col, _src_col in zip("BCDEFGHI", "EFGHIJKL"):
-            if _picked and _col not in _picked:
-                ws_fee[f"{_col}{118 + n}"] = 0
-            else:
-                ws_fee[f"{_col}{118 + n}"] = f"=ROUND({_src_col}{782 + n},2)"
-        ws_fee["D30"] = "=SUM(B118:I118)".replace(
-            "B118:I118", f"B{118 + n}:I{118 + n}")
-        # 审核概算（J 列）计费基数 = 工程总投资：模板 B775==G15（建管费基数）
-        # 与计费口径不符。审核概算槽 G118 改写为引擎静态值（与引擎 CC 循环
-        # 同源的 calc_cost_consulting，基数=引擎收敛总投资）→ 切断 Excel 循环链
-        # B775→J776:781→J782→G118→D30→D58→总概算表!F{11+k}→G{17+k}→B775，
-        # 使 B775 可以安全活链接总投资行：B775==G23 恒成立且无需迭代计算
-        # （openpyxl 保存的循环公式 Excel 装载后不迭代，实测全链 #VALUE）。
-        if "审核概算" in _cc_svcs and "造价咨询费" not in co:
-            _sh_total = float(sem["raw"].get("项目总投资(万元)")
-                              or evaluate_excel_semantics(sem).get("总投资") or 0)
-            _sh = float((calc_cost_consulting(
-                sem["p1"], "审核概算", jianan_only=sem["jianan"],
-                total_investment=_sh_total) or {}).get("结果(万元)") or 0)
-            _setv(ws_fee, f"G{118 + n}", round(_sh, 4))
-            _setv(ws_fee, f"B{775 + n}", f"=总概算表!G{17 + k}")
-        elif "造价咨询费" in co:
-            # 合同价：引擎无服务拆分 → 槽位清零、D30 写合同额（不拆分展示，
-            # 面板与导出一致）；G118/D30 均为静态 → J 链无下游，B775 活链接
-            # 总投资行无循环引用，与其他分支一致恒成立 B775==G23
+        if "造价咨询费" in co:
+            # 合同价：引擎无服务拆分 → 槽位清零、D30 写合同额、子项行删除
+            # （尾部 Δ=-3）；G118/D30 静态 → J 链无下游，B775 活链接总投资
+            # 行无循环引用，与其他分支一致恒成立 B775==G23
             for _col in "BCDEFGHI":
                 ws_fee[f"{_col}{118 + n}"] = 0
             ws_fee["D30"] = float(numerical.get("造价咨询费(万元)") or 0)
-            _setv(ws_fee, f"B{775 + n}", f"=总概算表!G{17 + k}")
         else:
-            # 审核概算未选 → G118=0（上循环已写），J 链无下游；B775 活链接
-            # 总投资行仍保证 B775==G23（无循环，Excel 装载可正常重算）
-            _setv(ws_fee, f"B{775 + n}", f"=总概算表!G{17 + k}")
+            # 明细即引擎最终口径（CC 循环 25 轮收敛后写入 原始结果）；
+            # 按服务类型经 _TJ_CC_SERVICES 关键字映射到槽位（未匹配→子项行
+            # 直接写静态值）。注意：折扣补乘只乘 numerical 合计、不回写明细
+            # → 此处按各服务费用 × 折扣补齐（Σ(逐项×折扣) == 合计×折扣）。
+            _cc_disc = float(_fds.get("造价咨询费", 1.0) or 1.0)
+            for _d in _cc_detail:
+                _svc = str(_d.get("服务类型") or "")
+                _slot = next((_c for _kw, _c in _TJ_CC_SERVICES if _kw in _svc),
+                             None)
+                _cc_rows.append(
+                    (_svc, _slot,
+                     round(float(_d.get("费用(万元)") or 0) * _cc_disc, 4)))
+            for _col in "BCDEFGHI":
+                _hit = next((_v for _s, _c, _v in _cc_rows
+                             if _c is not None and _c[0] == _col), None)
+                _setv(ws_fee, f"{_col}{118 + n}", 0 if _hit is None else _hit)
+            # D30 与子项行在尾部插/删行后写入（行号随 Δ=m-3 变）
+        _setv(ws_fee, f"B{775 + n}", f"=总概算表!G{17 + k}")
     else:
         for _col in "BCDEFGHI":
             ws_fee[f"{_col}{118 + n}"] = 0
         ws_fee["D30"] = 0
-        # 无造价咨询 → G118=0 无循环；B775 同样活链接总投资行（恒 B775==G23）
+        # 无造价咨询 → G118=0 无循环、子项行删除（尾部 Δ=-3）；B775 同样
+        # 活链接总投资行（恒 B775==G23）
         _setv(ws_fee, f"B{775 + n}", f"=总概算表!G{17 + k}")
 
     # ── 其他费用计算表：自定义费插行（合计行之前）──
@@ -10434,6 +10578,35 @@ def _build_excel_summary_tianjin(ctx: dict, part1_rows=None,
         _setv(ws_duibi, _ref, None)
     _setv(ws_zd, "D3", None)
     _setv(ws_zd, "E3", None)
+
+    # ── 造价咨询子项行按勾选动态化（Δ=m-3：插/删行 + 行≥34 引用整体移位）──
+    # m>3 在行 34 插 m-3 行（子项行 31..30+m 连续）；m<3 删 31+m..33 行。
+    # 槽位随移位落在 118+n+Δ（Δ=m-3 三态通用），D30=SUM(D31:D{30+m})。
+    _cc_delta = len(_cc_rows) - 3
+    if _cc_delta > 0:
+        _tj_insert_rows(ws_fee, 34, _cc_delta)
+    elif _cc_delta < 0:
+        _tj_delete_rows(ws_fee, 31 + len(_cc_rows), -_cc_delta)
+    if _cc_delta:
+        _tj_shift_refs(wb, [("其他费用计算表", 34, _cc_delta)])
+    if _cc_rows:
+        _slot_row = 118 + n + _cc_delta
+        for _i, (_svc, _slot, _val) in enumerate(_cc_rows, start=1):
+            _r = 30 + _i
+            if _r > 33:   # 插出的新行补样式/编号/依据/备注（模板行 31-33 已有）
+                _copy_row_style(ws_fee, 32, _r, range(1, 10))
+                ws_fee[f"A{_r}"] = f"=A{_r - 1}+0.1"
+                ws_fee[f"C{_r}"] = "天津市造价咨询服务项目和价格标准"
+                ws_fee[f"H{_r}"] = "天津地方取费标准"
+                ws_fee[f"I{_r}"] = "可删除行"
+            ws_fee[f"B{_r}"] = _svc
+            if _slot:
+                ws_fee[f"D{_r}"] = f"={_slot[0]}{_slot_row}"
+            else:
+                _setv(ws_fee, f"D{_r}", _val)
+        ws_fee["D30"] = f"=SUM(D31:D{30 + len(_cc_rows)})"
+    elif "造价咨询费(万元)" in numerical and "造价咨询费" not in co:
+        ws_fee["D30"] = 0
 
     # 无循环引用（审核概算槽 G118 静态切断 B775 循环链），无需迭代设置；
     # 打开文件时 Excel 全量重算（公式无缓存值，acyclic 链可正常收敛）
@@ -11227,6 +11400,19 @@ def _build_excel_summary_legacy(ctx: dict, summary_rows=None,
                  sum_name="SUM_SB_BC_F", group="sb")
         _sb_sum_names.append("SUM_SB_BC_F")
 
+    # ── 设计费附加项单独计算（施工图预算编制费 10% / 竣工图编制费 8%）──
+    # 用户勾选「单独计算」才列出；I 列活链接 =ROUND(设计费行I×比例,4)，改设计费自动跟随。
+    _sep = ctx.get("sheji_extra_separate") or {}
+    for _nm, _rt in (("施工图预算编制费", 0.1), ("竣工图编制费", 0.08)):
+        if _sep.get(_nm):
+            _pend_rows.append({
+                "name": _nm,
+                "i_formula": f"=ROUND(I{{DESIGN}}*{_rt},4)",
+                "note": f"单独计算：设计费×{_rt:g}（用户勾选）",
+                "basis": "计价格[2002]10号 1.0.16",
+                "sum_name": None, "group": None,
+            })
+
     # ── 按参考总概算表顺序统一落格（无对应项的费种排在最后）──
     def _p2_key(pr: dict) -> int:
         nm = pr.get("name")
@@ -11254,7 +11440,13 @@ def _build_excel_summary_legacy(ctx: dict, summary_rows=None,
                 _set(ws_sum, f"I{r}", _pr["i_static"], F_HEAD_REF, FILL_INPUT,
                      FMT_MONEY, align=AL_C)
             else:
-                _set(ws_sum, f"I{r}", _pr["i_formula"], F_HEAD_REF,
+                _form = _pr.get("i_formula")
+                if isinstance(_form, str) and "{DESIGN}" in _form:
+                    # 设计费附加项行：活链接到「工程设计费」行 I 格（该行必先落格）
+                    _dr = rowref.get("工程设计费")
+                    _form = (_form.replace("{DESIGN}", str(_dr))
+                             if _dr is not None else None)
+                _set(ws_sum, f"I{r}", _form, F_HEAD_REF,
                      fmt=FMT_MONEY, align=AL_C)
             _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF, fmt=FMT_MONEY,
                  align=AL_C)
@@ -12154,12 +12346,14 @@ def _build_excel_summary_tianjin_per_item(ctx: dict, zhuan_ye: list) -> bytes:
         per.append((_i, _nm, [p for p in _tj_merge_professions([_g])
                               if p.get("filled")]))
     _k = max(0, max(len(zhuan_ye),
-                    max(len(_p) for _p in per)) - 6)
-    _part1 = [{"label": _nm, "c_link": f"='单项{_i}'!G4"}
+                    max(len(_p[2]) for _p in per)) - 6)
+    _part1 = [{"label": _nm, "c_link": f"='单项{_i}'!C4",
+               "d_link": f"='单项{_i}'!D4", "e_link": f"='单项{_i}'!E4"}
               for _i, _nm in enumerate(labels, start=1)]
     _bytes = _build_excel_summary_tianjin(ctx, part1_rows=_part1, k=_k)
     wb = load_workbook(io.BytesIO(_bytes))
     ws = wb["总概算表"]
+    from copy import copy as _copy_st
     for _i, _nm, _prows in per:
         _ws = _copy_sheet(ws, wb, f"单项{_i}")
         _ws["A1"] = f"  工程名称：{_nm}"
@@ -12167,15 +12361,29 @@ def _build_excel_summary_tianjin_per_item(ctx: dict, zhuan_ye: list) -> bytes:
             _r = 5 + _idx
             if _idx < len(_prows):
                 _pr = _prows[_idx]
+                _ws[f"A{_r}"] = str(_idx + 1)   # 覆盖模板序号链/汇总表序号残留
                 _ws[f"B{_r}"] = _pr["name"]
                 _ws[f"C{_r}"] = _pr["c"] if _pr["c"] > 0 else None
                 _ws[f"D{_r}"] = _pr["d"] if _pr["d"] > 0 else None
                 _ws[f"E{_r}"] = _pr["e"] if _pr["e"] > 0 else None
+                if _r > 10:   # 插出来的行：补 G 合计公式 + 模板专业行样式
+                    _ws[f"G{_r}"] = f"=SUM(C{_r}:F{_r})"
+                    for _ci in range(1, 15):
+                        _s = _ws.cell(row=10, column=_ci)
+                        _d = _ws.cell(row=_r, column=_ci)
+                        _d.font = _copy_st(_s.font)
+                        _d.fill = _copy_st(_s.fill)
+                        _d.border = _copy_st(_s.border)
+                        _d.alignment = _copy_st(_s.alignment)
+                        _d.number_format = _s.number_format
             else:
+                _ws[f"A{_r}"] = None
                 _ws[f"B{_r}"] = None
                 _ws[f"C{_r}"] = None
                 _ws[f"D{_r}"] = None
                 _ws[f"E{_r}"] = None
+                if _r > 10:
+                    _ws[f"G{_r}"] = None
         _truncate_part2(_ws, "本表仅含该单项第一部分工程费用；"
                              "第二部分费用/预备费/总投资见「总概算表」"
                              "（项目汇总表）。")

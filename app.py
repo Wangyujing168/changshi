@@ -234,6 +234,8 @@ def _render_pdf_import_page():
             st.error("未识别到「单位工程造价汇总表」或「工程费用汇总表」，请确认是广联达软件导出的报表。")
             st.stop()
         st.session_state.pdf_up_id = up.file_id
+        # 新 PDF：清除上一次的导出方式选择（radio 按当前解析结果重新显示）
+        st.session_state.pop("pdf_split_mode", None)
         st.session_state.pdf_rows = [
             {"组号": l["group_no"], "组名": "", "专业": l["zhuanye"], "节": l["jie"],
              "细目": l["ximu"], "造价(万元)": l["amount_wan"],
@@ -297,14 +299,21 @@ def _render_pdf_import_page():
                 f"（其中设备费 {dev_tot:,.2f} 万元）**")
 
     if len(groups) > 1:
-        st.radio(
+        _split_opts = ["同一概算表拆项", "每单项单独一张概算表"]
+        _mode = st.radio(
             "概算表导出方式（多项工程）",
-            ["同一概算表拆项", "每单项单独一张概算表"],
-            key="split_mode", horizontal=True,
+            _split_opts,
+            index=(_split_opts.index(st.session_state["pdf_split_mode"])
+                   if st.session_state.get("pdf_split_mode") in _split_opts else 0),
+            horizontal=True,
             help="方式一：所有单项列在同一张概算表中（按单项 1/1.1/2/2.1 拆项列示）；"
                  "方式二：每个单项单独一张概算表（只含该单项第一部分工程费），"
                  "另附「项目汇总表」；二类费/预备费/总投资均按项目整体计算。",
         )
+        # 镜像到普通 session_state 键：radio 只在 PDF 导入页渲染，跳转到结果页后
+        # Streamlit 会清理未渲染 widget 的状态（带 key 的 widget 状态会丢），
+        # 普通键不会被清理，导出时从这里读
+        st.session_state["pdf_split_mode"] = _mode
 
     c1, c2 = st.columns(2)
     with c1:
@@ -810,6 +819,19 @@ CASE_ITEMS = [
      "file": "案例_东盛大道全过程咨询.md"},
 ]
 
+# 正面案例模板节序（2026-11 起按《建设项目造价专业正反案例模板》重设计）：
+# 基本信息/案例摘要/项目与背景/面临的问题或挑战/措施与做法/实施成效/
+# 经验总结 突出展示；推广应用建议/主要依据/附件清单/关键指标 折叠查看。
+_CASE_MAIN_SECTIONS = [
+    ("基本信息", None),
+    ("案例摘要", "📝 案例摘要"),
+    ("项目与背景", "🏗️ 项目与背景"),
+    ("面临的问题或挑战", "🧩 面临的问题或挑战"),
+    ("措施与做法", "🛠️ 措施与做法"),
+    ("实施成效", "✅ 实施成效"),
+    ("经验总结", "💡 经验总结"),
+]
+
 
 def _parse_case_md(path) -> dict:
     """解析案例 md：按 ## 分节，返回 {'title': 主标题, 小节名: 内容}。"""
@@ -827,9 +849,37 @@ def _parse_case_md(path) -> dict:
     return result
 
 
+def _case_type_of(sections: dict) -> str:
+    """从基本信息表提取案例类型：'正面' / '反面' / ''（未标注）。"""
+    for line in (sections.get("基本信息") or "").splitlines():
+        if "案例类型" not in line:
+            continue
+        if "正面" in line:
+            return "正面"
+        if "反面" in line:
+            return "反面"
+    return ""
+
+
+def _case_type_badge(sections: dict) -> str:
+    """案例类型小标题徽标 HTML（正面绿色/反面红色），未标注时返回空串。"""
+    _t = _case_type_of(sections)
+    if _t == "正面":
+        return ('<span style="background:#e8f5e9;color:#2e7d32;'
+                'padding:2px 10px;border-radius:12px;font-size:0.85rem;'
+                'font-weight:600;">📗 正面案例</span>')
+    if _t == "反面":
+        return ('<span style="background:#fdecea;color:#c62828;'
+                'padding:2px 10px;border-radius:12px;font-size:0.85rem;'
+                'font-weight:600;">📕 反面案例</span>')
+    return ""
+
+
 def _render_case_page(case_key: str):
-    """正反项目案例页：项目简介 + 经验总结 + 值得注意的点 + 关键指标 突出展示，
-    其余培训内容折叠；底部围绕本案例提问（本案例优先检索，查不到回退全库）。"""
+    """正反项目案例页：按正反案例模板展示——基本信息表 + 案例摘要 + 项目与背景 +
+    面临的问题或挑战 + 措施与做法 + 实施成效 + 经验总结 突出展示；
+    推广应用建议/主要依据/附件清单/关键指标 折叠；
+    底部围绕本案例提问（本案例优先检索，查不到回退全库）。"""
     item = next((c for c in CASE_ITEMS if c["key"] == case_key), None)
     if item is None:
         st.session_state.active_case = None
@@ -843,26 +893,24 @@ def _render_case_page(case_key: str):
     st.header(item["short"])
 
     sections = _parse_case_md(CASE_BASE_DIR / item["file"])
+    badge = _case_type_badge(sections)
+    if badge:
+        st.markdown(badge, unsafe_allow_html=True)
     if sections.get("title"):
         st.caption(sections["title"])
 
-    curated = {n: sections.get(n, "") for n in
-               ("项目简介", "经验总结", "值得注意的点", "关键指标")}
-    if curated["项目简介"]:
-        st.markdown(curated["项目简介"])
-    if curated["经验总结"]:
-        st.markdown("### 💡 经验总结")
-        st.markdown(curated["经验总结"])
-    if curated["值得注意的点"]:
-        st.markdown("### ⚠️ 值得注意的点")
-        st.markdown(curated["值得注意的点"])
-    if curated["关键指标"]:
-        st.markdown("### 📊 关键指标")
-        st.markdown(curated["关键指标"])
+    main_names = {n for n, _ in _CASE_MAIN_SECTIONS}
+    for name, header in _CASE_MAIN_SECTIONS:
+        content = sections.get(name, "")
+        if not content:
+            continue
+        if header:
+            st.markdown(f"### {header}")
+        st.markdown(content)
 
-    rest = [(t, c) for t, c in sections.items() if t not in curated and t != "title"]
+    rest = [(t, c) for t, c in sections.items() if t not in main_names and t != "title"]
     if rest:
-        with st.expander("📖 查看完整培训内容"):
+        with st.expander("📖 查看推广应用建议与依据材料"):
             for t, c in rest:
                 st.markdown(f"#### {t}")
                 st.markdown(c)
@@ -1729,6 +1777,7 @@ def _clear_card_overrides(ctx: dict, card: dict):
     kind = card["kind"]
     if kind == "coef":
         ctx.get("coef_overrides", {}).pop(fn, None)
+        ctx.pop("sheji_extra_separate", None)  # 附加项默认=不单独计算
     elif kind == "rate":
         ctx.get("rate_overrides", {}).pop(fn, None)
     elif kind == "service":
@@ -1755,8 +1804,9 @@ def _ask_params(ctx: dict):
         ctx["params_done"] = True
         st.rerun()
     pidx = min(ctx.get("param_idx", 0), len(cards) - 1)
-    if ctx.get("_ai_fallback") and not ctx.pop("_params_back", False):
-        # AI 模式降级而来：已填过的参数卡不再重问，顺延到第一个未填卡
+    if ctx.get("_ai_fallback") and ctx.pop("_params_seek", False):
+        # AI 模式降级而来：仅首次顺延定位到第一张未填卡；之后逐张显示
+        # （已填卡保留原值、确认即过），编号连续不跳号
         while pidx < len(cards) and question_done(ctx, _card_qkey(cards[pidx])):
             pidx += 1
         if pidx >= len(cards):
@@ -1765,7 +1815,10 @@ def _ask_params(ctx: dict):
         ctx["param_idx"] = pidx
     card = cards[pidx]
     label = FEE_CATALOG.get(card["fee"], {}).get("label", card["fee"])
-    st.markdown(f"### ⚙️ 参数设置（{pidx + 1}/{len(cards)}）")
+    if question_done(ctx, _card_qkey(card)):
+        st.markdown(f"### ⚙️ 参数设置（{pidx + 1}/{len(cards)}）· 已设置")
+    else:
+        st.markdown(f"### ⚙️ 参数设置（{pidx + 1}/{len(cards)}）")
     st.caption(f"当前费种：{label}")
 
     kind = card["kind"]
@@ -1811,9 +1864,12 @@ def _ask_params(ctx: dict):
     if pidx > 0:
         if st.button("⬅ 上一项参数（返回修改上一个费种的设置）",
                      key=f"ck_params_prev_{qno}", use_container_width=True):
-            if ctx.get("_ai_fallback"):
-                ctx["_params_back"] = True  # 降级模式允许回看已填卡（不做跳过）
-            ctx["param_idx"] = pidx - 1
+            # 回退目标 = 上一个费种：跳过同费种相邻卡（如环评 service→coef），
+            # 与按钮文案「返回修改上一个费种的设置」一致；已填卡保留原值显示
+            target = pidx - 1
+            while target > 0 and cards[target]["fee"] == card["fee"]:
+                target -= 1
+            ctx["param_idx"] = target
             ctx["qno"] = qno + 1
             st.rerun()
 
@@ -1863,6 +1919,22 @@ def _ask_coef_card(ctx: dict, card: dict, qno: int):
             key=f"ck_coef_{fee_name}_{param_name}_custom_{qno}")
         if abs(custom_val - default_custom) > 0.001:
             fee_overrides[param_name] = custom_val
+
+    # 设计费附加项单独计算（所有省份提问；天津模板两行按勾选计取/置零）
+    # 渲染不写 ctx，确认时由 _commit_coef_extras 提交（防 AI 模式提问一闪而过）
+    if fee_name == "工程设计费":
+        st.markdown("---")
+        st.markdown("**设计费附加项**（计价格[2002]10号 1.0.16，默认不单独计算）")
+        st.caption("施工图预算编制费=设计费×10%；竣工图编制费=设计费×8%。"
+                   "不勾选则不计取。")
+        st.checkbox("单独计算施工图预算编制费（设计费×10%）",
+                    value=bool((ctx.get("sheji_extra_separate") or {})
+                               .get("施工图预算编制费")),
+                    key=f"ck_sjext_ys_{qno}")
+        st.checkbox("单独计算竣工图编制费（设计费×8%）",
+                    value=bool((ctx.get("sheji_extra_separate") or {})
+                               .get("竣工图编制费")),
+                    key=f"ck_sjext_jg_{qno}")
 
 
 def _ask_linear_rate_card(ctx: dict, card: dict, qno: int):
@@ -2165,10 +2237,27 @@ def _commit_spec_card(ctx: dict, card: dict, qno: int):
     ctx.setdefault("spec_params", {})[fn] = params
 
 
+def _commit_coef_extras(ctx: dict, card: dict, qno: int):
+    """系数卡确认时提交「设计费附加项单独计算」勾选（所有省份渲染）。"""
+    if card["fee"] != "工程设计费":
+        return
+    _cb1 = st.session_state.get(f"ck_sjext_ys_{qno}")
+    _cb2 = st.session_state.get(f"ck_sjext_jg_{qno}")
+    if _cb1 is None and _cb2 is None:
+        return  # 未渲染该卡（如旧 qno 残留）→ 不动
+    if _cb1 or _cb2:
+        ctx["sheji_extra_separate"] = {
+            "施工图预算编制费": bool(_cb1),
+            "竣工图编制费": bool(_cb2),
+        }
+    else:
+        ctx.pop("sheji_extra_separate", None)  # 都不勾 = 不计算（默认）
+
+
 def _commit_card_widgets(ctx: dict, card: dict, qno: int):
     """确认按钮统一提交：把卡内控件当前值写入 ctx（各卡唯一写入点）。
 
-    服务/施工图审查/水保补偿/spec 四类卡渲染时不再写 ctx（防渲染即写
+    服务/施工图审查/水保补偿/spec/coef 卡渲染时不再写 ctx（防渲染即写
     默认值导致 AI 模式提问一闪而过），只在用户点确认时在这里提交。
     """
     kind = card["kind"]
@@ -2180,6 +2269,8 @@ def _commit_card_widgets(ctx: dict, card: dict, qno: int):
         _commit_shuibao_comp_card(ctx, card, qno)
     elif kind == "spec":
         _commit_spec_card(ctx, card, qno)
+    elif kind == "coef":
+        _commit_coef_extras(ctx, card, qno)
 
 
 def _ask_discount(ctx: dict):
@@ -2323,10 +2414,28 @@ def _ai_record_answer(ctx: dict, text: str, answer: str):
     rounds[-1]["qa"].append({"text": text, "answer": answer})
 
 
+_FREE_PARAM_BUNDLE_RE = re.compile(r"参数|系数|费率|服务类型|口径|档位")
+_FREE_BUNDLE_TONE_RE = re.compile(r"请补充|请填写|请提供|请逐项|逐项|各费种|一并|一次性|打包")
+
+
+def _free_param_bundle(text: str) -> bool:
+    """free 问题是否在打包让用户整段填写参数（LLM 绕过 card: 键的坏行为）。
+
+    用户尚未选择参数时，这类「请逐项填写各费种参数…」会被改写为选项卡卡；
+    用户选择完成后 AI 对已填值的确认/澄清提问（「是否确认…」等）不算打包，
+    予以保留——先选项卡选择，有疑问再提问。
+    """
+    return bool(_FREE_PARAM_BUNDLE_RE.search(text)
+                and _FREE_BUNDLE_TONE_RE.search(text))
+
+
 def _ai_remaining(plan: dict, ctx: dict) -> list[dict]:
     answered = ctx.get("_ai_answered") or []
+    # force：回看已填参数卡（⬅ 返回上一参数设置构造）→ 绕过 question_done
+    # 的「已填不重问」过滤，但仍受 answered 控制（确认后正常消失）
     return [q for q in plan.get("questions") or []
-            if q.get("key") not in answered and not question_done(ctx, q.get("key"))]
+            if q.get("key") not in answered
+            and (q.get("force") or not question_done(ctx, q.get("key")))]
 
 
 def _ai_mark_done(ctx: dict, key: str, text: str, answer: str):
@@ -2461,7 +2570,12 @@ def _ai_card_answer_text(ctx: dict, card: dict) -> str:
             v = ctx.get("rate_overrides", {}).get("施工图审查费" if kind == "shencha" else fee)
             return f"{label}：{v}"
         if kind == "coef":
-            return f"{label}：{ctx.get('coef_overrides', {}).get(fee)}"
+            _ans = f"{label}：{ctx.get('coef_overrides', {}).get(fee)}"
+            _sep = ctx.get("sheji_extra_separate") or {}
+            _sep_txt = "、".join(_nm for _nm, _on in _sep.items() if _on)
+            if _sep_txt:
+                _ans += f"；单独计算：{_sep_txt}"
+            return _ans
         if kind == "service":
             sv = ctx.get("service_selections", {}).get(fee) or ["默认"]
             return f"{label}：{'、'.join(sv)}"
@@ -2474,14 +2588,61 @@ def _ai_card_answer_text(ctx: dict, card: dict) -> str:
     return f"{label}已设置"
 
 
+_AI_KIND_LABEL = {
+    "coef": "系数设置", "rate": "费率档位", "shencha": "施工图审查档位",
+    "service": "服务类型", "party": "计费方", "yubei_include": "预备费是否考虑",
+    "yubei_rate": "预备费率", "shuibao_comp": "水土保持补偿费参数",
+    "spec": "参数设置",
+}
+
+
+def _ai_back_prev_fee(ctx: dict, card: dict):
+    """AI 卡界面「⬅ 返回上一参数设置」：机械回退到上一个费种的第一张参数卡。
+
+    不依赖 AI 重新规划、不清除已填参数：直接构造「回看」plan 强制渲染
+    上一费种卡（已填值原样保留作默认，用户可确认可修改），卡自带返回
+    按钮，可连续逐级回退到第一个费种。
+    """
+    cards = param_cards_for(ctx)
+    cur_idx = next((i for i, c in enumerate(cards)
+                    if c["kind"] == card["kind"] and c["fee"] == card["fee"]), None)
+    prev_fee = None
+    if cur_idx is not None:
+        for c in reversed(cards[:cur_idx]):
+            if c["fee"] != card["fee"]:
+                prev_fee = c["fee"]
+                break
+    if prev_fee is None:
+        st.toast("已经是第一个费种，没有更早的参数设置。")
+        return
+    label = FEE_CATALOG.get(prev_fee, {}).get("label", prev_fee)
+    first = next(c for c in cards if c["fee"] == prev_fee)
+    key = _card_qkey(first)
+    kind_label = _AI_KIND_LABEL.get(first["kind"], first["kind"])
+    plan = {"think": f"返回查看{label}参数",
+            "questions": [{"type": "buttons", "key": key, "force": True,
+                           "text": f"{label}—{kind_label}"}]}
+    ctx["_ai_plan"] = plan
+    ctx["_ai_plan_region"] = ctx.get("region")
+    ctx["_ai_answered"] = []
+    ctx["_ai_dirty"] = False
+    ctx.setdefault("_ai_rounds", []).append({"think": plan["think"], "qa": []})
+    ctx["qno"] = ctx.get("qno", 1) + 1
+    st.toast(f"已返回{label}参数设置（已填选项保留，可直接确认或修改）。")
+    st.rerun()
+
+
 def _ai_render_card_question(ctx: dict, q: dict, qno: int):
     card = _ai_parse_card_key(q["key"])
     renderer = _CARD_RENDERERS.get(card["kind"])
     if renderer is None:  # party 走按钮控件；未知 kind 兜底
         _ai_render_buttons(ctx, q, qno)
+        if st.button("⬅ 返回上一参数设置", key=f"ai_card_back_{q['key']}_{qno}",
+                     use_container_width=True):
+            _ai_back_prev_fee(ctx, card)
         return
     renderer(ctx, card, qno)
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("✅ 已设置，继续", key=f"ai_card_ok_{q['key']}_{qno}",
                      use_container_width=True):
@@ -2492,6 +2653,10 @@ def _ai_render_card_question(ctx: dict, q: dict, qno: int):
                      use_container_width=True):
             _clear_card_overrides(ctx, card)
             _ai_mark_done(ctx, q["key"], q["text"], "用默认值")
+    with c3:
+        if st.button("⬅ 返回上一参数设置", key=f"ai_card_back_{q['key']}_{qno}",
+                     use_container_width=True):
+            _ai_back_prev_fee(ctx, card)
 
 
 def _ai_render_fees_question(ctx: dict, q: dict, qno: int):
@@ -2633,8 +2798,10 @@ def _ai_fallback(ctx: dict, msg: str):
     ctx["_ai_fallback"] = True
     ctx["_ai_fallback_msg"] = msg
     # AI 模式卡内按钮曾调用 _params_advance 污染过 param_idx/params_done，
-    # 这里复位：传统清单从参数卡起点重走（已填卡由 _ask_params 跳过）
+    # 这里复位：传统清单从参数卡起点重走；_params_seek 让 _ask_params
+    # 仅首次顺延到第一张未填卡，之后逐张显示（编号连续不跳号）
     ctx["param_idx"] = 0
+    ctx["_params_seek"] = True
     ctx["params_done"] = False
     st.rerun()
 
@@ -2672,6 +2839,23 @@ def _ask_ai_guide(ctx: dict):
                 plan = run_planner(build_ctx_summary(ctx, avail), avail)
         except PlannerError:
             _ai_fallback(ctx, "AI 引导暂时不可用（接口异常），已切换为传统清单模式。")
+        # free 参数打包问题（如「请逐项填写各费种参数…」）→ 改写为第一个
+        # 未填参数卡：参数始终以选项卡卡片逐项提问，不整段打包让用户自由填写
+        _avail2 = available_keys(ctx)
+        _avail_desc = dict(_avail2)
+        _first_card_key = next((k for k, _ in _avail2 if k.startswith("card:")), None)
+        _qs, _seen = [], set()
+        for _q in plan.get("questions") or []:
+            if (_q.get("key") == "free" and _first_card_key is not None
+                    and _free_param_bundle(_q.get("text") or "")):
+                _q["key"] = _first_card_key
+                _q["type"] = "buttons"
+                _q.pop("unit", None)
+                _q["text"] = _avail_desc[_first_card_key]
+            if _q["key"] not in _seen:
+                _seen.add(_q["key"])
+                _qs.append(_q)
+        plan["questions"] = _qs
         ctx["_ai_plan"] = plan
         ctx["_ai_plan_region"] = ctx.get("region")
         ctx["_ai_answered"] = []
@@ -2688,6 +2872,8 @@ def _ask_ai_guide(ctx: dict):
     # 完成标志与问答记录，避免同一费种参数在重规划或降级时被重复提问
     for q in plan.get("questions") or []:
         key = q.get("key") or ""
+        if q.get("force"):
+            continue  # 回看卡：强制渲染已填卡，不补记（补记会被 answered 过滤掉）
         if key not in (ctx.get("_ai_answered") or []) and question_done(ctx, key):
             ctx.setdefault("_ai_answered", []).append(key)
             if key.startswith("card:"):
@@ -2965,6 +3151,17 @@ def _render_result_payload(ctx: dict):
                 st.markdown(f"- {e.get('名称') or e.get('name')}："
                             f"{e.get('金额(万元)') or e.get('amount_wan')} 万元")
 
+        # 设计费附加项单独计算（非天津勾选才出现）
+        _sep_lines = []
+        for _nm, _lab in (("施工图预算编制费", "施工图预算编制费（设计费×10%）"),
+                          ("竣工图编制费", "竣工图编制费（设计费×8%）")):
+            _v = numerical.get(f"{_nm}(万元)")
+            if _v:
+                _sep_lines.append(f"- {_lab}：{_v} 万元")
+        if _sep_lines:
+            st.markdown("**设计费附加项（单独计算）**：")
+            st.markdown("\n".join(_sep_lines))
+
         # 各费种计算过程（复用 _render_engine_card 统一步骤格式，零改动）
         raw = preview.get("raw", {}).get("原始结果", {})
         with st.expander("查看各费种详细计算步骤", expanded=False):
@@ -2980,6 +3177,10 @@ def _render_result_payload(ctx: dict):
             if sb:
                 st.markdown("#### 水土保持补偿费")
                 _render_engine_card(sb)
+            _sep_rr = raw.get("设计费附加项")
+            if _sep_rr:
+                st.markdown("#### 设计费附加项（单独计算）")
+                _render_engine_card(_sep_rr)
 
         # 折扣情景对比（结算后按需生成，缓存防重复计算）
         if ctx.get("_discount_scenarios"):
@@ -2998,14 +3199,15 @@ def _render_result_payload(ctx: dict):
                     "discounts": ctx.get("discounts"),
                     "zhuan_ye": st.session_state.get("zhuan_ye_list"),
                     "zhengchai_separate": ctx.get("zhengchai_separate", False),
+                    "sheji_extra_separate": ctx.get("sheji_extra_separate"),
                     "split_mode": ("per_item"
-                                   if st.session_state.get("split_mode")
+                                   if st.session_state.get("pdf_split_mode")
                                    == "每单项单独一张概算表"
                                    and len(st.session_state.get("zhuan_ye_list") or []) > 1
                                    else "one_sheet"),
                 })
                 _is_tj = str(ctx.get("region") or DEFAULT_REGION) == "天津"
-                _per_item = (st.session_state.get("split_mode")
+                _per_item = (st.session_state.get("pdf_split_mode")
                              == "每单项单独一张概算表"
                              and len(st.session_state.get("zhuan_ye_list") or []) > 1)
                 # 文件名随所选省份：XX-总概算表（如 天津-总概算表.xlsx）
@@ -3171,8 +3373,8 @@ with st.sidebar:
     # 避免零高度 iframe 挤在勾选框与说明块之间撑大间距）：
     # 1) 把「概算助手」等导航标题的实际字号/行高/颜色复制到「智能问答」勾选框文字上；
     # 2) 等整页渲染完（案例按钮在本 iframe 之后才出现，轮询等待），量出
-    #    「智能问答→子项说明」与「正反项目案例→首个案例按钮」两个实际间距，
-    #    把差值补偿到首个案例按钮容器上，使两者完全一致；
+    #    「智能问答→子项说明」与「正反项目案例→案例类型小标题」两个实际间距，
+    #    把差值补偿到小标题容器上，使两者完全一致；
     # 3) 量出相邻案例按钮的实际行距，设到子项说明块 line-height 上，
     #    使说明块三行子项之间的间距与案例按钮子项间距一致
     components.html(
@@ -3183,8 +3385,9 @@ with st.sidebar:
         "const _p = _d.querySelector('[data-testid=\"stSidebar\"] [data-testid=\"stCheckbox\"] label p');"
         "const _desc = _d.querySelector('[data-testid=\"stSidebar\"] [data-testid=\"stMarkdownContainer\"] div[style*=\"0.875rem\"]');"
         "const _caseLi = Array.from(_d.querySelectorAll('[data-testid=\"stSidebar\"] li')).find(function(x){return x.textContent.indexOf('正反项目案例')>=0;});"
+        "const _head = _d.querySelector('[data-testid=\"stSidebar\"] [data-testid=\"stMarkdownContainer\"] div[style*=\"--case-typetag\"]');"
         "const _btn = _d.querySelector('[data-testid=\"stSidebar\"] [data-testid^=\"stBaseButton-primary\"]');"
-        "if (!(_li && _p && _desc && _caseLi && _btn)) { if (_n < 50) setTimeout(function(){_fit(_n+1);}, 100); return; }"
+        "if (!(_li && _p && _desc && _caseLi && _head && _btn)) { if (_n < 50) setTimeout(function(){_fit(_n+1);}, 100); return; }"
         "const _cs = getComputedStyle(_li);"
         "for (const _k of ['fontSize','lineHeight','color','fontFamily','fontWeight']) { _p.style[_k] = _cs[_k]; }"
         "const _r = function(e){ return e.getBoundingClientRect(); };"
@@ -3194,8 +3397,8 @@ with st.sidebar:
         "  _desc.style.lineHeight = _bgap + 'px';"
         "}"
         "const _gapA = _r(_desc).top - _r(_p).bottom;"
-        "const _gapB = _r(_btn.querySelector('p')).top - _r(_caseLi).bottom;"
-        "const _c = _btn.closest('[data-testid=\"stElementContainer\"]');"
+        "const _gapB = _r(_head).top - _r(_caseLi).bottom;"
+        "const _c = _head.closest('[data-testid=\"stElementContainer\"]');"
         "_c.style.marginTop = (parseFloat(getComputedStyle(_c).marginTop) + (_gapA - _gapB)) + 'px';"
         "})(0);"
         "</script>",
@@ -3297,17 +3500,17 @@ with st.sidebar:
         '[data-testid^="stBaseButton-primary"]) {'
         "  margin-top: -0.5rem;"
         "}"
-        # 首个案例按钮：间距与「概算助手」等标题下的勾选框一致（不再上移，
-        # 覆写上方案例按钮容器 -0.5rem 规则）。限定后继容器含 primary 按钮，
-        # 避免误伤功能导航区 <style> 标记之后的「概算助手」等标题容器
-        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(style)'
+        # 案例类型小标题（div[style*="--case-typetag"]）后的首个案例按钮：
+        # 不再上移（覆写上方案例按钮容器 -0.5rem 规则），与小标题保持正常间距
+        '[data-testid="stSidebar"] [data-testid="stElementContainer"]:has('
+        'div[style*="--case-typetag"])'
         ' + [data-testid="stElementContainer"]:has('
         '[data-testid^="stBaseButton-primary"]) {'
         "  margin-top: 0;"
         "}"
         "</style>",
         unsafe_allow_html=True)
-    for _case in CASE_ITEMS:
+    def _case_nav_button(_case):
         if st.button(_case["short"], key=f"case_nav_{_case['key']}",
                      use_container_width=True, type="primary"):
             # 进入案例页时退出其他整页模式
@@ -3316,6 +3519,33 @@ with st.sidebar:
             st.session_state.bridge_match_mode = False
             st.session_state.active_case = _case["key"]
             st.rerun()
+
+    # 案例子项按钮：按案例类型分组，组前加「正面案例/反面案例」小标题；
+    # 类型从各案例 md 基本信息表读取（未标注类型的案例不分组、照旧排按钮）
+    _case_groups, _case_ungrouped = {"正面": [], "反面": []}, []
+    for _case in CASE_ITEMS:
+        try:
+            _t = _case_type_of(_parse_case_md(CASE_BASE_DIR / _case["file"]))
+        except Exception:
+            _t = ""
+        if _t in _case_groups:
+            _case_groups[_t].append(_case)
+        else:
+            _case_ungrouped.append(_case)
+    for _group in ("正面", "反面"):
+        if not _case_groups[_group]:
+            continue
+        _emoji = "📗" if _group == "正面" else "📕"
+        st.markdown(
+            f'<div style="--case-typetag:1;font-size:0.875rem;line-height:1.9;'
+            f'color:rgba(49,51,63,0.62);padding-left:0.9rem;'
+            f'border-left:2px solid rgba(49,51,63,0.18);'
+            f'margin:-1rem 0 0.55rem 0;">{_emoji} {_group}案例</div>',
+            unsafe_allow_html=True)
+        for _case in _case_groups[_group]:
+            _case_nav_button(_case)
+    for _case in _case_ungrouped:
+        _case_nav_button(_case)
 
     st.divider()
 
