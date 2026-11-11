@@ -61,6 +61,12 @@ def _stage_zd_answered(c: dict) -> bool:
     return bool(c.get("zd_asked")) or _zd_amount(c.get("custom_fees")) > 0
 
 
+def params_gate_open(c: dict) -> bool:
+    """参数卡阶段门控：费种确认 + 金额齐 + 征地已答 + 自定义已答后才开放。"""
+    return (bool(c.get("fees_confirmed")) and _stage_amounts_ready(c)
+            and _stage_zd_answered(c) and bool(c.get("custom_answered")))
+
+
 # ── 问题库定义：key → (describe 供AI, done, avail)；渲染/写入在 app.py ──
 # avail 按阶段门控（费种→金额→征地→自定义→参数→折扣）：未到阶段的问题
 # 不暴露给 LLM，杜绝「是否有费用需要打折」之类的问题被提前/乱序提问。
@@ -177,10 +183,8 @@ def available_keys(ctx: dict) -> list[tuple[str, str]]:
             out.append((key, desc))
     # 参数卡阶段门控：费种确认 + 金额齐 + 征地已答 + 自定义已答后才暴露，
     # 与提示词规则 5 的「…→ 参数 → 折扣」顺序一致，防止参数卡被提前提问
-    params_gate = (bool(ctx.get("fees_confirmed")) and _stage_amounts_ready(ctx)
-                   and _stage_zd_answered(ctx) and bool(ctx.get("custom_answered")))
     first_fee = None
-    if params_gate:
+    if params_gate_open(ctx):
         for card in param_cards_for(ctx):
             if _card_filled(ctx, card):
                 continue
@@ -299,7 +303,10 @@ def build_ctx_summary(ctx: dict, available: list[tuple[str, str]]) -> str:
             f"【自定义费用】{custom_txt}\n"
             f"【合同价/合同费率】{contract_txt}\n"
             f"【征地拆迁】{zd_txt}\n"
-            f"【参数】剩余卡：{_card_remaining(ctx)}\n"
+            f"【参数】{('剩余卡：' + _card_remaining(ctx))
+                       if params_gate_open(ctx)
+                       else '参数阶段未开始——请先完成费种/金额/征地拆迁/自定义费用确认，'
+                            '禁止询问费率/系数/服务类型等参数问题'}\n"
             f"【交易服务费计费方】{party}\n"
             f"【预备费】{yb_txt}\n"
             f"【折扣】{disc_txt}\n"
@@ -327,7 +334,13 @@ _AI_SYSTEM_PROMPT = (
     "7. 金额单位统一为万元，费率单位为 %。\n"
     "8. 参数信息（费率/系数/服务类型/预备费口径等）优先用 card: 开头的可用问题键逐个提问，"
     "让用户通过选项卡选择；用户尚未选择时禁止用 free 让用户整段填写参数。"
-    "用户选择完成后，若对其选择有疑问或需确认某个参数，可用 free 提问澄清。"
+    "用户选择完成后，若对其选择有疑问或需确认某个参数，可用 free 提问澄清。\n"
+    "9. 「可用问题键」中没有 card: 开头的键时，说明参数阶段尚未开始：禁止用 free 询问任何"
+    "费率/系数/服务类型/档位问题。「是否有征地拆迁费/是否加自定义费用/是否打折」必须用"
+    "对应的键以 buttons 提问。「是否打折/折扣」任何时候（含参数阶段之后）都只能用 "
+    "discount_need 键以 buttons 提问，绝对禁止用 free/text 提「折扣/打折/下浮」相关内容，"
+    "更不得要求用户手动填写折扣比例。禁止把多个问题合并成一个 free 问题；free 仅用于"
+    "开放信息（如工程概况描述）或对用户已填参数的澄清确认。"
 )
 
 _REPAIR_HINT = "（你上次的输出格式不正确。请只输出一个 JSON 对象，不要包含任何其他文字或代码围栏。）"
@@ -377,7 +390,9 @@ def _parse_plan(raw: str, available: list[tuple[str, str]]) -> dict:
         if qtype == "text":
             key = "free"
         if key not in valid_keys:
-            raise PlannerError(f"未知问题键：{key}")
+            # LLM 偶尔违反规则提前输出参数卡键（门控未开）等：丢弃该问题，
+            # 不整轮抛 PlannerError——否则会降级传统清单从头重放，重复提问
+            continue
         if key in seen:
             continue  # 同一轮重复问题去重（含 free）
         item = {"type": qtype, "text": text, "key": key}
@@ -392,6 +407,104 @@ def _parse_plan(raw: str, available: list[tuple[str, str]]) -> dict:
         out.append(item)
         seen.add(key)
     return {"think": think, "questions": out}
+
+
+# ── 问题净化（纯函数，供 app.py 调用与直接单测）──
+
+_FREE_PARAM_BUNDLE_RE = re.compile(r"参数|系数|费率|服务类型|口径|档位")
+_FREE_BUNDLE_TONE_RE = re.compile(
+    r"请补充|请填写|请提供|请逐项|逐项|各费种|一并|一次性|打包|"
+    r"按什么|按多少|多少费率|什么费率|费率多少|如何(?:调整|设置|计取)|"
+    r"怎么(?:调整|设置|定)|用什么(?:费率|系数)|是否涉及.{0,8}(?:费率|系数)")
+
+
+def _free_param_bundle(text: str) -> bool:
+    """free 问题是否在打包让用户整段填写参数（LLM 绕过 card: 键的坏行为）。
+
+    用户尚未选择参数时，这类「请逐项填写各费种参数…」会被改写为选项卡卡；
+    用户选择完成后 AI 对已填值的确认/澄清提问（「是否确认…」等）不算打包，
+    予以保留——先选项卡选择，有疑问再提问。
+    """
+    return bool(_FREE_PARAM_BUNDLE_RE.search(text)
+                and _FREE_BUNDLE_TONE_RE.search(text))
+
+
+def _ai_recover_canon_key(q: dict):
+    """LLM 误用 free 键（或自造按钮）提问基础问题 → 恢复规范键。
+
+    规范键的按钮点击会写 ctx 状态（zd_asked 等）；free 键的按钮点击只存备注，
+    状态不落地，导致同一问题下一轮被重复提问（或降级传统清单后再问一遍）。
+    按问题文本/选项内容识别：折扣/打折/下浮 → discount_need；征地拆迁 → zd_exists；
+    列示 → zd_placement；细化 → zd_refine；不需要自定义/合同价 → custom_need。
+    """
+    txt = str(q.get("text") or "")
+    opts = [str(o) for o in (q.get("options") or [])]
+    _has = lambda pat, s: bool(re.search(pat, s))
+    _opt = lambda pat: any(_has(pat, o) for o in opts)
+    # 折扣最先判：任何含「折扣/打折/下浮」的提问（含无选项的自由文本，如
+    # 「各项费用是否需要按折扣系数下浮？如需，请说明折扣比例…」）一律恢复为
+    # discount_need 卡片——自由文本提问不写状态，会导致该问题被重复提问。
+    # 征地拆迁类问题不含这些词，放在最前不会误伤。
+    if _has(r"折扣|打折|下浮", txt):
+        return "discount_need"
+    # 再判列示/细化（其文本也可能含「征地」字样），最后判是否存在
+    if _has(r"列示|单独列项|计入", txt) or _opt(r"单独列项|计入"):
+        return "zd_placement"
+    if _has(r"细化|逐项", txt) or _opt(r"细化|逐项"):
+        return "zd_refine"
+    if _has(r"征地|拆迁", txt) or _opt(r"征地|拆迁"):
+        return "zd_exists"
+    if _opt(r"自定义|合同价") and _opt(r"不需要|没有"):
+        return "custom_need"
+    if _opt(r"打折|折扣") and _opt(r"不需要|没有"):
+        return "discount_need"
+    return None
+
+
+def sanitize_plan_questions(plan_qs: list, avail_desc: dict) -> list:
+    """净化规划器输出（纯函数，不依赖 Streamlit）：
+
+    - free 参数打包问题（「请逐项填写各费种参数…」）→ 改写为第一个未填参数卡
+      （参数始终以选项卡卡片逐项提问）；参数阶段未开放（无 card: 键）→ 整条丢弃；
+    - free 键的基础问题（按钮点击不写状态 → 会重复提问）→ 恢复规范键并改 buttons，
+      点击即登记，杜绝问两遍。折扣/打折/下浮问题任何时候一律转 discount_need 卡片
+      （用户口径：禁止自由文本提问折扣）；识别出的键当前不可问则整条丢弃；
+    - 描述性 free 问题保持原样；按 key 去重。
+    """
+    first_card_key = next((k for k in avail_desc if k.startswith("card:")), None)
+    out, seen = [], set()
+    for q in plan_qs or []:
+        if q.get("key") == "free" and _free_param_bundle(q.get("text") or ""):
+            if first_card_key is not None:
+                # 参数阶段已开放：改写为第一个未填参数卡（卡片式提问）
+                q["key"] = first_card_key
+                q["type"] = "buttons"
+                q.pop("unit", None)
+                q["text"] = avail_desc[first_card_key]
+            else:
+                # 参数阶段未开始（前置步骤未完成）：整条丢弃——费率/系数/服务类型
+                # 必须等卡片开放后用 card: 键提问
+                continue
+        if q.get("key") == "free":
+            rk = _ai_recover_canon_key(q)
+            txt = str(q.get("text") or "")
+            if rk:
+                if rk not in avail_desc:
+                    # 识别出基础主题键但当前不可问（前置未满足或已答过，如已选
+                    # 「不涉及征地拆迁」后夹带「如何列示」）→ 整条丢弃，下一轮该键
+                    # 可用时再以规范键提问
+                    continue
+                if (q.get("type") == "buttons" or rk == "discount_need"
+                        or re.search(r"是否|有没有|有无|涉及吗|吗[？?]?"
+                                     r"|如何|怎么|列示|细化", txt)):
+                    q["key"] = rk
+                    q["type"] = "buttons"
+                    q.pop("unit", None)
+                    q["text"] = avail_desc[rk]
+        if q["key"] not in seen:
+            seen.add(q["key"])
+            out.append(q)
+    return out
 
 
 def run_planner(summary: str, available: list[tuple[str, str]],

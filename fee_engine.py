@@ -7909,6 +7909,26 @@ def advance_checklist(ctx: dict, text: str, region: str | None = None) -> dict:
         ctx["custom_answered"] = True
         recognized = True
 
+    # ── 3.5) 征地拆迁提问的文本回答（AI 模式自由输入/聊天常见，无金额也识别）──
+    # 「有/涉及 征地拆迁」→ zd_asked；「没有/不涉及」→ zd_asked=False。
+    # 避免自由文本已答过、下一轮又被重复提问。
+    _zd_t = re.compile(r"征地|拆迁|土地征用|建设用地费|用地费")
+    if _zd_t.search(text):
+        _zd_neg = re.search(r"(?:没有|不涉及|未涉及|无|不存在|不需要|不用|无需).{0,4}"
+                            r"(?:征地|拆迁|土地征用|用地)"
+                            r"|(?:征地|拆迁).{0,6}(?:没有|无|不涉及|不需要|不用)", text)
+        _zd_pos = re.search(r"(?:有|涉及|包含|包括|存在|需要|要).{0,4}"
+                            r"(?:征地|拆迁|土地征用|用地)"
+                            r"|(?:征地|拆迁|土地征用).{0,6}(?:有|涉及|需要|要|费)", text)
+        if _zd_neg and (not _zd_pos or _zd_neg.start() <= _zd_pos.start()):
+            ctx["zd_asked"] = True
+            ctx["zd_exists"] = False
+            recognized = True
+        elif _zd_pos:
+            ctx["zd_asked"] = True
+            ctx["zd_exists"] = True
+            recognized = True
+
     # ── 4) 合同覆盖（全目录扫描；提及未选费种的合同 → 自动加选该费种）──
     contracts = extract_contract_overrides(text, None)
     if contracts:
@@ -9979,10 +9999,32 @@ def _tj_merge_professions(zhuan_ye) -> list[dict]:
                 e["c"] += amt_c
                 e["d"] += amt_d
                 e["e"] += amt_e
+            # 技术经济指标：按单位合并数量（单位价值=归并后总金额÷总量，输出时折算）
+            _tq = (slots[r] if r is not None
+                   else extras[zname]).setdefault("_tq", {})
+            for _tg in it.get("tech") or []:
+                _tu = str(_tg.get("unit") or "").strip()
+                if not _tu:
+                    continue
+                try:
+                    _tv = float(_tg.get("qty") or 0)
+                except (TypeError, ValueError):
+                    _tv = 0.0
+                if _tv > 0:
+                    _tq[_tu] = _tq.get(_tu, 0.0) + _tv
     rows = [slots[r] for r in sorted(slots)]
     for i, ex in enumerate(extras.values()):
         ex.update({"row": TJ_INSERT_ROW + i, "filled": True, "extra": True})
         rows.append(ex)
+    for s in rows:
+        _tq = s.pop("_tq", None)
+        if _tq and s.get("filled"):
+            _tot = s["c"] + s["d"] + s["e"]
+            if _tot > 0:
+                s["tech"] = [
+                    {"unit": u, "qty": round(q, 4),
+                     "val": round(_tot * 10000.0 / q, 2)}
+                    for u, q in _tq.items()]   # 保持插入序（道路 m2 在前 m 在后）
     return rows
 
 
@@ -10005,6 +10047,7 @@ def _tj_professions_by_item(zhuan_ye) -> list[dict]:
                 "c": round(float(_pr.get("c") or 0), 4),
                 "d": round(float(_pr.get("d") or 0), 4),
                 "e": round(float(_pr.get("e") or 0), 4),
+                "tech": _pr.get("tech"),
             })
     return rows
 
@@ -10192,6 +10235,15 @@ def _build_excel_summary_tianjin(ctx: dict, part1_rows=None,
         _setv(ws, f"C{r}", pr.get("c") if pr.get("c") and pr["c"] > 0 else None)
         _setv(ws, f"D{r}", pr.get("d") if pr.get("d") and pr["d"] > 0 else None)
         _setv(ws, f"E{r}", pr.get("e") if pr.get("e") and pr["e"] > 0 else None)
+        # 技术经济指标（单位/数量/单位价值(元)）：来自 Excel 导入的
+        # 工程规模/单位造价 + 大项口径聚合（道路 m2、m 两组「、」拼接）
+        _tk, _tl, _tm = _tech_km(pr.get("tech"))
+        if _tk is not None:
+            ws[f"H{r}"] = _tk
+        if _tl is not None:
+            ws[f"I{r}"] = _tl
+        if _tm is not None:
+            ws[f"J{r}"] = _tm
     # 调用方给的 k 可能大于实际行数（方式二：K 由各单项最大专业数决定）→
     # 多余插行清空（模板示例值/静态名不得残留）
     for _i in range(len(prows), 6 + k):
@@ -10200,6 +10252,9 @@ def _build_excel_summary_tianjin(ctx: dict, part1_rows=None,
         _setv(ws, f"C{r}", None)
         _setv(ws, f"D{r}", None)
         _setv(ws, f"E{r}", None)
+        ws[f"H{r}"] = None
+        ws[f"I{r}"] = None
+        ws[f"J{r}"] = None
     if _label_rows and _prof_rows:
         # 拆项合计防双计：C4 只累加专业行（label 行 C 已是求和公式）；
         # 综合概算表合计 C 列同步排除（镜像行号 = 总概算表行号-1）。
@@ -10608,6 +10663,113 @@ def _build_excel_summary_tianjin(ctx: dict, part1_rows=None,
     elif "造价咨询费(万元)" in numerical and "造价咨询费" not in co:
         ws_fee["D30"] = 0
 
+    # ── 未涉及的费用（引擎中用户没有填写的）直接隐藏 ──
+    # 静态值按值判断；公式行按引擎口径映射（用户填写过的费种一律保留，
+    # 即使金额为 0；未建模/未选择行金额恒 0 → 隐藏）；合计行（58+n）保留。
+    # cc 插/删行后行≥34 整体移位，映射表同步平移。
+    _has = lambda _nm: f"{_nm}(万元)" in numerical or _nm in co
+    _ky_sel = set(sem["ky_services"] or ["编制可研报告"])
+    _amt = {
+        3: js + qg, 4: js, 5: js, 6: 0.0, 7: 0.0, 8: 0.0, 9: 0.0,
+        10: qg, 11: qg, 12: 0.0,
+        13: 1.0 if _has("场地准备费及临时设施费") else 0.0,
+        14: 1.0 if _has("建设管理费") or _has("监理费") else 0.0,
+        15: 1.0 if _has("建设管理费") else 0.0,
+        16: 1.0 if _has("监理费") else 0.0,
+        17: 1.0 if _has("可行性研究费") else 0.0,
+        18: 1.0 if (_has("可行性研究费") and any(
+            _s in _ky_sel for _s in ("编制项目建议书", "评估项目建议书"))) else 0.0,
+        19: 1.0 if (_has("可行性研究费") and any(
+            _s in _ky_sel for _s in ("编制可研报告", "评估可研报告"))) else 0.0,
+        20: 0.0,
+        21: 1.0 if _has("勘察费") or _has("工程设计费") else 0.0,
+        22: 1.0 if _has("勘察费") else 0.0,
+        23: 1.0 if _has("工程设计费") else 0.0,
+        24: 1.0 if _sep_tj.get("施工图预算编制费") else 0.0,
+        25: 1.0 if _sep_tj.get("竣工图编制费") else 0.0,
+        26: 1.0 if _has("施工图审查费") else 0.0,
+        27: 1.0 if _has("交易服务费") or _has("招标代理费") else 0.0,
+        28: 1.0 if _has("交易服务费") else 0.0,
+        29: 1.0 if _has("招标代理费") else 0.0,
+        30: 1.0 if _has("造价咨询费") else 0.0,
+        34: 1.0 if _has("环境影响咨询费") else 0.0,
+        35: 1.0 if _has("劳动安全卫生评审费") else 0.0,
+        36: 0.0, 37: 0.0, 38: 0.0, 39: 1.0 if _has("工程保险费") else 0.0,
+        40: 0.0, 41: 0.0, 42: 0.0, 43: 0.0, 44: 0.0, 45: 0.0,
+        46: 0.0, 47: 0.0, 48: 0.0, 49: 0.0, 50: 0.0,
+        51: 0.0, 52: 0.0, 53: 0.0, 54: 0.0, 55: 0.0, 56: 0.0,
+    }
+    _shift = _cc_delta
+    _amt_final = {_t + (_shift if _t >= 34 else 0): _a for _t, _a in _amt.items()}
+    for _i, (_s, _c, _v) in enumerate(_cc_rows, start=1):
+        _amt_final[30 + _i] = 1.0   # 用户勾选的造价咨询子项服务一律保留
+    for _r in range(3, 58 + n + _shift):   # 合计行（58+n+_shift）排除
+        _cell = ws_fee[f"D{_r}"]
+        _v = _cell.value
+        if isinstance(_v, (int, float)):
+            _zero = abs(float(_v)) <= 0.005
+            if _zero:
+                # 静态 0 但用户填写过（映射=1）→ 保留
+                _zero = float(_amt_final.get(_r, 0.0) or 0) <= 0.005
+        elif isinstance(_v, str) and _v.startswith("="):
+            _zero = float(_amt_final.get(_r, 0.0) or 0) <= 0.005
+        else:
+            _zero = True
+        if _zero:
+            ws_fee.row_dimensions[_r].hidden = True
+
+    # 总概算表/综合概算表：金额为 0 的第一部分行同步隐藏
+    # （label 行 C 列带合计公式 → 保留；普通行 C/D/E 全空 → 隐藏）
+    for _r in range(5, 11 + k):
+        _vals = [ws[f"{_c}{_r}"].value for _c in "CDE"]
+        _is_formula = any(isinstance(_v, str) and str(_v).startswith("=")
+                          for _v in _vals)
+        if not _is_formula and not any(_vals):
+            ws.row_dimensions[_r].hidden = True
+            ws_zh.row_dimensions[_r - 1].hidden = True
+
+    # ── 总概算表：第二部分二类费细项展开（用户要求：不再是单一总数，
+    #    「其他费用计算表」算出的各费种在第二部分逐行列示，金额活链接
+    #    对应 D 格）。行集合 = 活动的叶子费行（_amt 口径：分组行
+    #    3/4/10/14/17/21/27 是叶子求和，不单列；征地两行用引擎名称）。
+    #    合计行 F{11+k} 改为 SUM(细项)，恒等「其他费用计算表」合计 D58。
+    #    细项链接只指向 D 列（无一条链引用总概算表 ≥12 行）→ 不新增循环。──
+    _grp_rows = {3, 4, 10, 14, 17, 21, 27}
+    _m2_rows = []          # [(其他费用计算表最终行号, 费种名)]
+    for _t, _a in _amt.items():
+        if _t in _grp_rows or float(_a) <= 0.005:
+            continue
+        _fr = _t + (_shift if _t >= 34 else 0)
+        if _t == 5:
+            _label = "建设用地费"          # 模板 B5「永久征地」≠引擎口径
+        elif _t == 11:
+            _label = "管线切改费"          # 模板 B11「给排水管线切改」→引擎口径
+        else:
+            _label = str(ws_fee[f"B{_fr}"].value or "").strip()
+        if _label:
+            _m2_rows.append((_fr, _label))
+    for _i in range(n):                    # 自定义费行（57+Δ..56+n+Δ）
+        _fr = 57 + _shift + _i
+        _label = str(ws_fee[f"B{_fr}"].value or "").strip()
+        if _label:
+            _m2_rows.append((_fr, _label))
+    if _m2_rows:
+        _m2 = len(_m2_rows)
+        _tj_insert_rows(ws, 12 + k, _m2)
+        _tj_shift_refs(wb, [("总概算表", 12 + k, _m2)])
+        _style_row = 13 + k + _m2          # 基本预备费行（插行后位置）样式
+        for _i, (_fr, _label) in enumerate(_m2_rows):
+            r = 12 + k + _i
+            ws[f"A{r}"] = _i + 1
+            ws[f"B{r}"] = _label
+            ws[f"F{r}"] = f"=其他费用计算表!D{_fr}"
+            ws[f"G{r}"] = f"=SUM(C{r}:F{r})"
+            ws[f"M{r}"] = "自动链接"
+            _copy_row_style(ws, _style_row, r, range(1, 15))
+        ws[f"F{11 + k}"] = (f"=SUM(F{12 + k}:F{11 + k + _m2})")
+        # 打印区域随插行扩展（总投资行 {17+k+_m2} 之外留两行空白，与模板一致）
+        ws.print_area = f"'总概算表'!$A$1:$K${19 + k + _m2}"
+
     # 无循环引用（审核概算槽 G118 静态切断 B775 循环链），无需迭代设置；
     # 打开文件时 Excel 全量重算（公式无缓存值，acyclic 链可正常收敛）
     wb.calculation.fullCalcOnLoad = True
@@ -10931,6 +11093,12 @@ def _build_excel_summary_legacy(ctx: dict, summary_rows=None,
                 _set(ws_sum, f"B{r}", f"{_gi + 1}.{_zi}", F_HEAD_REF, align=AL_C)
                 _set(ws_sum, f"E{r}", str(_it.get("zhuanye") or ""),
                      F_HEAD_REF, align=AL_C)
+                _tk, _tl, _tm = _tech_km(_it.get("tech"))
+                _set(ws_sum, f"K{r}", _tk, F_HEAD_REF, align=AL_C)
+                if _tl is not None:
+                    _set(ws_sum, f"L{r}", _tl, F_HEAD_REF, align=AL_C)
+                if _tm is not None:
+                    _set(ws_sum, f"M{r}", _tm, F_HEAD_REF, align=AL_C)
                 r += 1
                 _zy_first = r
                 _electrical = bool(_it.get("electrical"))
@@ -10961,6 +11129,12 @@ def _build_excel_summary_legacy(ctx: dict, summary_rows=None,
                              fmt=FMT_MONEY, align=AL_C)
                     _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF,
                          fmt=FMT_MONEY, align=AL_C)
+                    _tk, _tl, _tm = _tech_km(_leaf.get("tech"))
+                    _set(ws_sum, f"K{r}", _tk, F_HEAD_REF, align=AL_C)
+                    if _tl is not None:
+                        _set(ws_sum, f"L{r}", _tl, F_HEAD_REF, align=AL_C)
+                    if _tm is not None:
+                        _set(ws_sum, f"M{r}", _tm, F_HEAD_REF, align=AL_C)
                     r += 1
                 # 有节叶子：按节分组（节行 = 其细目求和），名称以「工程」结尾的
                 # 无节叶子作为节级行（C 列，金额直接落行）
@@ -11047,6 +11221,15 @@ def _build_excel_summary_legacy(ctx: dict, summary_rows=None,
                             else:
                                 for _d in (_jie_dir, _d_zy, _d_grp, _d_sec):
                                     _d["F"].append(_lk("F", _rr))
+                            _tk, _tl, _tm = _tech_km(_leaf.get("tech"))
+                            _set(ws_sum, f"K{_jie_row}", _tk, F_HEAD_REF,
+                                 align=AL_C)
+                            if _tl is not None:
+                                _set(ws_sum, f"L{_jie_row}", _tl, F_HEAD_REF,
+                                     align=AL_C)
+                            if _tm is not None:
+                                _set(ws_sum, f"M{_jie_row}", _tm, F_HEAD_REF,
+                                     align=AL_C)
                             continue
                         _bordered_row(r)
                         _set(ws_sum, f"D{r}", _di, F_HEAD_REF, align=AL_C)
@@ -11062,6 +11245,12 @@ def _build_excel_summary_legacy(ctx: dict, summary_rows=None,
                                  fmt=FMT_MONEY, align=AL_C)
                         _set(ws_sum, f"J{r}", f"=SUM(F{r}:I{r})", F_HEAD_REF,
                              fmt=FMT_MONEY, align=AL_C)
+                        _tk, _tl, _tm = _tech_km(_leaf.get("tech"))
+                        _set(ws_sum, f"K{r}", _tk, F_HEAD_REF, align=AL_C)
+                        if _tl is not None:
+                            _set(ws_sum, f"L{r}", _tl, F_HEAD_REF, align=AL_C)
+                        if _tm is not None:
+                            _set(ws_sum, f"M{r}", _tm, F_HEAD_REF, align=AL_C)
                         r += 1
                     # 节行公式：=SUM(细目区间) + 直接落行的清单链接（无细目时纯链接）
                     for _col in "FGHI":
@@ -12282,6 +12471,45 @@ def _truncate_part2(ws, note: str):
     c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
 
+def _tech_km(tech):
+    """技术经济指标 → (单位, 数量, 单位价值) 三格。
+
+    tech: {unit,qty,val}（单组）或 [{unit,qty,val},...]（多组，如道路 m2、m）。
+    单组时数值原样（保持数值类型）；多组时「、」拼接为文本。
+    """
+    if not tech:
+        return None, None, None
+    groups = tech if isinstance(tech, list) else [tech]
+    groups = [g for g in groups if g]
+    if not groups:
+        return None, None, None
+
+    def _clean(x):
+        if x is None or x == "":
+            return None
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return str(x)
+        return v
+
+    def _fmt(x):
+        v = _clean(x)
+        if v is None:
+            return ""
+        if isinstance(v, float):
+            return str(int(v)) if v == int(v) else str(round(v, 2))
+        return str(v)
+
+    if len(groups) == 1:
+        g = groups[0]
+        return (str(g.get("unit") or "").strip() or None,
+                _clean(g.get("qty")), _clean(g.get("val")))
+    return ("、".join(str(g.get("unit") or "").strip() for g in groups) or None,
+            "、".join(_fmt(g.get("qty")) for g in groups) or None,
+            "、".join(_fmt(g.get("val")) for g in groups) or None)
+
+
 def _build_excel_summary_per_item(ctx: dict, zhuan_ye: list) -> bytes:
     """方式二（legacy 雄安布局）：每单项一张截断表（只含第一部分，活链接
     '专业清单{i}'）+ 一张「项目汇总表」（每单项一行，二类费/预备费/总投资
@@ -12366,6 +12594,11 @@ def _build_excel_summary_tianjin_per_item(ctx: dict, zhuan_ye: list) -> bytes:
                 _ws[f"C{_r}"] = _pr["c"] if _pr["c"] > 0 else None
                 _ws[f"D{_r}"] = _pr["d"] if _pr["d"] > 0 else None
                 _ws[f"E{_r}"] = _pr["e"] if _pr["e"] > 0 else None
+                _tk, _tl, _tm = _tech_km(_pr.get("tech"))
+                _ws[f"H{_r}"] = _tk
+                _ws[f"I{_r}"] = _tl
+                _ws[f"J{_r}"] = _tm
+                _ws.row_dimensions[_r].hidden = False   # 覆写原表隐藏标记
                 if _r > 10:   # 插出来的行：补 G 合计公式 + 模板专业行样式
                     _ws[f"G{_r}"] = f"=SUM(C{_r}:F{_r})"
                     for _ci in range(1, 15):
@@ -12382,6 +12615,10 @@ def _build_excel_summary_tianjin_per_item(ctx: dict, zhuan_ye: list) -> bytes:
                 _ws[f"C{_r}"] = None
                 _ws[f"D{_r}"] = None
                 _ws[f"E{_r}"] = None
+                _ws[f"H{_r}"] = None
+                _ws[f"I{_r}"] = None
+                _ws[f"J{_r}"] = None
+                _ws.row_dimensions[_r].hidden = True
                 if _r > 10:
                     _ws[f"G{_r}"] = None
         _truncate_part2(_ws, "本表仅含该单项第一部分工程费用；"

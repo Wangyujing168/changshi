@@ -441,6 +441,11 @@ _BUILTIN_TPL_HIERARCHY = [
         {"name": "预制板梁", "group": "预应力板梁",
          "subs": ["混凝土", "钢筋", "钢绞线"]},
         {"name": "钢箱梁", "group": "钢箱梁", "subs": []},
+        # 钢绞线部分独立分项：上部结构末尾（混凝土/钢筋之后）、附属结构之前
+        # （用户 2026-11-09 口径）
+        {"name": "15.2钢绞线", "group": "钢绞线", "subs": []},
+        {"name": "波纹管", "group": "波纹管", "subs": []},
+        {"name": "锚具", "group": "锚具", "subs": []},
         # 梯道并入上部结构（用户 2026-10-27 口径）：与主梁同构，分 混凝土/钢筋 子组
         {"name": "梯道", "group": "梯道", "subs": ["混凝土", "钢筋"]},
     ]},
@@ -1220,8 +1225,11 @@ def _extract_features(text):
     elif re.search(r"HPB|Q235", t):
         specs["steel_type"] = "3号钢"
         materials.add("3号钢")
-    # 伸缩缝型号数字（KF-80/TS160 等 → 80/160）
+    # 伸缩缝型号数字（KF-80/TS160 等 → 80/160；「80型」等中文型标注同样提取，
+    # 用户 2026-11-06：80型伸缩缝 ↔ TS80 同伸缩量）
     m = re.search(r"(?:KF|TS|GQF|CD|F)[-]?(\d{2,4})", t)
+    if not m and "伸缩" in t:
+        m = re.search(r"(\d{2,4})\s*型", t)
     if m:
         specs["type_no"] = int(m.group(1))
     # 钢筋直径边界（φ10以内/φ14以外）
@@ -1453,6 +1461,10 @@ _GROUP_MAP = [
     ("隔声屏障", ["隔声屏障", "声屏障"]),
     ("土方", ["土方", "开槽", "回填", "挖方", "填方"]),
     ("护坡", ["护坡", "锥坡"]),
+    # 钢绞线/波纹管/锚具独立成组：上部结构末尾、附属结构之前（用户 2026-11-09 口径）
+    ("钢绞线", ["钢绞线"]),
+    ("波纹管", ["波纹管"]),
+    ("锚具", ["锚具"]),
     # 梯道放最后：「梯道下部 桥墩/承台」等复合分项名先命中前面的 桥墩/承台
     ("梯道", ["梯道"]),
 ]
@@ -1756,6 +1768,19 @@ def _find_candidates(item, entries, rules, bridge_width=8.5):
                     "拆除类条目：优先拆除/铣刨定额")
         add_library(lambda e: re.search(r"现浇|预制|浇筑|灌注|摊铺", e["name"]), -14,
                     "拆除类条目：不套浇筑/摊铺类定额")
+        if "混凝土" in mat:
+            # 用户 2026-11-06 口径：除路面外的混凝土结构拆除（护栏/梁/墩/台等杂项）
+            # 套 1-3-47/48 拆除混凝土结构（机械拆除）；有筋/无筋按量表判定，
+            # 结构混凝土默认有筋（仅 素混凝土/无筋 等字样套无筋 1-3-48）
+            add_library(lambda e: "拆除混凝土结构" in e["name"], 30,
+                        "混凝土结构拆除：套 1-3-47/48 拆除混凝土结构（用户口径）")
+            add_library(lambda e: re.search(r"拆除混凝土(面层|人行道|缘石|侧缘石|侧平石|基础垫层)"
+                                            r"|拆除(缘石|侧石|侧缘石|侧平石)", e["name"]), -15,
+                        "混凝土结构拆除：路面面层/缘石类子目不套（用户口径）")
+            yj = not re.search(r"素混凝土|无筋", mat)
+            add_library(lambda e, yj=yj: ("有筋" in e["name"]) if yj else ("无筋" in e["name"]), 6,
+                        "混凝土结构拆除：结构混凝土默认有筋，套 1-3-47（用户口径）"
+                        if yj else "混凝土结构拆除：量表标注素/无筋，套 1-3-48（用户口径）")
     elif "防水" in mat:
         # 防水混凝土/防水层 → 防水相关子目
         add_rule_rows("防水", f"样例规则指向（{group}）")
@@ -1827,6 +1852,21 @@ def _find_candidates(item, entries, rules, bridge_width=8.5):
         else:
             # 粘层/透层/沥青砂等：不抬机械摊铺分，按文本打分
             add_library(lambda e: "沥青" in e["name"], 0, "")
+            if "黏层" in mat:
+                # 用户 2026-11-06 口径：粘层油即结合油 → 2-2-75 洒布机喷洒结合油
+                add_library(lambda e: "结合油" in e["name"] and "洒布机" in e["name"], 30,
+                            "粘层油即结合油：套 2-2-75 洒布机喷洒结合油（用户口径）")
+                add_library(lambda e: "结合油" in e["name"], 10,
+                            "粘层油即结合油：人工泼结合油备选（用户口径）")
+            if "封层" in mat:
+                # 用户 2026-11-06 口径：封层一般套下封层定额，乳化沥青居多
+                add_library(lambda e: "下封层" in e["name"], 25,
+                            "封层套下封层定额（用户口径）")
+                add_library(lambda e: "上封层" in e["name"], -10,
+                            "封层套下封层，上封层不套（用户口径）")
+                if "乳化" in mat:
+                    add_library(lambda e: "下封层" in e["name"] and "乳化" in e["name"], 5,
+                                "封层为乳化沥青 → 下封层乳化沥青子目")
     elif any(k in mat for k in ("涂装", "涂料", "漆")):
         # 涂装/涂料/漆类材料：引 3-8 抹灰油/乳胶漆/水质涂料 与 3-9 钢结构重防腐子目
         add_library(lambda e: "涂料" in e["name"] or "漆" in e["name"], 20,
@@ -2127,12 +2167,32 @@ def _match_one(idx, item, entries, code_index, rules, all_items, span_len=30.0,
                 "pile_liner": liner}
 
     mat = _norm_text(item.get("mat") or "")
+    if "调平层" in mat:
+        # 用户 2026-11-06 口径：沥青胶砂防水调平层属桥面防水/调平层细目，
+        # 概算不单列、不套定额（防水做法由桥面防水层 3-10-31 覆盖）
+        note = ("沥青胶砂防水调平层按用户口径不单列定额"
+                "（概算不套这么细，桥面防水层已覆盖防水做法）。")
+        return {"idx": idx, "item": item, "status": "none", "matches": [],
+                "rule_combo": [], "checklist": [note], "notes": [note]}
+    if "钢纤维" in mat and "混凝土" not in mat:
+        # 用户 2026-11-06 口径：伸缩缝等分项里的钢纤维（kg）概算不单列定额
+        # （后浇混凝土细项材料；钢纤维混凝土 m3 行照常匹配）
+        note = "钢纤维按用户口径概算不单列定额（后浇混凝土细项材料）。"
+        return {"idx": idx, "item": item, "status": "none", "matches": [],
+                "rule_combo": [], "checklist": [note], "notes": [note]}
     if "面积" in mat and not re.search(r"铣刨|拆除|切除|凿除", mat):
         # 面积类列（桥梁面积等）为指标数据，非定额计量子目
         return {"idx": idx, "item": item, "status": "none", "matches": [],
                 "rule_combo": [], "checklist": [],
                 "notes": ["「面积」列为指标数据，非定额计量子目，不参与定额匹配。"]}
     fx_s = _norm_text(item.get("fenxiang") or "")
+    if "防腐面积" in fx_s:
+        # 用户 2026-11-09 口径：混凝土表面防腐需套建筑工程预算基价防腐定额，
+        # 市政定额库无此子目，概算阶段暂不套（列入补充信息清单）
+        note = ("防腐面积（混凝土表面防腐）按用户口径暂不套定额：需套建筑工程"
+                "预算基价防腐定额，市政定额库无此子目。")
+        return {"idx": idx, "item": item, "status": "none", "matches": [],
+                "rule_combo": [], "checklist": [note], "notes": [note]}
     # 泄水管（泄水孔）内按重量计的钢材类（钢管/栅盖/扣件/补强钢筋等）→
     # 合并一套预埋铁件 3-2-8（用户 2026-10-26：加在一起一律套预埋铁件；
     # 合并求和写入在 build_result_excel 的 排水 分项）；玻纤/塑料等非钢材不在此列
@@ -2159,6 +2219,49 @@ def _match_one(idx, item, entries, code_index, rules, all_items, span_len=30.0,
                               f"{c['entry']['unit']}）")
             c["amount"] = (round(c["qty_de"] * c["entry"]["price"], 2)
                            if c["entry"]["price"] is not None else None)
+        return {"idx": idx, "item": item, "status": status, "matches": matches,
+                "rule_combo": [], "checklist": _checklist(item, soil=soil), "notes": notes,
+                "mud": [], "cage": None, "tpl": None}
+    # 防抛网（防护网）内除钢筋外的钢材铁件（螺栓/焊网/扣件等）→ 预埋铁件 3-2-8
+    # （用户 2026-11-09 口径）；注意单位：清单 kg → t 换算；清单 套/个 与定额 t
+    # 不一致时按单重换算后套用、合价暂不计
+    if (("防抛网" in fx_s or "防护网" in fx_s)
+            and not re.search(r"HPB|HRB|CRB|钢筋", mat)
+            and any(k in mat for k in ("钢", "铁", "螺栓", "焊网", "扣件",
+                                       "法兰", "管卡", "垫片"))):
+        e = next((x for x in entries
+                  if str(x["code"]).split("*")[0].strip() == "3-2-8"), None)
+        if e is not None:
+            status, matches = "single", [{"entry": e, "score": 45, "unit_ok": True,
+                                          "reasons": [f"防抛网钢材铁件（{item.get('mat')}，钢筋除外）"
+                                                      "按用户口径套预埋铁件 3-2-8"]}]
+            notes.append(f"防抛网钢材铁件（{item.get('mat')}）按用户口径套预埋铁件 3-2-8。")
+        else:
+            status, matches = "none", []
+            notes.append("防抛网钢材铁件应套预埋铁件，但库内无 3-2-8 子目，需补充。")
+        for c in matches:
+            mult = _unit_parts(c["entry"]["unit"])[1]
+            val = item.get("value") if item.get("value") is not None else 0
+            ib = _unit_parts(item.get("mat_unit") or "")[0]
+            c["qty_natural"] = val
+            if ib == "kg":
+                c["qty_de"] = val / 1000 / mult
+                c["note_conv"] = (f"已按 kg→t 换算（{val:g} kg = {c['qty_de']:g} "
+                                  f"{c['entry']['unit']}）")
+                c["amount"] = (round(c["qty_de"] * c["entry"]["price"], 2)
+                               if c["entry"]["price"] is not None else None)
+            elif ib == "t":
+                c["qty_de"] = val / mult
+                c["amount"] = (round(c["qty_de"] * c["entry"]["price"], 2)
+                               if c["entry"]["price"] is not None else None)
+            else:
+                # 套/个 等与定额单位 t 不同量纲：按清单量列示、不换算，
+                # 合价暂不计（计价表/候选表均不写单价合价，标注需按单重换算）
+                c["qty_de"] = val
+                c["amount"] = None
+                c["unit_mismatch"] = True
+                c["reasons"].append(f"清单单位 {ib or '件'} 与定额单位 {c['entry']['unit']} 不一致："
+                                    "需按单重换算成 t 后套用，合价暂不计")
         return {"idx": idx, "item": item, "status": status, "matches": matches,
                 "rule_combo": [], "checklist": _checklist(item, soil=soil), "notes": notes,
                 "mud": [], "cage": None, "tpl": None}
@@ -2240,6 +2343,86 @@ def _match_one(idx, item, entries, code_index, rules, all_items, span_len=30.0,
                 c["qty_de"] = val / 1000 / mult
                 c["note_conv"] = (f"已按 kg→t 换算（{val:g} kg = {c['qty_de']:g} "
                                   f"{c['entry']['unit']}）")
+            c["amount"] = (round(c["qty_de"] * c["entry"]["price"], 2)
+                           if c["entry"]["price"] is not None else None)
+        return {"idx": idx, "item": item, "status": status, "matches": matches,
+                "rule_combo": [], "checklist": checklist, "notes": notes,
+                "mud": [], "cage": None, "tpl": None}
+    # 锚具条目（量表 锚具 分项，mat 为 YM15-N/BM15-N/M15-N 等规格）：
+    # 圆锚（YM/M 体系，无 B）→ 3-5-20 锚具安装 15-7；扁锚（BM/BJM，带 B）→
+    # 3-5-16~19 扁锚具安装 15-2..5 按孔数（用户 2026-11-09 口径：YM15-5-1860 套
+    # 3-5-20 并备注「锚具规格实际为 YM15-5-1860」）
+    if "锚具" in fx_s or ("锚具" in mat and re.search(r"15[-]\d", mat)):
+        m15 = re.search(r"([A-Z]*)\s*[-]?15[-](\d{1,2})", mat)
+        if m15:
+            prefix, holes = m15.group(1), int(m15.group(2))
+            if "B" in prefix and 2 <= holes <= 5:
+                code = f"3-5-{16 + holes - 2}"   # 3-5-16..19 = 扁锚具 15-2..5
+            else:
+                code = "3-5-20"                  # 圆锚最小档 15-7（库内无更小档）
+        else:
+            code, holes = "3-5-20", 0
+        e = next((x for x in entries
+                  if str(x["code"]).split("*")[0].strip() == code), None)
+        if e is not None:
+            kind = ("扁锚" if (m15 and "B" in m15.group(1)) else "圆锚")
+            status, matches = "single", [{"entry": e, "score": 60, "unit_ok": True,
+                                          "reasons": [f"锚具 {item.get('mat')} 为{kind}，"
+                                                      f"套 {e['code']} {e['name']}（用户口径）"]}]
+            if m15 and code == "3-5-20":
+                matches[0]["reasons"].append(
+                    f"锚具规格实际为 {item.get('mat')}（定额 15-7 档为库内最小档，已备注）")
+                matches[0]["name_tags"] = [
+                    f"锚具规格实际为 {item.get('mat')}（定额 15-7 档为库内最小档）"]
+            notes.append(f"锚具 {item.get('mat')} 按用户口径套 {e['code']}"
+                         + (f"，锚具规格实际为 {item.get('mat')}。" if m15 else "。"))
+        else:
+            status, matches = "none", []
+            notes.append(f"锚具应套 {code}，但库内无此子目，需补充。")
+            checklist.append(f"锚具应套 {code}，但库内无此子目，需补充")
+        for c in matches:
+            mult = _unit_parts(c["entry"]["unit"])[1]
+            val = item.get("value") if item.get("value") is not None else 0
+            c["qty_natural"] = val
+            c["qty_de"] = val / mult
+            c["amount"] = (round(c["qty_de"] * c["entry"]["price"], 2)
+                           if c["entry"]["price"] is not None else None)
+        return {"idx": idx, "item": item, "status": status, "matches": matches,
+                "rule_combo": [], "checklist": checklist, "notes": notes,
+                "mud": [], "cage": None, "tpl": None}
+    # 预制混凝土六棱块/六角块（护坡砌筑）→ 1-1-30 浆砌预制块护坡 有底浆（优先），
+    # 1-1-29 无底浆备选（用户 2026-11-09 口径）
+    if "六棱块" in mat or "六角块" in mat:
+        e30 = next((x for x in entries
+                    if str(x["code"]).split("*")[0].strip() == "1-1-30"), None)
+        e29 = next((x for x in entries
+                    if str(x["code"]).split("*")[0].strip() == "1-1-29"), None)
+        if e30 is not None:
+            status = "single" if e29 is None else "multi"
+            matches = [{"entry": e30, "score": 60, "unit_ok": True,
+                        "reasons": [f"预制混凝土六棱块（{item.get('mat')}）按用户口径套浆砌预制块护坡",
+                                    "优先选择 1-1-30 浆砌预制块护坡 有底浆"]}]
+            if e29 is not None:
+                matches.append({"entry": e29, "score": 55, "unit_ok": True,
+                                "reasons": ["1-1-29 浆砌预制块护坡 无底浆（备选）"]})
+                matches[0]["name_tags"] = ["备选：1-1-29 浆砌预制块护坡 无底浆"]
+            notes.append("预制混凝土六棱块按用户口径套 1-1-30 浆砌预制块护坡"
+                         "（有底浆优先，无底浆 1-1-29 备选）。")
+        elif e29 is not None:
+            status, matches = "single", [{"entry": e29, "score": 55, "unit_ok": True,
+                                          "reasons": ["按用户口径套浆砌预制块护坡"
+                                                      "（库内仅有 1-1-29 无底浆）"]}]
+            notes.append("预制混凝土六棱块按用户口径套 1-1-29 浆砌预制块护坡"
+                         "（库内无 1-1-30，有底浆需补充）。")
+        else:
+            status, matches = "none", []
+            notes.append("预制混凝土六棱块应套浆砌预制块护坡，但库内无 1-1-29/1-1-30 子目，需补充。")
+            checklist.append("六棱块护坡定额（1-1-29/1-1-30）库内缺失，需补充")
+        for c in matches:
+            mult = _unit_parts(c["entry"]["unit"])[1]
+            val = item.get("value") if item.get("value") is not None else 0
+            c["qty_natural"] = val
+            c["qty_de"] = val / mult
             c["amount"] = (round(c["qty_de"] * c["entry"]["price"], 2)
                            if c["entry"]["price"] is not None else None)
         return {"idx": idx, "item": item, "status": status, "matches": matches,
@@ -2331,7 +2514,35 @@ def _match_one(idx, item, entries, code_index, rules, all_items, span_len=30.0,
             te["tpl_default"] = tfi["default"]
             te["conc_val"] = item.get("value")
             tpl = te
-    if (group and group in rules) or demo:
+    # 承台混凝土锚定 3-3-24 现浇混凝土承台（用户 2026-11-06 口径：不再选梁体类子目；
+    # 库内仅 C25 档，强度不同由 _grade_tag 在名称后备注「Cxx 混凝土」）
+    if (group == "承台" and re.match(r"^C\d{2}", mat) and "垫层" not in mat
+            and _unit_parts(item.get("mat_unit") or "")[0] == "m3"):
+        e = next((x for x in entries
+                  if str(x["code"]).split("*")[0].strip() == "3-3-24"), None)
+        if e is not None:
+            status, matches = "single", [{"entry": e, "score": 60, "unit_ok": True,
+                                          "reasons": ["承台混凝土套 3-3-24 现浇混凝土承台（用户口径）",
+                                                      "库内无对应强度档，强度不同按名称后备注"]}]
+            notes.append(f"承台混凝土 {mat} 按用户口径套 3-3-24 现浇混凝土承台"
+                         "（库内仅 C25 档，强度不同已备注）。")
+        else:
+            status, matches = "none", []
+            notes.append("承台混凝土应套 3-3-24，但库内无此子目，需补充。")
+        for c in matches:
+            mult = _unit_parts(c["entry"]["unit"])[1]
+            val = item.get("value") if item.get("value") is not None else 0
+            c["qty_natural"] = val
+            c["qty_de"] = val / mult
+            c["amount"] = (round(c["qty_de"] * c["entry"]["price"], 2)
+                           if c["entry"]["price"] is not None else None)
+        return {"idx": idx, "item": item, "status": status, "matches": matches,
+                "rule_combo": [], "checklist": _checklist(item, soil=soil), "notes": notes,
+                "mud": [], "cage": None, "tpl": tpl}
+    mill = None  # 铣刨厚度>3cm：主行之外随同增行 1-3-4 每增减1cm
+    # 沥青类条目即使无规则组也走候选池路径：粘层油→结合油/封层→下封层 等
+    # 口径加分在 _find_candidates 内（用户 2026-11-06）
+    if (group and group in rules) or demo or "沥青" in mat:
         pool = _find_candidates(item, entries, rules, bridge_width)
         cands = []
         for p in pool:
@@ -2354,6 +2565,21 @@ def _match_one(idx, item, entries, code_index, rules, all_items, span_len=30.0,
         matches = top
         if note:
             notes.append(note)
+        # 铣刨厚度：量表「Ncm沥青铣刨面积」且 N>3cm 时，主行 1-3-3 之外
+        # 随同增行 1-3-4 铣刨机铣刨沥青混凝土路面 每增减1cm，
+        # 工程量=面积×(N-3)（用户 2026-11-06 口径；定额单位 100m2）
+        mm_th = re.search(r"(\d+(?:\.\d+)?)\s*cm", mat)
+        if (demo and "铣刨" in mat and mm_th and matches
+                and str(matches[0]["entry"]["code"]).split("*")[0].strip() == "1-3-3"):
+            th = float(mm_th.group(1))
+            if th > 3:
+                e134 = next((x for x in entries
+                             if str(x["code"]).split("*")[0].strip() == "1-3-4"), None)
+                if e134 is not None:
+                    mill = {"entry": dict(e134), "times": th - 3, "thick": th}
+                    notes.append(f"铣刨厚度 {th:g}cm>3cm：主行套 1-3-3（3cm）后，"
+                                 f"每增减1cm 套 1-3-4 共 {th - 3:g} 次，"
+                                 f"工程量=面积×{th - 3:g}（用户口径）。")
         # 桩基混凝土条目（top 为 3-1-60 灌注桩混凝土）：泥浆制作/运输随同套用
         is_pile_conc = (group == "桩基础" and re.search(r"C\d{2}", mat)
                         and matches
@@ -2610,7 +2836,7 @@ def _match_one(idx, item, entries, code_index, rules, all_items, span_len=30.0,
                      f"模板量=混凝土量×系数（默认 {tpl['tpl_default']:g}，页面可改）。")
     return {"idx": idx, "item": item, "status": status, "matches": matches,
             "rule_combo": combo, "checklist": checklist, "notes": notes,
-            "mud": mud, "cage": cage, "tpl": tpl}
+            "mud": mud, "cage": cage, "tpl": tpl, "milling_extra": mill}
 
 
 def match_quotas(items, lib, span_len=30.0, soil="", bridge_width=8.5) -> list[dict]:
@@ -2841,7 +3067,13 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
             {"div": "上部结构", "sections": [
                 {"name": g, "group": g, "subs": []}
                 for g in ("预应力砼现浇箱梁", "预应力混凝土小箱梁", "预应力板梁",
-                          "钢箱梁", "桥面铺装")]},
+                          "钢箱梁", "桥面铺装")] + [
+                # 钢绞线部分放上部结构末尾（混凝土/钢筋之后）、附属结构之前
+                # （用户 2026-11-09 口径：15.2钢绞线/波纹管/锚具 独立分项）
+                {"name": "15.2钢绞线", "group": "钢绞线", "subs": []},
+                {"name": "波纹管", "group": "波纹管", "subs": []},
+                {"name": "锚具", "group": "锚具", "subs": []},
+            ]},
             {"div": "附属结构", "sections": [
                 {"name": g, "group": g, "subs": []}
                 for g in ("支座", "伸缩缝", "人行道板", "防撞护栏", "隔声屏障",
@@ -2854,6 +3086,15 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
                 (s.get("group") or s.get("name")) == "梯道" for s in _d["sections"]):
             _d["sections"].append({"name": "梯道", "group": "梯道",
                                    "subs": ["混凝土", "钢筋"]})
+    # 钢绞线/波纹管/锚具独立分项补入上部结构末尾（用户 2026-11-09 口径；
+    # 上传模板未含这些分项时自动补入，避免条目落入附属结构尾部）
+    for _d in hier:
+        if _d["div"] == "上部结构":
+            for _nm, _grp in (("15.2钢绞线", "钢绞线"), ("波纹管", "波纹管"),
+                              ("锚具", "锚具")):
+                if not any((s.get("group") or s.get("name")) == _grp
+                           for s in _d["sections"]):
+                    _d["sections"].append({"name": _nm, "group": _grp, "subs": []})
     _GROUP_POS = {}   # 规则组 → (分部序, 分项序, 子分项序)
     _SEC_SUBS = {}    # 规则组 → 子组顺序列表
     for di, d in enumerate(hier):
@@ -3076,12 +3317,87 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
             return "粘层"
         return None
 
+    # ---- 导出预处理①：排水/泄水孔分项里的 防水涂料 并入桥面防水层 ----
+    # （用户 2026-11-06 口径：单位与桥面防水层一致 → 量并入；不一致 → 概算不单列）
+    rules_lib = (lib or {}).get("rules") or {}
+    wl_rs = [r for r in results
+             if r["item"].get("value")
+             and _group_of(r["item"], rules_lib) == "防水层"
+             and _unit_parts(r["item"].get("mat_unit") or "")[0] == "m2"]
+    wl_entry = next((e for e in (lib or {}).get("entries") or []
+                     if str(e.get("code") or "").split("*")[0].strip() == "3-10-31"), None)
+    for r in results:
+        it = r["item"]
+        fx_n = _norm_text(it.get("fenxiang") or "")
+        if not ("泄水" in fx_n or "排水" in fx_n):
+            continue
+        if "防水涂料" not in _norm_text(it.get("mat") or ""):
+            continue
+        v = _to_float(it.get("value")) or 0
+        u = _unit_parts(it.get("mat_unit") or "")[0]
+        if v > 0 and u == "m2" and wl_rs:
+            t = wl_rs[0]
+            old = _to_float(t["item"].get("value")) or 0
+            t["item"]["value"] = old + v
+            t["item"]["syn_tags"] = (t["item"].get("syn_tags") or []) + [
+                f"含{it.get('fenxiang') or '排水系统'}改性沥青防水涂料 "
+                f"{_fmt_num(v)} m2 并入（单位一致）"]
+            t.setdefault("notes", []).append(
+                f"改性沥青防水涂料 {_fmt_num(v)} m2 并入桥面防水层工程量（单位一致，用户口径）。")
+            r["merge_into_waterproof"] = True
+            r.setdefault("notes", []).append(
+                f"改性沥青防水涂料 {_fmt_num(v)} m2 已并入桥面防水层（单位一致，用户口径）。")
+        else:
+            r["waterproof_skip"] = True
+            r.setdefault("notes", []).append(
+                "改性沥青防水涂料单位与桥面防水层不一致，按用户口径概算不单列。")
+
+    # ---- 导出预处理②：桥墩/桥台 承台同规格材料合并（用户 2026-11-06 口径）----
+    # 同分项（去掉 桥墩/桥台 前缀）、同材料、同单位 的承台条目量加在一起，
+    # 只套一遍定额（混凝土/钢筋同理）；被并条目在 Sheet2 标 ★合并
+    def _cx_strip(fx):
+        return re.sub(r"^(桥墩|桥台)", "", _norm_text(fx or ""))
+    cx_groups = {}
+    for r in results:
+        it = r["item"]
+        fx_n = _norm_text(it.get("fenxiang") or "")
+        if "梯道" in fx_n or "承台" not in _cx_strip(fx_n):
+            continue
+        key = (_cx_strip(fx_n), _norm_text(it.get("mat") or ""),
+               _norm_text(it.get("mat_unit") or ""))
+        cx_groups.setdefault(key, []).append(r)
+    for key, rs in cx_groups.items():
+        if len(rs) < 2:
+            continue
+        total = sum(_to_float(x["item"].get("value")) or 0 for x in rs)
+        if total <= 0:
+            continue
+        base = rs[0]
+        parts = [f"{x['item'].get('fenxiang') or ''} "
+                 f"{_fmt_num(x['item'].get('value') or 0)}" for x in rs]
+        base["item"]["value"] = total
+        base["item"]["fenxiang"] = "桥墩+桥台 " + key[0]
+        base["item"]["syn_tags"] = (base["item"].get("syn_tags") or []) + [
+            f"桥墩/桥台承台同规格合并只套一遍：{' + '.join(parts)}"]
+        base.setdefault("notes", []).append(
+            "桥墩/桥台承台同规格材料合并合计套用（用户口径：只套一遍定额）。")
+        if base.get("tpl") is not None:
+            base["tpl"]["conc_val"] = total
+        for x in rs[1:]:
+            x["merged_into"] = base["idx"]
+            x.setdefault("notes", []).append(
+                f"已并入「桥墩+桥台 {key[0]}」同规格合并行（序号 {base['idx'] + 1}）。")
+
     buckets = {}   # (分部序, 分项序, 子分项序, 子组序) → [r]
     tail = []      # [(div, sub, r)]：模板层级未覆盖的条目，挂所属分部末尾
     for r in results:
         if r["status"] == "none" or not r["matches"]:
             continue  # 无匹配条目不进计价表（见 补充信息清单）
         it = r["item"]
+        # 承台合并/防水涂料并入后的被并条目：不进计价表（明细见 Sheet2 ★标注）
+        if (r.get("merged_into") is not None
+                or r.get("merge_into_waterproof") or r.get("waterproof_skip")):
+            continue
         # 桩基/声测管条目不进通用分桶，由 _write_pile_section 按桩径分组重算写入
         if pile_groups and (it.get("kind") == "桩基参数" or _is_pile_mat_item(it)
                             or "检测管" in _norm_text(it.get("fenxiang") or "")):
@@ -3197,6 +3513,11 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
             tags.append(tag)
         if c.get("conv_pipe"):
             tags.append(f"按 {c['conv_pipe']['w_kgm']:g} kg/m 换算长度")
+        for t in c.get("name_tags") or []:
+            tags.append(t)
+        if c.get("unit_mismatch"):
+            tags.append(f"清单单位 {_norm_text(it.get('mat_unit') or '')} 与定额单位 "
+                        f"{e['unit']} 不同量纲：需按单重换算后套用，合价暂不计")
         if e.get("price") is None:
             tags.append("单价库中无此子目，需补充")
         # 桩长超库内最大深度档的借用说明（理由标注"最大档"时）
@@ -3222,6 +3543,9 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
                                  + (f"/{mult:g}" if mult != 1 else ""))
         elif it.get("kind") == "桩基参数":
             ws[f"F{row}"] = f"={_fmt_num(it['count'])}*{_fmt_num(it['depth'])}/{mult:g}"
+        elif c.get("unit_mismatch"):  # 不同量纲不换算（如 套→t）：按清单量列示，合价不计
+            v = it.get("value")
+            ws[f"F{row}"] = round(v, 4) if v is not None else 0
         elif c.get("note_conv"):  # kg→t
             ws[f"F{row}"] = (f"={_fmt_num(it['value'])}/1000/{mult:g}" if mult != 1
                              else f"={_fmt_num(it['value'])}/1000")
@@ -3237,7 +3561,7 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
             ws[f"F{row}"] = round(v, 4) if v is not None else 0
         # 单价 = 定额原单价
         price = e["price"]
-        if price is not None:
+        if price is not None and not c.get("unit_mismatch"):
             ws[f"G{row}"] = round(price, 4)
             ws[f"I{row}"] = f"=F{row}*G{row}"
         style_row(row)
@@ -3292,6 +3616,26 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
             ws[f"F{row}"] = f"={_fmt_num(tpl['conc_val'])}*{ratio:g}/{tmult:g}"
             if tpl["price"] is not None:
                 ws[f"G{row}"] = round(tpl["price"], 4)
+                ws[f"I{row}"] = f"=F{row}*G{row}"
+            style_row(row)
+            row += 1
+        # 铣刨厚度>3cm：主行（1-3-3）之后随同增行 1-3-4 每增减1cm，
+        # 工程量=面积×(厚度-3)（用户 2026-11-06 口径；定额单位 100m2）
+        mill = r.get("milling_extra")
+        if mill:
+            me = mill["entry"]
+            mmult = _unit_parts(me["unit"])[1]
+            times = mill["times"]
+            ws[f"B{row}"] = me["code"]
+            ws[f"C{row}"] = (me["name"]
+                             + f"〔清单 {_fmt_num(it['value'])} m2×{times:g}cm 增厚"
+                             + f"（铣刨厚度 {mill['thick']:g}cm>3cm，主行套 1-3-3 后"
+                             + f"每增减1cm 套 {times:g} 次）〕")
+            ws.merge_cells(f"C{row}:D{row}")
+            ws[f"E{row}"] = me["unit"]
+            ws[f"F{row}"] = f"={_fmt_num(it['value'])}*{times:g}/{mmult:g}"
+            if me["price"] is not None:
+                ws[f"G{row}"] = round(me["price"], 4)
                 ws[f"I{row}"] = f"=F{row}*G{row}"
             style_row(row)
             row += 1
@@ -3666,25 +4010,53 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
         base_row = [r["idx"] + 1, it.get("sheet", ""), it.get("fenxiang", ""),
                     mat_label, qty_label,
                     _STATUS_CN.get(r["status"], r["status"])]
+        if r.get("merge_into_waterproof"):
+            wc, wn, wu = ("3-10-31", "桥面防水层", "10m2")
+            if wl_entry is not None:
+                wc, wn, wu = (str(wl_entry.get("code") or wc),
+                              wl_entry.get("name") or wn,
+                              wl_entry.get("unit") or wu)
+            ws2.append(base_row + ["★并入", wc, wn, wu, "", "", "", "",
+                                   "单位与桥面防水层一致（m2）：量并入桥面防水层，"
+                                   "概算不单列（用户口径）"])
+            r2 += 1
+            continue
+        if r.get("waterproof_skip"):
+            ws2.append(base_row + ["★不套", "", "", "", "", "", "", "",
+                                   "防水涂料单位与桥面防水层不一致："
+                                   "按用户口径概算不单列"])
+            r2 += 1
+            continue
+        if r.get("merged_into") is not None:
+            ws2.append(base_row + ["★合并", "", "", "", "", "", "", "",
+                                   f"桥墩/桥台承台同规格合并，见序号 "
+                                   f"{r['merged_into'] + 1} 行（只套一遍定额）"])
+            r2 += 1
+            continue
         if r["matches"]:
             for j, c in enumerate(r["matches"]):
                 e = c["entry"]
                 mult = _unit_parts(e["unit"])[1]
                 ws2.append(base_row + ["★最优" if j == 0 else "",
                                        e["code"], e["name"], e["unit"],
-                                       None, e["price"], None,
+                                       None,
+                                       None if c.get("unit_mismatch") else e["price"],
+                                       None,
                                        c.get("score", ""),
                                        "；".join(c.get("reasons") or [])])
                 # 定额工程量（扩大单位）：有计算过程的写成公式
                 if it.get("kind") == "桩基参数":
                     ws2[f"K{r2}"] = f"={_fmt_num(it['count'])}*{_fmt_num(it['depth'])}/{mult:g}"
+                elif c.get("unit_mismatch"):  # 不同量纲不换算（如 套→t）：按清单量列示
+                    ws2[f"K{r2}"] = (round(it["value"], 4)
+                                     if it.get("value") is not None else 0)
                 elif c.get("note_conv"):
                     ws2[f"K{r2}"] = (f"={_fmt_num(it['value'])}/1000/{mult:g}" if mult != 1
                                      else f"={_fmt_num(it['value'])}/1000")
                 else:
                     ws2[f"K{r2}"] = (f"={_fmt_num(it['value'])}/{mult:g}" if mult != 1
                                      else round(it["value"], 4) if it.get("value") is not None else 0)
-                if e["price"] is not None:
+                if e["price"] is not None and not c.get("unit_mismatch"):
                     ws2[f"M{r2}"] = f"=K{r2}*L{r2}"
                 r2 += 1
             liner = r.get("pile_liner")
@@ -3818,6 +4190,21 @@ def build_result_excel(results, lib=None, waste_haul_km=5, tpl_ratios=None,
                                           if ratio_changed else "（页面可改）")])
                 ws2[f"K{r2}"] = f"={_fmt_num(tpl['conc_val'])}*{ratio:g}/{tmult:g}"
                 if tpl["price"] is not None:
+                    ws2[f"M{r2}"] = f"=K{r2}*L{r2}"
+                r2 += 1
+            mill = r.get("milling_extra")
+            if mill:
+                me = mill["entry"]
+                mmult = _unit_parts(me["unit"])[1]
+                times = mill["times"]
+                ws2.append(base_row + ["★套用",
+                                       me["code"], me["name"], me["unit"],
+                                       None, me["price"], None, "",
+                                       f"铣刨厚度 {mill['thick']:g}cm>3cm：主行 1-3-3 之外"
+                                       f"每增减1cm 套 {times:g} 次，工程量=面积×{times:g}"
+                                       "（用户口径）"])
+                ws2[f"K{r2}"] = f"={_fmt_num(it['value'])}*{times:g}/{mmult:g}"
+                if me["price"] is not None:
                     ws2[f"M{r2}"] = f"=K{r2}*L{r2}"
                 r2 += 1
         else:

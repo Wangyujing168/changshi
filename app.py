@@ -18,9 +18,11 @@ from fee_engine import (
     _get_coef_config_simple,
     _preset_fee_numbers,
     build_excel_summary, TJ_TEMPLATE_XLSX,
+    compute_selected_fees,
 )
 from ai_planner import (
     PlannerError, available_keys, build_ctx_summary, question_done, run_planner,
+    sanitize_plan_questions,
 )
 from config import CASE_BASE_DIR
 
@@ -205,6 +207,35 @@ def _build_cascade_excel(ctx: dict) -> bytes:
     return build_excel_summary(ctx)
 
 
+# ===== 功能页通用标题行（含「刷新本功能」按钮） =====
+
+def _page_header(title: str, refresh_key: str, refresh_keys,
+                 refresh_prefixes=None, keep_keys=None):
+    """功能页标题行 + 「🔄 刷新本功能」按钮。
+
+    点击后清除本功能的全部 session 状态（上传文件、解析结果、计算结果、
+    参数输入、动态子键），立即重跑——无需刷新整个网页（F5 不清
+    session_state，这正是本按钮存在的意义）。导航开关（*_mode/active_case）
+    与全局偏好（selected_region 等，keep_keys 白名单）不受影响。
+    """
+    c1, c2 = st.columns([0.78, 0.22], vertical_alignment="center")
+    with c1:
+        st.title(title)
+    with c2:
+        if st.button("🔄 刷新本功能", key=refresh_key, use_container_width=True,
+                     help="清除本功能的全部上传、参数与计算结果，重新开始"):
+            keep = {k: st.session_state[k]
+                    for k in (keep_keys or []) if k in st.session_state}
+            for k in refresh_keys:
+                st.session_state.pop(k, None)
+            for prefix in refresh_prefixes or []:
+                for k in list(st.session_state.keys()):
+                    if k.startswith(prefix):
+                        st.session_state.pop(k, None)
+            st.session_state.update(keep)
+            st.rerun()
+
+
 # ===== 广联达 PDF 导入页 =====
 
 def _render_pdf_import_page():
@@ -216,11 +247,20 @@ def _render_pdf_import_page():
     import pandas as pd
     from pdf_import import parse_pdf, build_groups
 
-    st.title("📄 广联达 PDF 报表导入")
+    _page_header("📄 广联达报表导入", "pdf_refresh",
+                 ["pdf_up", "pdf_up_id", "excel_up", "excel_up_id", "pdf_rows",
+                  "pdf_editor", "pdf_split_mode", "zhuan_ye_list", "pdf_bytes",
+                  "src_pdf_up", "src_pdf_up_id", "src_pdf_files"],
+                 refresh_prefixes=["excel_len_", "excel_cross_",
+                                   "excel_item_editor_"])
     st.caption("只解析每个专业的「单位工程造价汇总表」（河北等地区）或"
                "「工程费用汇总表」（河南等地区）：提取 工程名称 + 工程造价"
                "（PDF 费用金额单位为元，已换算为万元，原值保留）。"
-               "同一工程名称出现多批时自动按（一）（二）…分组，可在下方编辑。")
+               "同一工程名称出现多批时自动按（一）（二）…分组，可在下方编辑。"
+               "也可直接上传广联达 Excel 造价分析表（单项造价分析/项目造价分析），"
+               "除工程造价外还会识别 工程规模/单位造价 指标（可多选，新上传会替换当前表格）。"
+               "用 Excel 导入时，如需在概算成果末尾附上广联达源 PDF，"
+               "请在下方「📎 附加广联达源 PDF」上传。")
 
     up = st.file_uploader("上传广联达导出的 PDF 报表", type=["pdf"], key="pdf_up")
     if up is not None and st.session_state.get("pdf_up_id") != up.file_id:
@@ -234,15 +274,78 @@ def _render_pdf_import_page():
             st.error("未识别到「单位工程造价汇总表」或「工程费用汇总表」，请确认是广联达软件导出的报表。")
             st.stop()
         st.session_state.pdf_up_id = up.file_id
+        st.session_state.pop("excel_up_id", None)
+        # 保存源 PDF 字节：概算成果导出（封面+编制说明+概算表+广联达PDF 合并）时使用
+        st.session_state.pdf_bytes = up.getvalue()
+        # 新 PDF 即新的源文件：清除此前单独附加的源 PDF（避免成果误附旧文件）
+        st.session_state.pop("src_pdf_files", None)
+        st.session_state.pop("src_pdf_up_id", None)
         # 新 PDF：清除上一次的导出方式选择（radio 按当前解析结果重新显示）
         st.session_state.pop("pdf_split_mode", None)
         st.session_state.pdf_rows = [
             {"组号": l["group_no"], "组名": "", "专业": l["zhuanye"], "节": l["jie"],
              "细目": l["ximu"], "造价(万元)": l["amount_wan"],
-             "设备费(万元)": l["device_wan"], "电气专业": l["electrical"]}
+             "设备费(万元)": l["device_wan"], "电气专业": l["electrical"],
+             "单位": "", "工程规模": None, "单位造价(元)": None}
             for l in leaves
         ]
         st.rerun()
+
+    ex_up = st.file_uploader(
+        "或上传广联达 Excel 造价分析表（单项造价分析 / 项目造价分析，可多选）",
+        type=["xls", "xlsx"], key="excel_up", accept_multiple_files=True)
+    if ex_up and st.session_state.get("excel_up_id") != [f.file_id for f in ex_up]:
+        from excel_import import parse_analysis
+        leaves = []
+        _goff = 1
+        for f in ex_up:
+            with st.spinner(f"正在解析「{f.name}」…"):
+                try:
+                    _part = parse_analysis(f.getvalue(), group_offset=_goff,
+                                           filename=f.name)
+                except Exception as e:
+                    st.error(f"「{f.name}」解析失败：{e}")
+                    st.stop()
+            leaves += _part
+            _goff = max((l["组号"] for l in _part), default=0) + 1
+        if not leaves:
+            st.error("未识别到「序号/名称/金额」表头，请确认是造价分析类报表。")
+            st.stop()
+        st.session_state.excel_up_id = [f.file_id for f in ex_up]
+        st.session_state.pop("pdf_up_id", None)
+        st.session_state.pop("pdf_bytes", None)
+        st.session_state.pop("pdf_split_mode", None)
+        st.session_state.pdf_rows = leaves
+        st.rerun()
+
+    # 附加源 PDF（仅存档、不解析）：Excel 导入时专业清单来自表格，概算成果
+    # 末尾的广联达 PDF 需要在这里单独上传；上传解析 PDF 时无需（本身即源）。
+    # 可多选：分开导出（每单项一份概算表）时按上传顺序对应各单项
+    src_up = st.file_uploader(
+        "📎 附加广联达源 PDF（可选；仅附在「概算成果」末尾，不参与解析——"
+        "用 Excel 导入专业清单时在此补传，可一次多选："
+        "分开导出时按上传顺序对应各单项，只传一份则每份成果都附这一份）",
+        type=["pdf"], key="src_pdf_up", accept_multiple_files=True)
+    if src_up and st.session_state.get("src_pdf_up_id") != [f.file_id for f in src_up]:
+        st.session_state.src_pdf_up_id = [f.file_id for f in src_up]
+        st.session_state.src_pdf_files = [(f.name, f.getvalue()) for f in src_up]
+        st.rerun()
+    if st.session_state.get("src_pdf_files"):
+        _sf = st.session_state["src_pdf_files"]
+        # 上传控件离开页面后状态会被 Streamlit 清理（widget state 丢失），
+        # 这里以 session 里的附件为准，不清除；控件为空时提示可重新上传/刷新清除
+        _hint = ("（上传控件当前为空：重新上传会替换附件；"
+                 "点「🔄 刷新本功能」清除）" if not src_up else "")
+        if len(_sf) == 1:
+            st.caption(f"✅ 已附加源 PDF：{_sf[0][0]}（将附在概算成果末尾）{_hint}")
+        else:
+            st.caption(
+                f"✅ 已附加 {len(_sf)} 份源 PDF：{'、'.join(n for n, _b in _sf)}。"
+                "分开导出（每单项一份概算表）时按上传顺序对应各单项；"
+                "合并为同一概算表时全部附在成果末尾。" + _hint)
+    elif not st.session_state.get("pdf_bytes"):
+        st.caption("⚠ 未附加广联达源 PDF。通过 Excel 导入时请在此上传源 PDF，"
+                   "概算成果末尾才能附上广联达报表。")
 
     rows = st.session_state.get("pdf_rows")
     if not rows:
@@ -269,6 +372,9 @@ def _render_pdf_import_page():
             "造价(万元)": st.column_config.NumberColumn("造价(万元)", format="%.4f"),
             "设备费(万元)": st.column_config.NumberColumn("设备费(万元)", format="%.4f"),
             "电气专业": st.column_config.CheckboxColumn("电气专业"),
+            "单位": st.column_config.TextColumn("单位"),
+            "工程规模": st.column_config.NumberColumn("工程规模", format="%.2f"),
+            "单位造价(元)": st.column_config.NumberColumn("单位造价(元)", format="%.2f"),
         },
     )
 
@@ -278,7 +384,8 @@ def _render_pdf_import_page():
         {"group_no": r.get("组号"), "group_name": r.get("组名"),
          "zhuanye": r.get("专业"), "jie": r.get("节"), "ximu": r.get("细目"),
          "amount_wan": r.get("造价(万元)"), "device_wan": r.get("设备费(万元)"),
-         "electrical": r.get("电气专业")}
+         "electrical": r.get("电气专业"), "unit": r.get("单位"),
+         "qty": r.get("工程规模"), "unit_val": r.get("单位造价(元)")}
         for r in edited.to_dict("records")
     ])
     tot = 0.0
@@ -299,32 +406,126 @@ def _render_pdf_import_page():
                 f"（其中设备费 {dev_tot:,.2f} 万元）**")
 
     if len(groups) > 1:
-        _split_opts = ["同一概算表拆项", "每单项单独一张概算表"]
+        _split_opts = ["同一概算表拆项", "分开做概算表（每单项一份）"]
         _mode = st.radio(
             "概算表导出方式（多项工程）",
             _split_opts,
             index=(_split_opts.index(st.session_state["pdf_split_mode"])
                    if st.session_state.get("pdf_split_mode") in _split_opts else 0),
             horizontal=True,
-            help="方式一：所有单项列在同一张概算表中（按单项 1/1.1/2/2.1 拆项列示）；"
-                 "方式二：每个单项单独一张概算表（只含该单项第一部分工程费），"
-                 "另附「项目汇总表」；二类费/预备费/总投资均按项目整体计算。",
+            help="同一概算表拆项：所有单项列在同一张概算表中（按单项 1/1.1/2/2.1 拆项列示）。"
+                 "分开做概算表：每个单项工程单独一份概算表文件（二类费/预备费/总投资"
+                 "按该单项自己的工程费计算）；征地拆迁费/自定义费用按单项逐一提问、"
+                 "分别写入自己那份概算表；概算成果（编制说明+PDF）也按每单项一套分别生成。",
         )
         # 镜像到普通 session_state 键：radio 只在 PDF 导入页渲染，跳转到结果页后
         # Streamlit 会清理未渲染 widget 的状态（带 key 的 widget 状态会丢），
         # 普通键不会被清理，导出时从这里读
         st.session_state["pdf_split_mode"] = _mode
 
+    # ── 技术经济指标：大项（专业行）指标默认口径 + 提问 + 可直接编辑 ──
+    from excel_import import item_default_tech, tech_from_text, tech_to_text
+    _any_leaf_tech = any("tech" in lf for g in groups for it in g["items"]
+                         for lf in it["leaves"])
+    _lens: dict = {}
+    _cross: dict = {}
+    if _any_leaf_tech:
+        st.markdown("### 技术经济指标（导出到概算表 单位/数量/单位价值 列）")
+        st.caption("Excel 细项行的 工程规模/单位造价 直接作为细目指标；大项（专业行）"
+                   "默认口径：道路=m2 路面面积（行车道/车行道+非机动车道+人行道）"
+                   "+m 道路长度、照明=m 道路长度、信号灯/电子警察/智能交通=路口"
+                   "（智能交通未填路口数时默认 m=道路长度），"
+                   "其余按专业名推断单位同单位求和、单位价值=金额÷数量。"
+                   "下方可直接编辑。")
+        for gi, g in enumerate(groups, 1):
+            _zys = [str(it.get("zhuanye") or "") for it in g["items"]]
+            _need_len = any(("道路" in z) or ("照明" in z) for z in _zys)
+            _need_cross = any(k in z for z in _zys
+                              for k in ("信号灯", "电子警察", "智能交通"))
+            if not (_need_len or _need_cross):
+                continue
+            _t1, _t2 = st.columns(2)
+            with _t1:
+                if _need_len:
+                    _lens[gi] = st.number_input(
+                        f"（{_cn[gi - 1] if gi <= len(_cn) else gi}）"
+                        f"{g['name'] or '未命名组'} 道路长度(m)",
+                        min_value=0.0, step=1.0, key=f"excel_len_{gi}") or 0.0
+            with _t2:
+                if _need_cross:
+                    _cross[gi] = st.number_input(
+                        f"（{_cn[gi - 1] if gi <= len(_cn) else gi}）"
+                        f"{g['name'] or '未命名组'} 路口数(个)",
+                        min_value=0.0, step=1.0, key=f"excel_cross_{gi}") or 0.0
+        _item_rows = []
+        for gi, g in enumerate(groups, 1):
+            for it in g["items"]:
+                _u, _q, _v = tech_to_text(item_default_tech(
+                    it["zhuanye"], it["leaves"], _lens.get(gi, 0.0),
+                    _cross.get(gi, 0.0)))
+                _item_rows.append({"组号": gi, "组名": g["name"] or "",
+                                   "专业": it["zhuanye"], "单位": _u,
+                                   "数量": _q, "单位价值(元)": _v})
+        st.markdown("**大项技术经济指标（可直接编辑）**")
+        _item_edited = st.data_editor(
+            pd.DataFrame(_item_rows),
+            key=f"excel_item_editor_{len(_item_rows)}",
+            num_rows="fixed",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "组号": st.column_config.NumberColumn("组号", disabled=True),
+                "组名": st.column_config.TextColumn("组名", disabled=True),
+                "专业": st.column_config.TextColumn("专业", disabled=True),
+                "单位": st.column_config.TextColumn("单位（多组用「、」分隔）"),
+                "数量": st.column_config.TextColumn("数量"),
+                "单位价值(元)": st.column_config.TextColumn("单位价值(元)"),
+            },
+        )
+    else:
+        _item_edited = pd.DataFrame()
+    _item_recs = [dict(r) for r in _item_edited.to_dict("records")]
+
+    def _attach_item_tech(gs, recs):
+        """把大项指标编辑器内容按 (组,专业) 顺序写回 items[].tech。"""
+        out = []
+        _idx = 0
+        for g in gs:
+            _items = []
+            for it in g["items"]:
+                _it = dict(it)
+                if _idx < len(recs):
+                    _t = tech_from_text(recs[_idx].get("单位"),
+                                        recs[_idx].get("数量"),
+                                        recs[_idx].get("单位价值(元)"))
+                    if _t:
+                        _it["tech"] = _t
+                    else:
+                        _it.pop("tech", None)
+                _idx += 1
+                _items.append(_it)
+            out.append({"name": g["name"], "items": _items})
+        return out
+
+    groups_out = _attach_item_tech(groups, _item_recs)
+
+    if len(groups) > 1 and st.session_state.get("pdf_split_mode") != \
+            "分开做概算表（每单项一份）":
+        st.warning("⚠ 当前导出方式为「同一概算表拆项」：所有单项放在**同一张概算表**，"
+                   "征地拆迁费/自定义费用按项目整体提问一次。"
+                   "如需**每个单项单独一份概算表**（征地拆迁费/自定义费用按单项逐一填写），"
+                   "请在上方「概算表导出方式」选择「**分开做概算表（每单项一份）**」。")
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button("💾 保存专业清单（用于 Excel 导出）", use_container_width=True,
                      type="primary"):
-            st.session_state.zhuan_ye_list = groups
+            st.session_state.zhuan_ye_list = groups_out
             st.success("已保存。返回主页面发起二类费计算，导出 Excel 的第一部分"
-                       "将按 组→专业→细目 列示，各层自动求和。")
+                       "将按 组→专业→细目 列示，各层自动求和，并带技术经济指标。")
     with c2:
         if st.button("🚀 按合计发起二类费计算", use_container_width=True):
-            st.session_state.zhuan_ye_list = groups
+            st.session_state.zhuan_ye_list = groups_out
             st.session_state.pdf_import_mode = False
             # tot 已含设备费（电气专业造价 = 安装 + 设备）→ 建安费须扣除设备费，
             # 否则第一部分工程费 = 建安 + 设备 会把设备费双计（面板与 Excel 合计不符）
@@ -350,7 +551,10 @@ def _render_preprocess_page():
                                  load_builtin_template, mapping_rows,
                                  parse_xls)
 
-    st.title("📋 表格预处理")
+    _page_header("📋 表格预处理", "pre_refresh",
+                 ["pre_xls_up", "pre_src_id", "pre_mapping", "pre_filled",
+                  "pre_xls_err", "pre_plant_up", "pre_plant_src_id",
+                  "pre_plant_changes", "pre_plant_file", "pre_plant_err"])
 
     # ---------- ① 数量总表 → 填充模板 ----------
     st.markdown("### ① 桥梁工程量表 → 填充模板")
@@ -447,9 +651,18 @@ def _render_bridge_match_page():
                               match_quotas, build_result_excel, result_rows,
                               ai_explain, _item_display, _grade_tag, TPL_RATIOS)
 
-    st.title("🌉 桥梁定额匹配")
+    _page_header("🌉 市政桥梁定额匹配", "bm_refresh",
+                 ["bm_lib_up", "bm_lib", "bm_lib_id", "bm_lib_err",
+                  "bm_rules_up", "bm_rules", "bm_rules_id", "bm_rules_err",
+                  "bm_qty_up", "bm_qty_id", "bm_qty_err", "bm_items",
+                  "bm_text_area", "bm_text_btn", "bm_text_warns",
+                  "bm_results", "bm_results_key", "bm_lib_merged",
+                  "bm_rules_src", "bm_ai_cache", "bm_span_len", "bm_soil",
+                  "bm_bridge_width", "bm_earth_reuse", "bm_soil_haul_km",
+                  "bm_waste_haul_km", "bm_run"],
+                 refresh_prefixes=["bm_tpl_", "bm_ai_btn_"])
     st.caption("上传导定额库 + 套定额模板（单位工程）+ 海泰式数量总表，"
-               "按构件/工艺/材料/规格自动匹配定额子目；"
+               "按构件/工艺/材料/规格自动匹配市政定额子目（适用于广联达软件）；"
                "严格以定额库文字为准，不编造子目；多候选全部列出并附差异说明；"
                "特征缺失时给出需补充的信息清单。")
 
@@ -805,6 +1018,188 @@ def _render_bridge_match_page():
                                     st.caption(f"　差异：{cand.get('diff', '')}")
                             if expl.get("overall"):
                                 st.info("综合建议：" + expl["overall"])
+
+
+# ===== 公路桥梁定额匹配：公路定额库 + 秦滨式数量总表 → 模板列结构套定额 =====
+def _render_road_bridge_page():
+    import pandas as pd
+    from bridge_match import BridgeMatchError, parse_quantity_excel
+    from bridge_match_road import (DEFAULT_PARAMS, build_road_excel,
+                                   default_road_library, match_road_quotas,
+                                   parse_road_library)
+
+    _page_header("🛣 公路桥梁定额匹配", "rb_refresh",
+                 ["rb_lib_up", "rb_lib", "rb_lib_id", "rb_lib_err",
+                  "rb_qty_up", "rb_qty_bytes", "rb_qty_id", "rb_qty_err",
+                  "rb_items", "rb_result",
+                  "rb_hun_km", "rb_gang_km", "rb_tu_km", "rb_long_km",
+                  "rb_liq_km", "rb_nijiang_dj", "rb_shatu_pct", "rb_yashi",
+                  "rb_ganghu_t", "rb_gjx_shu", "rb_qiaochang", "rb_weiyan_t"])
+    st.caption("上传公路定额库 + 秦滨式数量总表，按公路工程量定额自动套用，"
+               "输出模板列结构（项/目/节/细目代号+费率编号+定额代号+名称+单位+"
+               "工程量1+工程量2+定额调整情况+说明）；"
+               "钢筋类型抽换/实际运距/实际桩径等换算集中在「定额调整情况」与「说明」两列。")
+
+    # ---------- ① 定额库 ----------
+    st.markdown("### ① 定额库")
+    up_lib = st.file_uploader(
+        "上传公路定额库 .xls/.xlsx（可选）",
+        type=["xls", "xlsx"], key="rb_lib_up",
+        help="不传时按参考模板内置口径套用；上传后同编号以库为准，"
+             "库缺口的固定子目仍按模板口径兜底。")
+    lib = None
+    if up_lib is not None:
+        if st.session_state.get("rb_lib_id") != up_lib.file_id:
+            try:
+                lib = parse_road_library(up_lib.getvalue())
+                st.session_state.rb_lib = lib
+                st.session_state.rb_lib_id = up_lib.file_id
+                st.session_state.rb_lib_err = None
+            except Exception as e:
+                st.session_state.rb_lib_err = f"定额库解析失败：{e}"
+                st.session_state.rb_lib = None
+                st.session_state.rb_lib_id = None
+        lib = st.session_state.get("rb_lib")
+    if st.session_state.get("rb_lib_err"):
+        st.error(st.session_state.rb_lib_err)
+    elif lib:
+        st.success(f"已加载 {lib['n']} 条公路定额（同编号以库内名称为准）")
+    else:
+        lib = default_road_library()  # 内置公路概算定额库（quota_base/公路定额+预算.xls）
+        st.info(f"未上传定额库：已使用内置公路概算定额库（{lib['n']} 条），"
+                f"上传后同编号以库为准，库缺口子目按模板口径兜底。")
+
+    st.divider()
+
+    # ---------- ② 数量表 ----------
+    st.markdown("### ② 工程量数量表")
+    up_qty = st.file_uploader(
+        "上传秦滨式数量总表（总表含桩基块/支座块/伸缩缝文本块）",
+        type=["xls", "xlsx"], key="rb_qty_up")
+    items = None
+    if up_qty is not None:
+        if st.session_state.get("rb_qty_id") != up_qty.file_id:
+            try:
+                items = parse_quantity_excel(up_qty.getvalue())
+                st.session_state.rb_items = items
+                st.session_state.rb_qty_bytes = up_qty.getvalue()
+                st.session_state.rb_qty_id = up_qty.file_id
+                st.session_state.rb_qty_err = None
+            except Exception as e:
+                st.session_state.rb_qty_err = f"数量表解析失败：{e}"
+                st.session_state.rb_items = None
+                st.session_state.rb_qty_id = None
+        items = st.session_state.get("rb_items")
+    if st.session_state.get("rb_qty_err"):
+        st.error(st.session_state.rb_qty_err)
+    elif items:
+        st.success(f"已解析 {len(items)} 条清单项")
+
+    st.divider()
+
+    # ---------- ③ 参数 ----------
+    st.markdown("### ③ 换算与参数（默认按参考模板，可修改）")
+    pc = st.columns(3)
+    with pc[0]:
+        hun_km = float(st.number_input("🚛 混凝土搅拌车运距（km）", min_value=1.0,
+                                       max_value=100.0, value=float(DEFAULT_PARAMS["hun_km"]),
+                                       step=1.0, key="rb_hun_km"))
+        gang_km = float(st.number_input("🚚 钢材运输运距（km）", min_value=1.0,
+                                        max_value=100.0, value=float(DEFAULT_PARAMS["gang_km"]),
+                                        step=1.0, key="rb_gang_km"))
+        tu_km = float(st.number_input("⛰ 土方外运运距（km）", min_value=1.0,
+                                      max_value=100.0, value=float(DEFAULT_PARAMS["tu_km"]),
+                                      step=1.0, key="rb_tu_km"))
+        long_km = float(st.number_input("🚛 钢筋笼运输运距（km）", min_value=1.0,
+                                        max_value=100.0, value=float(DEFAULT_PARAMS["long_km"]),
+                                        step=1.0, key="rb_long_km"))
+        liq_km = float(st.number_input("🚚 沥青混合料运距（km）", min_value=1.0,
+                                       max_value=100.0, value=float(DEFAULT_PARAMS["liq_km"]),
+                                       step=1.0, key="rb_liq_km"))
+    with pc[1]:
+        nijiang_dj = float(st.number_input("💰 泥浆处置费单价（元/m3）", min_value=0.0,
+                                           value=float(DEFAULT_PARAMS["nijiang_dj"]),
+                                           step=1.0, key="rb_nijiang_dj"))
+        shatu_pct = float(st.number_input("🏖 钻孔砂土比例（%）", min_value=0.0,
+                                          max_value=100.0, value=float(DEFAULT_PARAMS["shatu_pct"]),
+                                          step=1.0, key="rb_shatu_pct"))
+        yashi = float(st.number_input("📐 填方压实换算系数", min_value=1.0, max_value=2.0,
+                                      value=float(DEFAULT_PARAMS["yashi"]), step=0.01,
+                                      key="rb_yashi",
+                                      help="余土外运 = 挖方 − 填方×系数（天然方）"))
+        ganghu_t = float(st.number_input(
+            "⚙ 钢护筒总量（t，0=按定额说明(16)表内插×每根2m估算）",
+            min_value=0.0, value=0.0, step=0.001, format="%.3f",
+            key="rb_ganghu_t",
+            help="设计已给定钢护筒总质量时填设计值；填 0 则按桩径查表内插（φ1.0→267/"
+                 "φ1.5→568/φ1.8→778.6kg/m）×每根2m×根数自动估算"))
+        gjx_shu = float(st.number_input("🎯 钢绞线束长档（m）", min_value=10.0,
+                                        max_value=100.0, value=float(DEFAULT_PARAMS["gjx_shu"]),
+                                        step=10.0, key="rb_gjx_shu"))
+    with pc[2]:
+        qiaochang = float(st.number_input("🌉 桥梁长度（m，护栏节统计量）", min_value=0.0,
+                                          value=0.0, step=0.01, key="rb_qiaochang"))
+        weiyan_t = float(st.number_input("🛟 钢围堰量（t，0=从数量表自动识别）", min_value=0.0,
+                                         value=0.0, step=0.1, key="rb_weiyan_t"))
+
+    st.divider()
+
+    # ---------- ④ 匹配 ----------
+    if items is None:
+        st.info("请先上传数量表，然后点击「开始匹配」。")
+        return
+    if st.button("⚙️ 开始匹配", type="primary", use_container_width=True):
+        with st.spinner("正在按公路定额匹配..."):
+            try:
+                params = {"hun_km": hun_km, "gang_km": gang_km, "tu_km": tu_km,
+                          "long_km": long_km, "liq_km": liq_km,
+                          "nijiang_dj": nijiang_dj, "shatu_pct": shatu_pct,
+                          "yashi": yashi, "ganghu_t": ganghu_t,
+                          "gjx_shu": gjx_shu, "qiaochang": qiaochang,
+                          "weiyan_t": weiyan_t}
+                res = match_road_quotas(items, lib,
+                                        st.session_state.get("rb_qty_bytes"),
+                                        params)
+                st.session_state.rb_result = res
+            except BridgeMatchError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"匹配失败：{e}")
+
+    res = st.session_state.get("rb_result")
+    if not res:
+        return
+
+    if res.get("warnings"):
+        st.warning("**请核对以下口径**：\n\n" + "\n\n".join(
+            f"- {w}" for w in res["warnings"]))
+    if res.get("skipped"):
+        with st.expander("未套定额的清单项（按参考模板口径）"):
+            for s in res["skipped"]:
+                st.caption("· " + s)
+
+    n_q = sum(1 for r in res["rows"] if r["t"] == "quota")
+    st.success(f"匹配完成：共 {len(res['rows'])} 行（{n_q} 条定额子目）——"
+               f"工程名称：{res['title']}")
+    with st.expander("结果预览（模板列结构）"):
+        st.dataframe(pd.DataFrame([
+            {"项": r["d"] if r["t"] == "xiang" else "",
+             "目": r["d"] if r["t"] == "mu" else "",
+             "节": r["d"] if r["t"] == "jie" else "",
+             "细目": r["d"] if r["t"] == "ximu" else "",
+             "费率编号": r["rate"], "定额代号": r["code"], "名称": r["name"],
+             "单位": r["unit"], "工程量1": r["q1"], "工程量2": r["q2"],
+             "定额调整情况": r["adj"], "说明": r["note"]}
+            for r in res["rows"]]),
+            use_container_width=True, hide_index=True, height=420)
+    out_name = f"{res['title']}_公路桥梁定额匹配.xlsx" if res.get("title") \
+        else "公路桥梁定额匹配结果.xlsx"
+    st.download_button(
+        "⬇️ 下载匹配结果 Excel",
+        data=build_road_excel(res),
+        file_name=out_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True)
 
 
 # ===== 正反项目案例：子项注册表（侧边栏点击 → 案例页）=====
@@ -1243,6 +1638,19 @@ def _cancel_task(ctx: dict | None = None):
     st.rerun()
 
 
+def _split_item_mode() -> bool:
+    """是否处于「分开做概算表（每单项一份）」模式（多单项）。"""
+    return (st.session_state.get("pdf_split_mode") == "分开做概算表（每单项一份）"
+            and len(st.session_state.get("zhuan_ye_list") or []) > 1)
+
+
+def _item_gl(grp: dict, idx: int) -> str:
+    """单项标签（与结果页导出文件名/概算成果命名一致）：组名或「单项N」。"""
+    _cn = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+    return (str((grp or {}).get("name") or "").strip()
+            or f"单项{_cn[idx - 1] if idx <= len(_cn) else idx}")
+
+
 def _step_back(ctx: dict, from_stage: str | None = None) -> None:
     """⬅ 上一步：回退到上一阶段重新修改（已填数据保留，各卡以原值为默认）。
 
@@ -1267,6 +1675,11 @@ def _step_back(ctx: dict, from_stage: str | None = None) -> None:
         ctx.pop("zd_exists", None)
         ctx.pop("zd_placement", None)
         ctx.pop("zd_refine_asked", None)
+        # 分开导出按单项问：重问各单项征地拆迁/自定义费用
+        # （item_custom_fees 数据保留作默认值；item_fees_base 重新快照）
+        ctx.pop("item_fees_done", None)
+        ctx.pop("_item_stage", None)
+        ctx.pop("item_fees_base", None)
     if target_idx <= 3:
         ctx["params_done"] = False
         ctx["param_idx"] = 0
@@ -1310,6 +1723,13 @@ def _task_progress_header(ctx: dict, stage: str | None):
 
 def _ask_bubble(ctx: dict):
     """ask 阶段总调度：按 current_stage 分发子渲染；全部完成 → 结算确认。"""
+    if (not ctx.get("item_fees_done") and _split_item_mode()
+            and ctx.get("fees_confirmed")
+            and current_stage(ctx) in ("custom", "params", "discount")):
+        # 分开导出（每单项一份概算表）：征地拆迁费/自定义费用按单项逐个问
+        # （AI 与传统模式统一走此流程；合同价仍项目级，流程内提问）
+        _ask_item_fees(ctx)
+        return
     if ctx.get("ai_guided") and not ctx.get("_ai_fallback"):
         _ask_ai_guide(ctx)
         return
@@ -1482,6 +1902,18 @@ def _ask_zhengchai(ctx: dict, qno: int) -> bool:
         ctx["zd_exists"] = True
         ctx.setdefault("zhengchai_separate", True)
         return False
+    # AI 模式降级兜底：问答记录里已答过征地拆迁 → 一律不再重复提问
+    if not ctx.get("zd_asked"):
+        for _rd in ctx.get("_ai_rounds") or []:
+            for _qa in _rd.get("qa") or []:
+                if re.search(r"征地|拆迁", str(_qa.get("text") or "")) \
+                        and str(_qa.get("answer") or "").strip():
+                    ctx["zd_asked"] = True
+                    ctx["zd_exists"] = not re.search(
+                        r"没有|无|不涉及", str(_qa["answer"]))
+                    break
+            if ctx.get("zd_asked"):
+                break
     if not ctx.get("zd_asked"):
         st.markdown(
             "**🏗️ 是否有征地拆迁费？**"
@@ -1682,6 +2114,298 @@ def _ask_custom(ctx: dict):
             ctx.pop("_reask", None)
             ctx["qno"] = qno + 1
             st.rerun()
+
+
+def _item_flow_footer(ctx: dict, stage: str):
+    """分开导出按单项问流程的底部操作条（上一步/结束本次计算）。"""
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("⬅ 上一步", key=f"ck_item_back_{stage}_{ctx.get('qno', 1)}",
+                     use_container_width=True):
+            _step_back(ctx, from_stage="custom")
+            st.rerun()
+    with c2:
+        if st.button("🗑 结束本次计算", key=f"ck_item_cancel_{stage}_{ctx.get('qno', 1)}",
+                     use_container_width=True):
+            _cancel_task(ctx)
+
+
+def _item_fees_finish(ctx: dict, labels: list[str]):
+    """整体 custom_fees = 项目级既有费用 + 各单项条目（名称前加「单项标签·」）；
+    置位完成标志（含 AI 模式门控键），结算与「同一概算表拆项」导出按整体口径。"""
+    # 项目级既有费用在完成时按 _item 标记重算（流程期间自由文本新增的
+    # 无 _item 条目也会并入，不会被重建覆盖）
+    base = [dict(e) for e in (ctx.get("custom_fees") or []) if not e.get("_item")]
+    ctx["item_fees_base"] = base
+    overall = list(base)
+    for lb in labels:
+        for e in (ctx.get("item_custom_fees") or {}).get(lb) or []:
+            nm = str(e.get("名称") or "")
+            overall.append({"名称": f"{lb}·{nm}",
+                            "金额(万元)": e.get("金额(万元)"), "_item": lb})
+    ctx["custom_fees"] = overall
+    ctx["zd_asked"] = True
+    ctx["zd_exists"] = _zd_amount(overall) > 0
+    # 逐项细化在按单项流程中已由每个单项展开块内的「📋 逐项细化」覆盖，
+    # 置位 zd_refine_asked 防止 AI 问题库把项目级「是否逐项细化」再问一遍
+    ctx["zd_refine_asked"] = True
+    if ctx.get("zd_exists") and ctx.get("zd_placement") is None:
+        ctx["zd_placement"] = "separate"  # 兜底（正常流程 placement 屏已问）
+        ctx["zhengchai_separate"] = True
+    ctx["custom_answered"] = True
+    ctx["item_fees_done"] = True
+    ctx.pop("_item_stage", None)
+    ctx.pop("_reask", None)
+    ctx["_ai_dirty"] = True  # AI 模式重规划：跳过项目级征地拆迁/自定义提问
+    ctx["qno"] = ctx.get("qno", 1) + 1
+
+
+def _ask_item_fees(ctx: dict):
+    """分开导出（每单项一份概算表）模式：征地拆迁费 / 自定义费用按单项逐个询问。
+
+    阶段推进 ctx["_item_stage"]：zd → zd_placement（任一单项有征地拆迁时）
+    → custom → contract → 完成（item_fees_done=True）。合同价仍项目级。
+
+    数据存放：
+      ctx["item_custom_fees"] = {单项标签: [{名称, 金额(万元)}, ...]}
+        （名称不带单项前缀；征地拆迁细项带「征地拆迁费·」前缀供引擎识别，
+        每份单项概算表按该单项自己的条目计算）；
+      ctx["item_fees_base"] = 流程开始前已有的项目级自定义费用（查询自带等，
+        名称无 _item 标记的条目），每份单项概算表也会包含；
+      ctx["custom_fees"] = 整体口径 = base + 各单项条目（名称加「单项标签·」，
+        带 _item 标记），供整体结算与「同一概算表拆项」导出使用。
+    """
+    qno = ctx.get("qno", 1)
+    zy_list = st.session_state.get("zhuan_ye_list") or []
+    labels = [_item_gl(g, i) for i, g in enumerate(zy_list, 1)]
+    item_cf = ctx.setdefault("item_custom_fees", {})
+    if "item_fees_base" not in ctx:
+        # 首次进入快照项目级既有费用；回退重问时按 _item 标记还原快照
+        ctx["item_fees_base"] = [dict(e) for e in (ctx.get("custom_fees") or [])
+                                 if not e.get("_item")]
+    stage = ctx.get("_item_stage") or "zd"
+
+    if ctx.get("_subflow") == "contract_loop":
+        _contract_loop(ctx)
+        return
+
+    _stage_lbl = {"zd": "各单项征地拆迁费", "zd_placement": "征地拆迁费列示方式",
+                  "custom": "各单项自定义费用", "contract": "合同价/合同费率"}[stage]
+    st.markdown(f"### 📋 分开导出 — 各单项工程费用确认（{_stage_lbl}）")
+    st.caption("「分开做概算表」模式：征地拆迁费、自定义费用每个单项各填一次，"
+               "分别写入自己那份概算表；费种选择/费率/折扣/合同价仍按项目整体。")
+
+    # ── 第 1 屏：各单项征地拆迁费 ──
+    if stage == "zd":
+        base_zd = _zd_amount(ctx.get("item_fees_base"))
+        st.markdown("**🏗️ 各单项工程的征地拆迁费**"
+                    "（土地征用、房屋拆迁、青苗补偿等，通常不随其他费用打折）")
+        if base_zd > 0:
+            st.info(f"查询中已识别**项目整体**征地拆迁费 {base_zd} 万元，"
+                    "已计入每份概算表；如需按单项拆分，请在下方各单项填写。")
+        st.caption("每个单项填一笔总额即可；需要逐项列示（如 房屋征收/青苗补偿）时"
+                   "展开「📋 逐项细化」填明细，明细有内容时优先于总额。")
+        import pandas as pd
+        edits = {}
+        for i, lb in enumerate(labels, 1):
+            prev = item_cf.get(lb) or []
+            prev_zd = [e for e in prev
+                       if _ZD_RE.search(str(e.get("名称") or ""))]
+            with st.expander(f"{lb} — 征地拆迁费", expanded=False):
+                has = st.radio("是否有征地拆迁费？", ["没有", "有"], horizontal=True,
+                               index=1 if prev_zd else 0,
+                               key=f"ck_item_zd_has_{qno}_{i}")
+                detail_rows: list = []
+                total_val = 0.0
+                if has == "有":
+                    prev_total = next((float(e.get("金额(万元)") or 0)
+                                       for e in prev_zd
+                                       if str(e.get("名称")) == "征地拆迁费"), 0.0)
+                    total_val = st.number_input(
+                        "征地拆迁费总额（万元）", min_value=0.0,
+                        value=float(prev_total), step=10.0,
+                        key=f"ck_item_zd_amt_{qno}_{i}")
+                    with st.expander("📋 逐项细化（可选）"):
+                        rows = ([{"细项名称": str(e.get("名称"))[len("征地拆迁费·"):],
+                                  "金额(万元)": float(e.get("金额(万元)") or 0)}
+                                 for e in prev_zd
+                                 if str(e.get("名称")) != "征地拆迁费"]
+                                or [{"细项名称": "", "金额(万元)": 0.0}
+                                    for _ in range(2)])
+                        ed = st.data_editor(
+                            pd.DataFrame(rows),
+                            key=f"ck_item_zd_edit_{qno}_{i}",
+                            num_rows="dynamic", use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "细项名称": st.column_config.TextColumn(
+                                    "细项名称", width="large"),
+                                "金额(万元)": st.column_config.NumberColumn(
+                                    "金额(万元)", min_value=0.0, format="%.2f"),
+                            })
+                        detail_rows = ed.to_dict("records")
+                edits[i] = {"lb": lb, "has": has == "有",
+                            "amt": total_val, "rows": detail_rows}
+        if st.button("✅ 确认各单项征地拆迁费", key=f"ck_item_zd_ok_{qno}",
+                     use_container_width=True, type="primary"):
+            ok = True
+            for i, lb in enumerate(labels, 1):
+                ed = edits[i]
+                if not ed["has"]:
+                    item_cf[lb] = [e for e in item_cf.get(lb) or []
+                                   if not _ZD_RE.search(str(e.get("名称") or ""))]
+                    continue
+                rows = []
+                for r in ed["rows"]:
+                    nm = str(r.get("细项名称") or "").strip()
+                    try:
+                        amt = float(r.get("金额(万元)") or 0)
+                    except (TypeError, ValueError):
+                        amt = 0.0
+                    if nm and amt > 0:
+                        rows.append({"名称": f"征地拆迁费·{nm}",
+                                     "金额(万元)": round(amt, 4)})
+                if not rows and ed["amt"] > 0:
+                    rows = [{"名称": "征地拆迁费",
+                             "金额(万元)": round(float(ed["amt"]), 4)}]
+                if not rows:
+                    st.warning(f"「{lb}」选择了「有征地拆迁费」，请填写总额或明细。")
+                    ok = False
+                    continue
+                item_cf[lb] = ([e for e in item_cf.get(lb) or []
+                                if not _ZD_RE.search(str(e.get("名称") or ""))]
+                               + rows)
+            if ok:
+                ctx["zd_asked"] = True
+                ctx["zd_exists"] = any(
+                    _ZD_RE.search(str(e.get("名称") or ""))
+                    for lb in labels for e in (item_cf.get(lb) or []))
+                ctx["_item_stage"] = ("zd_placement" if ctx["zd_exists"] else "custom")
+                ctx["qno"] = qno + 1
+                st.rerun()
+        _item_flow_footer(ctx, stage)
+        return
+
+    # ── 第 2 屏：征地拆迁费列示方式（项目级，各单项统一口径） ──
+    if stage == "zd_placement":
+        st.markdown("**🏗️ 征地拆迁费如何列示？**（各单项的征地拆迁费按同一方式列示）")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📑 单独列项（与工程费、工程建设其他费并列展示）",
+                         key=f"ck_item_zd_pl_sep_{qno}", use_container_width=True):
+                ctx["zd_placement"] = "separate"
+                ctx["zhengchai_separate"] = True
+                ctx["_item_stage"] = "custom"
+                ctx["qno"] = qno + 1
+                st.rerun()
+        with c2:
+            if st.button("📦 计入工程建设其他费（作为二类费组成部分）",
+                         key=f"ck_item_zd_pl_in_{qno}", use_container_width=True):
+                ctx["zd_placement"] = "inside"
+                ctx["zhengchai_separate"] = False
+                ctx["_item_stage"] = "custom"
+                ctx["qno"] = qno + 1
+                st.rerun()
+        _item_flow_footer(ctx, stage)
+        return
+
+    # ── 第 3 屏：各单项自定义费用 ──
+    if stage == "custom":
+        st.markdown("**➕ 各单项工程的自定义费用**"
+                    "（合同价以外的零散费用，如管线切改费）")
+        st.caption("每个单项分别填写；没有的单项留空即可。"
+                   "查询中已识别的项目级费用会自动计入每份概算表。")
+        import pandas as pd
+        edits = {}
+        for i, lb in enumerate(labels, 1):
+            prev = [e for e in item_cf.get(lb) or []
+                    if not _ZD_RE.search(str(e.get("名称") or ""))]
+            rows = ([{"费用名称": str(e.get("名称")),
+                      "金额(万元)": float(e.get("金额(万元)") or 0)} for e in prev]
+                    or [{"费用名称": "", "金额(万元)": 0.0} for _ in range(2)])
+            with st.expander(f"{lb} — 自定义费用", expanded=bool(prev)):
+                ed = st.data_editor(
+                    pd.DataFrame(rows), key=f"ck_item_cf_{qno}_{i}",
+                    num_rows="dynamic", use_container_width=True, hide_index=True,
+                    column_config={
+                        "费用名称": st.column_config.TextColumn(
+                            "费用名称", width="large", help="如：管线切改费"),
+                        "金额(万元)": st.column_config.NumberColumn(
+                            "金额(万元)", min_value=0.0, format="%.2f"),
+                    })
+                edits[i] = (lb, ed.to_dict("records"))
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("🚫 各单项都没有自定义费用", key=f"ck_item_cf_none_{qno}",
+                         use_container_width=True):
+                for _i, (lb, _rows) in edits.items():
+                    item_cf[lb] = [e for e in item_cf.get(lb) or []
+                                   if _ZD_RE.search(str(e.get("名称") or ""))]
+                ctx["_item_stage"] = "contract"
+                ctx["qno"] = qno + 1
+                st.rerun()
+        with c2:
+            if st.button("✅ 确认，下一步", key=f"ck_item_cf_ok_{qno}",
+                         use_container_width=True, type="primary"):
+                ok = True
+                for _i, (lb, recs) in edits.items():
+                    rows = []
+                    for r in recs:
+                        nm = str(r.get("费用名称") or "").strip()
+                        try:
+                            amt = float(r.get("金额(万元)") or 0)
+                        except (TypeError, ValueError):
+                            amt = 0.0
+                        if nm and amt > 0:
+                            rows.append({"名称": nm, "金额(万元)": round(amt, 4)})
+                        elif nm or amt > 0:
+                            st.warning(f"「{lb}」有未填完整的自定义费用行"
+                                       "（需 名称 + 金额>0），请补全或留空。")
+                            ok = False
+                            break
+                    if not ok:
+                        break
+                    item_cf[lb] = ([e for e in item_cf.get(lb) or []
+                                    if _ZD_RE.search(str(e.get("名称") or ""))]
+                                   + rows)
+                if ok:
+                    ctx["_item_stage"] = "contract"
+                    ctx["qno"] = qno + 1
+                    st.rerun()
+        with c3:
+            if st.button("↩ 修改征地拆迁费", key=f"ck_item_cf_back_{qno}",
+                         use_container_width=True):
+                ctx["_item_stage"] = "zd"
+                ctx["qno"] = qno + 1
+                st.rerun()
+        _item_flow_footer(ctx, stage)
+        return
+
+    # ── 第 4 屏：合同价/合同费率（项目级，各单项共用） ──
+    co = ctx.get("contract_overrides") or {}
+    if co:
+        st.markdown("**已设置合同价/合同费率**：")
+        for fn, ov in co.items():
+            if ov.get("type") == "rate":
+                desc = f"合同费率 {ov.get('rate')}% × {ov.get('base', '工程费')}"
+            else:
+                desc = f"一口价 {ov.get('amount_wan')} 万元"
+            st.markdown(f"- {FEE_CATALOG.get(fn, {}).get('label', fn)}：{desc}")
+    st.markdown("**📝 合同价/合同费率**（项目级，各单项共用）")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("📝 添加合同价/合同费率", key=f"ck_item_ct_{qno}",
+                     use_container_width=True):
+            ctx["_subflow"] = "contract_loop"
+            ctx["qno"] = qno + 1
+            st.rerun()
+    with c2:
+        if st.button("✅ 不需要，完成各单项费用确认", key=f"ck_item_ct_done_{qno}",
+                     use_container_width=True, type="primary"):
+            _item_fees_finish(ctx, labels)
+            st.rerun()
+    _item_flow_footer(ctx, stage)
 
 
 def _custom_fee_loop(ctx: dict):
@@ -2414,21 +3138,6 @@ def _ai_record_answer(ctx: dict, text: str, answer: str):
     rounds[-1]["qa"].append({"text": text, "answer": answer})
 
 
-_FREE_PARAM_BUNDLE_RE = re.compile(r"参数|系数|费率|服务类型|口径|档位")
-_FREE_BUNDLE_TONE_RE = re.compile(r"请补充|请填写|请提供|请逐项|逐项|各费种|一并|一次性|打包")
-
-
-def _free_param_bundle(text: str) -> bool:
-    """free 问题是否在打包让用户整段填写参数（LLM 绕过 card: 键的坏行为）。
-
-    用户尚未选择参数时，这类「请逐项填写各费种参数…」会被改写为选项卡卡；
-    用户选择完成后 AI 对已填值的确认/澄清提问（「是否确认…」等）不算打包，
-    予以保留——先选项卡选择，有疑问再提问。
-    """
-    return bool(_FREE_PARAM_BUNDLE_RE.search(text)
-                and _FREE_BUNDLE_TONE_RE.search(text))
-
-
 def _ai_remaining(plan: dict, ctx: dict) -> list[dict]:
     answered = ctx.get("_ai_answered") or []
     # force：回看已填参数卡（⬅ 返回上一参数设置构造）→ 绕过 question_done
@@ -2436,6 +3145,50 @@ def _ai_remaining(plan: dict, ctx: dict) -> list[dict]:
     return [q for q in plan.get("questions") or []
             if q.get("key") not in answered
             and (q.get("force") or not question_done(ctx, q.get("key")))]
+
+
+_BARE_YES = ("有", "是的", "是", "对", "对的", "涉及", "要", "需要", "有的",
+             "有啊", "有呀", "有吧", "嗯")
+_BARE_NO = ("没有", "无", "不涉及", "不用", "不需要", "否", "不是", "不对",
+            "没有了", "不需要了")
+
+
+def _ai_map_bare_answer(ctx: dict, text: str):
+    """当前可见问题唯一且为二选一键时，把「有/没有/单独/计入…」裸答映射为按钮回答。
+
+    用户常打字回答而不是点按钮；裸答若不登记，同一问题会被下一轮重复提问
+    （或降级传统清单后从头重问）。只在唯一可见问题、短文本时映射，避免误伤。
+    """
+    if not ctx.get("ai_guided") or ctx.get("_ai_fallback"):
+        return None
+    visible = _ai_remaining(ctx.get("_ai_plan") or {}, ctx)
+    if len(visible) != 1:
+        return None
+    q = visible[0]
+    key = q.get("key") or ""
+    t = re.sub(r"[。.！!？?，,\s]", "", (text or "").strip())
+    if not t or len(t) > 8:
+        return None
+    qtxt = q.get("text") or ""
+    if key == "zd_exists":
+        if t in _BARE_YES:
+            return key, True, qtxt
+        if t in _BARE_NO:
+            return key, False, qtxt
+    elif key == "zd_placement":
+        if "单独" in t or t in ("并列", "单列"):
+            return key, "separate", qtxt
+        if "计入" in t or "合算" in t or t == "二类费":
+            return key, "inside", qtxt
+    elif key == "zd_refine":
+        if t in ("需要", "要", "细化", "逐项", "填", "填写"):
+            return key, "detail", qtxt
+        if t in ("不用", "不需要", "总额", "一笔", "填总额"):
+            return key, "single", qtxt
+    elif key in ("custom_need", "discount_need"):
+        if t in _BARE_NO:
+            return key, "none", qtxt
+    return None
 
 
 def _ai_mark_done(ctx: dict, key: str, text: str, answer: str):
@@ -2489,6 +3242,12 @@ def _ai_write(ctx: dict, key: str, value):
         ctx["yubei_considered"] = bool(value)
     else:
         ctx.setdefault("ai_notes", []).append(f"{value}")
+        # 保险：按钮值本身含征地/拆迁字样（LLM 自造按钮选项、free 键问题）
+        # → 直接登记状态，杜绝同一问题被重复提问
+        _v = str(value or "")
+        if re.search(r"征地|拆迁", _v):
+            ctx["zd_asked"] = True
+            ctx["zd_exists"] = not re.search(r"没有|无|不涉及|不需要", _v)
 
 
 # ── 控件渲染 ──
@@ -2554,6 +3313,16 @@ def _ai_render_text(ctx: dict, q: dict, qno: int):
                         placeholder="在此输入，或直接使用下方聊天输入框")
     if st.button("✅ 发送", key=f"ai_txt_ok_free_{qno}",
                  use_container_width=True, disabled=not txt):
+        # 问题本身是征地拆迁问句（LLM 误用自由文本提问）→ 裸答直接登记状态
+        _qt = str(q.get("text") or "")
+        if re.search(r"征地|拆迁", _qt):
+            _t = re.sub(r"[。.！!？?，,\s]", "", txt.strip())
+            if _t in _BARE_YES:
+                _ai_write(ctx, "zd_exists", True)
+                _ai_mark_done(ctx, "zd_exists", _qt, txt)
+            elif _t in _BARE_NO:
+                _ai_write(ctx, "zd_exists", False)
+                _ai_mark_done(ctx, "zd_exists", _qt, txt)
         # 复用自由文本解析；未识别的内容存为补充说明供 AI 参考
         res = advance_checklist(ctx, txt, region=ctx.get("region"))
         if not res.get("recognized"):
@@ -2596,31 +3365,18 @@ _AI_KIND_LABEL = {
 }
 
 
-def _ai_back_prev_fee(ctx: dict, card: dict):
-    """AI 卡界面「⬅ 返回上一参数设置」：机械回退到上一个费种的第一张参数卡。
+def _ai_card_idx(ctx: dict, card: dict):
+    """卡片在 param_cards_for 中的位置（找不到返回 None）。"""
+    return next((i for i, c in enumerate(param_cards_for(ctx))
+                 if c["kind"] == card["kind"] and c["fee"] == card["fee"]), None)
 
-    不依赖 AI 重新规划、不清除已填参数：直接构造「回看」plan 强制渲染
-    上一费种卡（已填值原样保留作默认，用户可确认可修改），卡自带返回
-    按钮，可连续逐级回退到第一个费种。
-    """
-    cards = param_cards_for(ctx)
-    cur_idx = next((i for i, c in enumerate(cards)
-                    if c["kind"] == card["kind"] and c["fee"] == card["fee"]), None)
-    prev_fee = None
-    if cur_idx is not None:
-        for c in reversed(cards[:cur_idx]):
-            if c["fee"] != card["fee"]:
-                prev_fee = c["fee"]
-                break
-    if prev_fee is None:
-        st.toast("已经是第一个费种，没有更早的参数设置。")
-        return
-    label = FEE_CATALOG.get(prev_fee, {}).get("label", prev_fee)
-    first = next(c for c in cards if c["fee"] == prev_fee)
-    key = _card_qkey(first)
-    kind_label = _AI_KIND_LABEL.get(first["kind"], first["kind"])
+
+def _ai_goto_card(ctx: dict, card: dict, toast_msg: str):
+    """构造「回看」plan 强制渲染指定参数卡（已填值保留作默认，可确认可修改）。"""
+    label = FEE_CATALOG.get(card["fee"], {}).get("label", card["fee"])
+    kind_label = _AI_KIND_LABEL.get(card["kind"], card["kind"])
     plan = {"think": f"返回查看{label}参数",
-            "questions": [{"type": "buttons", "key": key, "force": True,
+            "questions": [{"type": "buttons", "key": _card_qkey(card), "force": True,
                            "text": f"{label}—{kind_label}"}]}
     ctx["_ai_plan"] = plan
     ctx["_ai_plan_region"] = ctx.get("region")
@@ -2628,16 +3384,47 @@ def _ai_back_prev_fee(ctx: dict, card: dict):
     ctx["_ai_dirty"] = False
     ctx.setdefault("_ai_rounds", []).append({"think": plan["think"], "qa": []})
     ctx["qno"] = ctx.get("qno", 1) + 1
-    st.toast(f"已返回{label}参数设置（已填选项保留，可直接确认或修改）。")
+    st.toast(toast_msg)
     st.rerun()
+
+
+def _ai_back_prev_fee(ctx: dict, card: dict):
+    """AI 卡界面返回按钮：
+
+    - 同费种上一张卡 / 上一费种的第一张卡 → 机械回退（不清已填参数，
+      「回看」plan 强制渲染，卡自带返回按钮可连续逐级回退）；
+    - 已是第一个费种的第一张卡 → 「返回上一步」：回退到参数阶段之前，
+      重新确认征地拆迁费、自定义费用等基础信息（已填值保留作默认）。
+    """
+    cards = param_cards_for(ctx)
+    cur_idx = _ai_card_idx(ctx, card)
+    if cur_idx is None:
+        return
+    if cur_idx == 0:
+        # 第一个费种的第一张卡：无更早参数设置 → 返回上一步重确认基础信息
+        _step_back(ctx, from_stage="params")
+        ctx["_ai_dirty"] = True
+        st.toast("已返回上一步：可重新确认征地拆迁费、自定义费用等基础信息"
+                 "（已填内容保留，可直接确认或修改）。")
+        st.rerun()
+        return
+    prev = cards[cur_idx - 1]
+    if prev["fee"] != card["fee"]:
+        # 跨费种回退：跳到上一个费种的第一张卡
+        prev = next(c for c in cards if c["fee"] == prev["fee"])
+    label = FEE_CATALOG.get(prev["fee"], {}).get("label", prev["fee"])
+    _ai_goto_card(ctx, prev, f"已返回{label}参数设置（已填选项保留，可直接确认或修改）。")
 
 
 def _ai_render_card_question(ctx: dict, q: dict, qno: int):
     card = _ai_parse_card_key(q["key"])
     renderer = _CARD_RENDERERS.get(card["kind"])
+    # 第一个费种的第一张卡：无更早参数设置 → 按钮改为「返回上一步」
+    _back_label = ("⬅ 返回上一步" if _ai_card_idx(ctx, card) == 0
+                   else "⬅ 返回上一参数设置")
     if renderer is None:  # party 走按钮控件；未知 kind 兜底
         _ai_render_buttons(ctx, q, qno)
-        if st.button("⬅ 返回上一参数设置", key=f"ai_card_back_{q['key']}_{qno}",
+        if st.button(_back_label, key=f"ai_card_back_{q['key']}_{qno}",
                      use_container_width=True):
             _ai_back_prev_fee(ctx, card)
         return
@@ -2654,7 +3441,7 @@ def _ai_render_card_question(ctx: dict, q: dict, qno: int):
             _clear_card_overrides(ctx, card)
             _ai_mark_done(ctx, q["key"], q["text"], "用默认值")
     with c3:
-        if st.button("⬅ 返回上一参数设置", key=f"ai_card_back_{q['key']}_{qno}",
+        if st.button(_back_label, key=f"ai_card_back_{q['key']}_{qno}",
                      use_container_width=True):
             _ai_back_prev_fee(ctx, card)
 
@@ -2839,25 +3626,16 @@ def _ask_ai_guide(ctx: dict):
                 plan = run_planner(build_ctx_summary(ctx, avail), avail)
         except PlannerError:
             _ai_fallback(ctx, "AI 引导暂时不可用（接口异常），已切换为传统清单模式。")
-        # free 参数打包问题（如「请逐项填写各费种参数…」）→ 改写为第一个
-        # 未填参数卡：参数始终以选项卡卡片逐项提问，不整段打包让用户自由填写
+        # 问题净化：free 参数打包问题 → 第一个未填参数卡（卡片式提问）；
+        # free 键基础问题（含折扣/打折/下浮）→ 恢复规范按钮键，杜绝重复提问
+        # （逻辑在 ai_planner.sanitize_plan_questions，纯函数可直接单测）
         _avail2 = available_keys(ctx)
-        _avail_desc = dict(_avail2)
-        _first_card_key = next((k for k, _ in _avail2 if k.startswith("card:")), None)
-        _qs, _seen = [], set()
-        for _q in plan.get("questions") or []:
-            if (_q.get("key") == "free" and _first_card_key is not None
-                    and _free_param_bundle(_q.get("text") or "")):
-                _q["key"] = _first_card_key
-                _q["type"] = "buttons"
-                _q.pop("unit", None)
-                _q["text"] = _avail_desc[_first_card_key]
-            if _q["key"] not in _seen:
-                _seen.add(_q["key"])
-                _qs.append(_q)
-        plan["questions"] = _qs
+        plan["questions"] = sanitize_plan_questions(
+            plan.get("questions") or [], dict(_avail2))
         ctx["_ai_plan"] = plan
         ctx["_ai_plan_region"] = ctx.get("region")
+        if plan.get("questions"):
+            ctx.pop("_ai_empty_plans", None)  # 正常出题 → 空计划计数复位
         ctx["_ai_answered"] = []
         ctx["_ai_dirty"] = False
         ctx.setdefault("_ai_rounds", []).append({"think": plan.get("think") or "", "qa": []})
@@ -2891,6 +3669,12 @@ def _ask_ai_guide(ctx: dict):
             _finalize_confirm(ctx)
             _ai_footer(ctx)
             return
+        # 计划为空但仍有缺失：可能是 LLM 本轮问题全被丢弃（违规提前问参数），
+        # 重规划重试；连续三轮为空才降级传统清单（避免重放已答问题）
+        if ctx.get("_ai_empty_plans", 0) < 2:
+            ctx["_ai_empty_plans"] = ctx.get("_ai_empty_plans", 0) + 1
+            ctx["_ai_dirty"] = True
+            st.rerun()
         _ai_fallback(ctx, "AI 判断信息已齐全，但程序校验发现仍有缺失，已切换为传统清单模式。")
 
     visible = _ai_remaining(plan, ctx)
@@ -3186,37 +3970,91 @@ def _render_result_payload(ctx: dict):
         if ctx.get("_discount_scenarios"):
             _render_comparison_result(ctx["_discount_scenarios"])
 
+        # Excel 概算表：下载按钮与概算成果 PDF 共用同一份字节（先统一生成一次）
+        _is_tj = str(ctx.get("region") or DEFAULT_REGION) == "天津"
+        _zy_list = st.session_state.get("zhuan_ye_list") or []
+        _per_item = (st.session_state.get("pdf_split_mode")
+                     == "分开做概算表（每单项一份）" and len(_zy_list) > 1)
+        _region = str(ctx.get("region") or DEFAULT_REGION)
+        _excel_files = []   # [(标签, bytes, 文件名)]；分开模式 = N 单项各一份
+        excel_err = None
+        try:
+            _base = {
+                **payload,
+                "region": ctx.get("region"),
+                "yubei_rate": ctx.get("yubei_rate"),
+                "yubei_considered": ctx.get("yubei_considered"),
+                "jiaoyi_party": ctx.get("jiaoyi_party"),
+                "spec_overrides": ctx.get("spec_overrides"),
+                "discounts": ctx.get("discounts"),
+                "zhuan_ye": _zy_list,
+                "zhengchai_separate": ctx.get("zhengchai_separate", False),
+                "sheji_extra_separate": ctx.get("sheji_extra_separate"),
+                "split_mode": "one_sheet",
+            }
+            if _per_item:
+                for _i, _g in enumerate(_zy_list, 1):
+                    _gl = _item_gl(_g, _i)
+                    # 每单项一份完整概算表：第一部分=该单项，二类费/预备费/总投资
+                    # 按该单项自己的工程费计算。交易服务费/可研费/环评费在模板
+                    # 里是写死的数字（不是公式），必须用该单项工程费重跑引擎
+                    # 得到单项自算值，否则每个文件都会抄同一个整体值
+                    _p1 = sum(float(x.get("amount") or 0)
+                              for it in (_g.get("items") or [])
+                              for x in (it.get("leaves") or []))
+                    _dev = sum(float(x.get("device") or 0)
+                               for it in (_g.get("items") or [])
+                               for x in (it.get("leaves") or []))
+                    # 按单项问的征地拆迁/自定义费用：该单项自己的条目
+                    # + 项目级既有费用；未走按单项流程时回退整体口径
+                    _cf_map = ctx.get("item_custom_fees") or {}
+                    if _cf_map:
+                        _cf_i = ((ctx.get("item_fees_base") or [])
+                                 + (_cf_map.get(_gl) or []))
+                    else:
+                        _cf_i = payload.get("custom_fees") or None
+                    _payload_i = compute_selected_fees(
+                        jianan=round(_p1 - _dev, 4), shebei=round(_dev, 4),
+                        project_type=payload.get("project_type") or "通用",
+                        query=str(payload.get("query") or ""),
+                        region=_region,
+                        selected_fees=payload.get("selected_fees") or set(),
+                        coef_overrides=payload.get("coef_overrides") or None,
+                        rate_overrides=payload.get("rate_overrides") or None,
+                        service_selections=payload.get("service_selections") or None,
+                        spec_overrides=payload.get("spec_overrides") or None,
+                        contract_overrides=payload.get("contract_overrides") or None,
+                        fee_discounts=payload.get("fee_discounts") or None,
+                        custom_fees=_cf_i,
+                        yubei_rate=(0.0 if ctx.get("yubei_considered") is False
+                                    else float(ctx.get("yubei_rate") or 5.0)),
+                        jiaoyi_party=ctx.get("jiaoyi_party"),
+                        # 不用整体覆盖值：让引擎按该单项自算收敛总投资
+                        total_investment_override=None,
+                        sheji_extra_separate=ctx.get("sheji_extra_separate") or None,
+                    )
+                    # 单独列项口径同步（预备费基数不含征地拆迁等）
+                    _apply_zhengchai_panel(_payload_i, ctx)
+                    _bytes = _build_cascade_excel({
+                        **_base, **_payload_i,
+                        "zhuan_ye": [_g], "split_mode": "one_sheet"})
+                    _excel_files.append(
+                        (_gl, _bytes, f"{_region}-{_gl}-概算表.xlsx"))
+            else:
+                _bytes = _build_cascade_excel(_base)
+                _excel_files.append(
+                    ("概算表", _bytes, f"{_region}-总概算表.xlsx"))
+        except Exception as e:
+            excel_err = str(e)
         col1, col2 = st.columns(2)
         with col1:
-            try:
-                excel_bytes = _build_cascade_excel({
-                    **payload,
-                    "region": ctx.get("region"),
-                    "yubei_rate": ctx.get("yubei_rate"),
-                    "yubei_considered": ctx.get("yubei_considered"),
-                    "jiaoyi_party": ctx.get("jiaoyi_party"),
-                    "spec_overrides": ctx.get("spec_overrides"),
-                    "discounts": ctx.get("discounts"),
-                    "zhuan_ye": st.session_state.get("zhuan_ye_list"),
-                    "zhengchai_separate": ctx.get("zhengchai_separate", False),
-                    "sheji_extra_separate": ctx.get("sheji_extra_separate"),
-                    "split_mode": ("per_item"
-                                   if st.session_state.get("pdf_split_mode")
-                                   == "每单项单独一张概算表"
-                                   and len(st.session_state.get("zhuan_ye_list") or []) > 1
-                                   else "one_sheet"),
-                })
-                _is_tj = str(ctx.get("region") or DEFAULT_REGION) == "天津"
-                _per_item = (st.session_state.get("pdf_split_mode")
-                             == "每单项单独一张概算表"
-                             and len(st.session_state.get("zhuan_ye_list") or []) > 1)
-                # 文件名随所选省份：XX-总概算表（如 天津-总概算表.xlsx）
-                _region = str(ctx.get("region") or DEFAULT_REGION)
-                _fname = (f"{_region}-总概算表(分单项).xlsx" if _per_item
-                          else f"{_region}-总概算表.xlsx")
+            if excel_err:
+                st.error(f"Excel 生成失败：{excel_err}")
+            elif len(_excel_files) == 1:
+                _lbl, _bytes, _fname = _excel_files[0]
                 st.download_button(
                     "📥 导出 Excel 汇总表",
-                    data=excel_bytes,
+                    data=_bytes,
                     file_name=_fname,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"ck_excel_{ctx.get('qno', 1)}",
@@ -3224,14 +4062,239 @@ def _render_result_payload(ctx: dict):
                 )
                 if _is_tj and not TJ_TEMPLATE_XLSX.exists():
                     st.caption("⚠ 未找到天津模板文件，导出将回退为通用布局。")
-            except Exception as e:
-                st.error(f"Excel 生成失败：{e}")
+            else:
+                st.markdown("**📥 导出 Excel 概算表（每单项一份）**")
+                for _i, (_lbl, _bytes, _fname) in enumerate(_excel_files):
+                    st.download_button(
+                        f"📥 {_lbl}概算表",
+                        data=_bytes,
+                        file_name=_fname,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"ck_excel_{ctx.get('qno', 1)}_{_i}",
+                        use_container_width=True,
+                    )
         with col2:
             if st.button("📊 折扣方案对比", key=f"ck_scen_btn_{ctx.get('qno', 1)}",
                          use_container_width=True):
                 with st.spinner("正在生成折扣情景..."):
                     ctx["_discount_scenarios"] = _gen_discount_scenarios(ctx)
                 st.rerun()
+
+        # ── 📦 概算成果压缩包：总概算表 Excel + 编制说明 Word + 成套概算 PDF ──
+        with st.expander("📦 生成概算成果（总概算表Excel + 编制说明Word + 成套PDF 压缩包）",
+                         expanded=bool(st.session_state.get("deliverable_pdf"))):
+            _deliv = st.session_state.get("deliverable_pdf")
+            if _deliv:
+                _dl = _deliv if isinstance(_deliv, list) else [_deliv]
+                for _i, _d in enumerate(_dl):
+                    st.download_button(
+                        "📥 下载概算成果压缩包"
+                        + (f"（{_d['label']}）" if len(_dl) > 1 else ""),
+                        data=_d["data"], file_name=_d["name"], mime="application/zip",
+                        key=f"deliv_dl_{ctx.get('qno', 1)}_{_i}",
+                        use_container_width=True)
+                st.caption(f"已生成 {len(_dl)} 套成果（每套内含总概算表Excel、"
+                           f"编制说明Word、成套概算PDF 三个文件；"
+                           f"修改表单后再次点击即可重新生成）")
+            if st.session_state.get("src_pdf_files") or st.session_state.get("pdf_bytes"):
+                st.caption("✅ 已检测到本次会话的广联达源 PDF，将附在成果末尾。")
+            else:
+                st.warning("⚠ 未检测到本次会话的广联达源 PDF（PDF 导入页上传解析时自动保存；"
+                           "Excel 导入时在该页「📎 附加广联达源 PDF」上传），"
+                           "成果将只含封面、编制说明与概算表。")
+            _zy_list = st.session_state.get("zhuan_ye_list") or []
+            _def_name = (_zy_list[0].get("name") or "").strip() if _zy_list else ""
+            import datetime as _dt
+            _per_item_infos: list[dict] = []
+            _today_str = _dt.datetime.now().strftime("%Y年%m月")
+            with st.form(f"deliv_form_{ctx.get('qno', 1)}"):
+                if _per_item:
+                    # 分开导出：每个单项一套成果 → 信息按单项分别填写
+                    _lbls = [_item_gl(g, i) for i, g in enumerate(_zy_list, 1)]
+                    # 首组名若与某单项标签相同，说明文件里没有真正的主项目名
+                    # → 默认项目名称直接用单项名（避免「12#水系桥-14#水系桥」）
+                    _has_main = bool(_def_name) and _def_name not in _lbls
+                    for _ix, _lb in enumerate(_lbls):
+                        with st.expander(f"📦 第 {_ix + 1} 项成果信息 — {_lb}",
+                                         expanded=(_ix == 0)):
+                            _n = st.text_input(
+                                "项目名称",
+                                value=(f"{_def_name}-{_lb}" if _has_main
+                                       else _lb),
+                                key=f"deliv_name_{_ix}",
+                                help="该单项概算成果封面上的工程名称"
+                                     "（封面将按排版自动换行，无需手动分行）。")
+                            _no = st.text_input("工程编号", value="",
+                                                key=f"deliv_no_{_ix}")
+                            _dt2 = st.text_input("日期", value=_today_str,
+                                                 key=f"deliv_date_{_ix}")
+                            _ov = st.text_area(
+                                "工程概况", value="", height=120,
+                                key=f"deliv_ov_{_ix}",
+                                placeholder="如：本工程为东西走向城市次干路，路线全长约400米，"
+                                            "配套建设排水、照明、绿化、交通工程等。")
+                            _fu = st.text_input(
+                                "资金来源（可空，留空保留模板原文）", value="",
+                                key=f"deliv_fund_{_ix}")
+                            _per_item_infos.append({
+                                "name": (_n or "").strip(),
+                                "proj_no": (_no or "").strip(),
+                                "date": (_dt2 or "").strip(),
+                                "overview": (_ov or "").strip(),
+                                "fund_source": (_fu or "").strip()})
+                    _d_submit = st.form_submit_button(
+                        f"📦 生成概算成果压缩包（{len(_lbls)} 套，每单项一套）",
+                        use_container_width=True)
+                else:
+                    _d_name = st.text_input(
+                        "项目名称", value=_def_name,
+                        help="封面将按排版自动换行（第一行略长），无需手动分行。")
+                    _d_no = st.text_input("工程编号", value="")
+                    _d_date = st.text_input("日期", value=_today_str)
+                    _d_ov = st.text_area("工程概况", value="", height=120,
+                                         placeholder="如：本工程为东西走向城市次干路，路线全长约400米，"
+                                                     "配套建设排水、照明、绿化、交通工程等。")
+                    _d_fund = st.text_input("资金来源（可空，留空保留模板原文）", value="")
+                    _d_submit = st.form_submit_button("📦 生成概算成果压缩包",
+                                                      use_container_width=True)
+            if _d_submit:
+                if excel_err:
+                    st.error(f"概算表生成失败，无法生成成果：{excel_err}")
+                else:
+                    # 编制说明费用段：选中且金额>0 的费种（不含预备费/交易服务费）
+                    # + 自定义费用（不含单独列项的征地拆迁）+ 设计费附加项
+                    _raw_rr = preview.get("raw", {}).get("原始结果", {})
+                    _fl = []
+                    for fd in payload.get("fee_defs", []):
+                        fn = fd["name"]
+                        if fn in ("预备费", "交易服务费"):
+                            continue
+                        if fn not in payload.get("selected_fees", set()):
+                            continue
+                        _v = numerical.get(f"{fn}(万元)")
+                        if not _v or _v <= 0:
+                            continue
+                        _yj = ""
+                        _rr = _raw_rr.get(fn)
+                        if isinstance(_rr, dict):
+                            _yj = str(_rr.get("依据") or "")
+                        _fl.append({"name": fn, "label": fd["label"], "yiju": _yj})
+                    for e in payload.get("custom_fees") or []:
+                        _nm = str(e.get("名称") or e.get("name") or "").strip()
+                        if _nm and not _ZD_RE.search(_nm):
+                            _fl.append({"name": "自定义", "label": _nm, "yiju": ""})
+                    for _nm, _yj in (("施工图预算编制费", "设计费的10%"),
+                                     ("竣工图编制费", "设计费的8%")):
+                        if numerical.get(f"{_nm}(万元)"):
+                            _fl.append({"name": _nm, "label": _nm, "yiju": _yj})
+                    _tot = {
+                        "part1": payload["total_part1"],
+                        "fees": preview["fee_total_with_custom"],
+                        "yubei": preview["yubei_total"],
+                        "total": preview["project_total_with_custom"],
+                        "zhengchai": preview.get("zhengchai_total") or 0,
+                        "yubei_rate": ctx.get("yubei_rate") or 5.0,
+                    }
+                    if _per_item:
+                        _lbls2 = [_item_gl(g, i) for i, g in enumerate(_zy_list, 1)]
+                        _bad_lbls = [_lbls2[i] for i, d in enumerate(_per_item_infos)
+                                     if not d.get("name")]
+                        if _bad_lbls:
+                            st.error("请先填写项目名称：" + "、".join(_bad_lbls))
+                            _infos = None
+                        else:
+                            _infos = _per_item_infos
+                    else:
+                        _info = {"name": (_d_name or "").strip(),
+                                 "proj_no": (_d_no or "").strip(),
+                                 "date": (_d_date or "").strip(),
+                                 "overview": (_d_ov or "").strip(),
+                                 "fund_source": (_d_fund or "").strip()}
+                        if not _info["name"]:
+                            st.error("请先填写项目名称。")
+                            _infos = None
+                        else:
+                            _infos = [_info]
+                    if _infos is not None:
+                        # 分开模式：每个单项一套成果，信息按单项分别填写
+                        # （概算表=该单项工作簿，编制说明投资段/概算表PDF 随之按单项；
+                        # 费用段只列费种与计取标准、不含金额，跨单项共用无误）。
+                        # totals 只传 zhengchai（按单项问时=该单项自己的
+                        # 征地拆迁费）与预备费率，part1/fees/yubei/total 由
+                        # build_deliverable 从各单项工作簿读回（= 各单项分别计算口径）。
+                        if _per_item:
+                            _targets = [(_gl, _infos[_ii]["name"], _bytes)
+                                        for _ii, (_gl, _bytes, _fn)
+                                        in enumerate(_excel_files)]
+                        else:
+                            _targets = [(None, _infos[0]["name"],
+                                         _excel_files[0][1])]
+                        # 源 PDF 与单项匹配（分开导出时）：
+                        #  0 份 → 不附；1 份 → 每份成果都附这一份；
+                        #  份数==单项数 → 按上传顺序对应（第1份→单项一…）；
+                        #  份数>1 且对不上 → 合并后附到每份成果（提示说明）
+                        _srcs = st.session_state.get("src_pdf_files") or []
+                        if not _srcs and st.session_state.get("pdf_bytes"):
+                            _srcs = [("广联达源.pdf", st.session_state["pdf_bytes"])]
+                        if len(_srcs) > 1 and len(_srcs) != len(_targets):
+                            st.warning(
+                                f"源 PDF 共 {len(_srcs)} 份，与成果套数 {len(_targets)} "
+                                "不一致：每份成果将附上合并后的全部源 PDF。"
+                                "如需按单项分别对应，请按单项顺序上传相同份数的 PDF。")
+                            try:
+                                import io as _io
+                                from pypdf import PdfWriter
+                                _w = PdfWriter()
+                                for _n2, _b2 in _srcs:
+                                    _w.append(_io.BytesIO(_b2))
+                                _buf = _io.BytesIO()
+                                _w.write(_buf)
+                                _srcs = [("广联达源（合并）.pdf", _buf.getvalue())]
+                            except Exception as _me:
+                                st.error(f"源 PDF 合并失败：{_me}")
+                                _srcs = []
+                        _out = []
+                        with st.spinner("正在生成概算成果压缩包"
+                                        "（Word/Excel 转换，每套约 30~60 秒）…"):
+                            try:
+                                from deliverable_pdf import build_deliverable
+                                for _ii, (_gl, _nm, _bytes) in enumerate(_targets):
+                                    if _per_item:
+                                        # 征地拆迁费按单项：该单项自己的条目
+                                        # + 项目级既有费用；未走按单项流程回退整体
+                                        _cf_map = ctx.get("item_custom_fees") or {}
+                                        if _cf_map:
+                                            _zd_i = _zd_amount(
+                                                (ctx.get("item_fees_base") or [])
+                                                + (_cf_map.get(_gl) or []))
+                                        else:
+                                            _zd_i = _tot.get("zhengchai") or 0
+                                        _tot_i = {
+                                            "zhengchai": _zd_i,
+                                            "yubei_rate": _tot.get("yubei_rate") or 5.0,
+                                        }
+                                    else:
+                                        _tot_i = _tot
+                                    _src_i = None
+                                    if _srcs:
+                                        _src_i = (_srcs[_ii][1]
+                                                  if len(_srcs) == len(_targets)
+                                                  else _srcs[0][1])
+                                    _zip = build_deliverable(
+                                        region=_region,
+                                        info=_infos[_ii],
+                                        fee_lines=_fl, totals=_tot_i,
+                                        excel_bytes=_bytes,
+                                        source_pdf_bytes=_src_i)
+                                    _out.append({"label": _nm,
+                                                 "name": f"{_nm}-概算成果.zip",
+                                                 "data": _zip})
+                            except Exception as e:
+                                st.error(f"成果生成失败：{e}")
+                                _out = []
+                        if _out:
+                            st.session_state.deliverable_pdf = _out
+                            st.rerun()
     else:
         # 纯独立费种直算结果
         st.markdown("## 计算结果（程序精确计算）")
@@ -3303,6 +4366,7 @@ with st.sidebar:
     _main_on = not (st.session_state.get("pdf_import_mode", False)
                     or st.session_state.get("preprocess_mode", False)
                     or st.session_state.get("bridge_match_mode", False)
+                    or st.session_state.get("road_bridge_match_mode", False)
                     or st.session_state.get("active_case"))
 
     def _chat_nav_clicked():
@@ -3311,6 +4375,7 @@ with st.sidebar:
         st.session_state.pdf_import_mode = False
         st.session_state.preprocess_mode = False
         st.session_state.bridge_match_mode = False
+        st.session_state.road_bridge_match_mode = False
         st.session_state.active_case = None
         st.session_state.chat_mode_cb = True
 
@@ -3414,6 +4479,7 @@ with st.sidebar:
         if _on:
             st.session_state.preprocess_mode = False
             st.session_state.bridge_match_mode = False
+            st.session_state.road_bridge_match_mode = False
             st.session_state.active_case = None
 
     def _pre_nav_clicked():
@@ -3422,6 +4488,7 @@ with st.sidebar:
         if _on:
             st.session_state.pdf_import_mode = False
             st.session_state.bridge_match_mode = False
+            st.session_state.road_bridge_match_mode = False
             st.session_state.active_case = None
 
     def _bm_nav_clicked():
@@ -3430,6 +4497,16 @@ with st.sidebar:
         if _on:
             st.session_state.pdf_import_mode = False
             st.session_state.preprocess_mode = False
+            st.session_state.road_bridge_match_mode = False
+            st.session_state.active_case = None
+
+    def _rbm_nav_clicked():
+        _on = st.session_state.rbm_mode_cb
+        st.session_state.road_bridge_match_mode = _on
+        if _on:
+            st.session_state.pdf_import_mode = False
+            st.session_state.preprocess_mode = False
+            st.session_state.bridge_match_mode = False
             st.session_state.active_case = None
 
     if "pdf_mode_cb" in st.session_state:
@@ -3438,14 +4515,18 @@ with st.sidebar:
         st.session_state.pre_mode_cb = st.session_state.get("preprocess_mode", False)
     if "bm_mode_cb" in st.session_state:
         st.session_state.bm_mode_cb = st.session_state.get("bridge_match_mode", False)
-    st.checkbox("📄 广联达 PDF 导入", key="pdf_mode_cb",
+    if "rbm_mode_cb" in st.session_state:
+        st.session_state.rbm_mode_cb = st.session_state.get("road_bridge_match_mode", False)
+    st.checkbox("📄 广联达报表导入", key="pdf_mode_cb",
                 on_change=_pdf_nav_clicked)
     st.markdown("- 表格预处理（已上线）")
     st.checkbox("📋 表格预处理", key="pre_mode_cb",
                 on_change=_pre_nav_clicked)
     st.markdown("- 桥梁定额匹配（已上线）")
-    st.checkbox("🌉 桥梁定额匹配", key="bm_mode_cb",
+    st.checkbox("🌉 市政桥梁定额匹配", key="bm_mode_cb",
                 on_change=_bm_nav_clicked)
+    st.checkbox("🛣 公路桥梁定额匹配", key="rbm_mode_cb",
+                on_change=_rbm_nav_clicked)
     st.markdown("- 指标对比分析（开发中）")
     st.markdown("- 正反项目案例（已上线）")
     # 侧边栏按钮文字左对齐（1.58 版按钮标签有内层 div/span flex 居中包装，需一并覆盖）
@@ -3641,13 +4722,21 @@ if st.session_state.get("bridge_match_mode"):
     _render_bridge_match_page()
     st.stop()
 
+# ===== 公路桥梁定额匹配模式：整页替换主界面 =====
+if st.session_state.get("road_bridge_match_mode"):
+    _render_road_bridge_page()
+    st.stop()
+
 # ===== 正反项目案例：点击侧边栏子项整页替换 =====
 if st.session_state.get("active_case"):
     _render_case_page(st.session_state.active_case)
     st.stop()
 
 # ===== 主界面 =====
-st.title("🏗️ 工程造价智能问答")
+_page_header("🏗️ 工程造价智能问答", "main_refresh",
+             ["messages", "current_query", "pending_comparison",
+              "pending_task", "zhengchai_separate", "deliverable_pdf"],
+             refresh_prefixes=["ck_", "ai_", "deliv_"], keep_keys=["ai_guide_pref"])
 st.caption("基于工程造价指标数据库，提供专业造价问答服务 | v2026-07-03")
 
 # 初始化引擎
@@ -3720,6 +4809,13 @@ if prompt:
             with st.chat_message("assistant"):
                 st.markdown(st.session_state.messages[-1]["content"])
         else:
+            # AI 模式裸答登记：当前唯一可见问题是二选一键且输入是「有/没有」等
+            # 短答 → 直接按按钮路径登记，防止同一问题下一轮被重复提问
+            _bare = _ai_map_bare_answer(pending_task, prompt)
+            if _bare is not None:
+                _b_key, _b_val, _b_qtxt = _bare
+                _ai_write(pending_task, _b_key, _b_val)
+                _ai_mark_done(pending_task, _b_key, _b_qtxt, prompt)
             res = advance_checklist(
                 pending_task, prompt, region=st.session_state.get("selected_region"))
             st.session_state.pending_task = pending_task

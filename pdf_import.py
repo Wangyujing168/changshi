@@ -257,10 +257,22 @@ def _f(v) -> float:
         return 0.0
 
 
+def _fn(v):
+    """安全转 float，缺失（None/NaN/空）→ None（区分「无值」与 0）。"""
+    if v is None:
+        return None
+    try:
+        x = float(v)
+        return None if x != x else x
+    except (TypeError, ValueError):
+        return None
+
+
 # 中文列名（st.data_editor 输出）→ 内部英文键；两种键都接受
 _ROW_KEYS = {"组号": "group_no", "组名": "group_name", "专业": "zhuanye",
              "节": "jie", "细目": "ximu", "造价(万元)": "amount_wan",
-             "设备费(万元)": "device_wan", "电气专业": "electrical"}
+             "设备费(万元)": "device_wan", "电气专业": "electrical",
+             "单位": "unit", "工程规模": "qty", "单位造价(元)": "unit_val"}
 
 
 def build_groups(rows: list[dict]) -> list[dict]:
@@ -297,12 +309,20 @@ def build_groups(rows: list[dict]) -> list[dict]:
         jie = _s(row.get("jie"))
         ximu = _s(row.get("ximu"))
         leaf_name = ximu or jie or zy
-        it["leaves"].append({
+        _unit = _s(row.get("unit"))
+        _qty = _fn(row.get("qty"))
+        _uv = _fn(row.get("unit_val"))
+        leaf = {
             "name": leaf_name,
             "jie": jie,
             "amount": amount_raw,
             "device": _f(row.get("device_wan")) if it["electrical"] else 0.0,
-        })
+        }
+        # 技术经济指标（Excel 导入的 单位/工程规模/单位造价；PDF 行无此三列
+        # 时为 None → 不附 tech，导出时沿用旧行为）
+        if _unit or _qty is not None or _uv is not None:
+            leaf["tech"] = {"unit": _unit, "qty": _qty, "val": _uv}
+        it["leaves"].append(leaf)
     out = []
     for gno in sorted(groups):
         g = groups[gno]
