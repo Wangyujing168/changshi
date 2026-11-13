@@ -155,6 +155,109 @@ def _heading_para(doc, heading_text):
     return None
 
 
+# 编制说明版式统一参数（对齐用户参考 10.23 版编制说明实测渲染）：
+# 参考文档正文 12pt 宋体、1.5 倍行距吸附 312twips 文档网格 → 每行渲染 23.4pt，
+# 全篇（含加粗标题）行距一致、两端对齐、首行缩进 2 字、段前段后 0。
+# 我方模板网格是 618twips（1 网格行 = 30.9pt），且雄安 jwang0ZW 样式关了
+# 网格吸附（真单倍 15.6pt）——直接吸附会各行距混乱，故关网格 + 精确行距复现参考值。
+_BIANZHI_PITCH_PT = 23.4
+_BIANZHI_PITCH_TW = str(int(round(_BIANZHI_PITCH_PT * 20)))  # 468
+
+
+def _set_snap(p, val):
+    """写段落 w:snapToGrid（schema 顺序在 spacing/ind/jc 之前）。"""
+    ppr = p._p.get_or_add_pPr()
+    for el in ppr.findall(qn("w:snapToGrid")):
+        ppr.remove(el)
+    snap = OxmlElement("w:snapToGrid")
+    snap.set(qn("w:val"), val)
+    ref = None
+    for tag in ("w:spacing", "w:ind", "w:jc"):
+        ref = ppr.find(qn(tag))
+        if ref is not None:
+            break
+    if ref is not None:
+        ref.addprevious(snap)
+    else:
+        ppr.append(snap)
+
+
+def _para_font_pt(p):
+    """段落有效字号（pt）：首个 run 直接字号 → 样式字号 → 12。"""
+    for r in p.runs:
+        if r.font.size is not None:
+            return r.font.size.pt
+    try:
+        s = p.style
+        while s is not None:
+            if s.font.size is not None:
+                return s.font.size.pt
+            s = s.base_style
+    except Exception:
+        pass
+    return 12.0
+
+
+def _normalize_bianzhi(doc):
+    """编制说明版式统一（从「编 制 说 明」标题到文末）：
+
+    全部段落：关闭文档网格吸附 + 精确行距 23.4pt + 段前段后 0。
+    正文/标题：两端对齐 + 首行缩进 24pt（= 参考文档正文 12pt 的两字宽；
+    标题字号更大，按实际字号换算 firstLineChars 使缩进恒为 24pt，与正文
+    首字左缘对齐）。
+    居中的「编 制 说 明」标题行：保持居中、缩进清零。
+    """
+    started = False
+    for p in doc.paragraphs:
+        t = p.text.strip()
+        if not started:
+            if t.replace(" ", "") == "编制说明" and not t.startswith("目录"):
+                started = True
+            else:
+                continue
+        _set_snap(p, "0")
+        pf = p.paragraph_format
+        pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+        pf.line_spacing = Pt(_BIANZHI_PITCH_PT)
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(0)
+        if not t:
+            continue
+        ind = p._p.get_or_add_pPr().get_or_add_ind()
+        if pf.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+            ind.set(qn("w:firstLine"), "0")
+            ind.set(qn("w:firstLineChars"), "0")
+            continue
+        pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        # 缩进定值 24pt；同时按本段实际字号写 firstLineChars（Word 中 chars
+        # 优先于定值），换算：flc/100 × 字号(pt) = 24pt
+        ind.set(qn("w:firstLine"), "480")
+        ind.set(qn("w:firstLineChars"), str(int(round(2400.0 / _para_font_pt(p)))))
+    # 编制依据/其他说明等自动编号条目的左缩进：模板编号级 ind 定义了
+    # left=425/hanging=425（=0.75 字符，段落设置里显示「文本之前 0.75 字符」），
+    # 编号级缩进优先于段落缩进，须在编号定义上清零（用户要求 0 字符）
+    try:
+        _num = doc.part.numbering_part._element
+        for _abs in _num.findall(qn("w:abstractNum")):
+            for _lvl in _abs.findall(qn("w:lvl")):
+                if _lvl.get(qn("w:ilvl")) != "0":
+                    continue
+                _ind = _lvl.find(qn("w:pPr") + "/" + qn("w:ind"))
+                if _ind is None:
+                    continue
+                if (_ind.get(qn("w:left")) == "425"
+                        and _ind.get(qn("w:hanging")) == "425"):
+                    _ind.set(qn("w:left"), "0")
+                    _ind.set(qn("w:hanging"), "0")
+                    # 序号格式统一为「1、2、3、」顿号（与三、费用段及参考
+                    # 文档 10.23 版一致；模板原生是「1. 2.」）
+                    _lt = _lvl.find(qn("w:lvlText"))
+                    if _lt is not None and _lt.get(qn("w:val")) == "%1.":
+                        _lt.set(qn("w:val"), "%1、")
+    except Exception:
+        pass
+
+
 # ---- 模板填充 ----
 
 # 封面第3页签署栏（自上而下 6 项）
@@ -236,17 +339,15 @@ def _add_sign_run(p, text, underline, font_pt):
     return r
 
 
-# 签署栏几何（两页共用）：下划线 12 个全角空格；版心宽 = 21cm − 左3.5cm − 右2cm
-# = 15.5cm ≈ 439.4pt；块宽 =（标签宽 + 冒号 1em + 12em）× 字号 → 左缩进 = (439.4−块宽)/2，
-# 左右边距相等 → 字和横线整块在版心居中（与上方名称/概算书/编号的居中对齐一致）
+# 签署栏几何（第2/3页同款，参考「封面-12#水系」）：下划线 12 个全角空格；版心宽
+# = 21cm − 左3.5cm − 右2cm = 15.5cm ≈ 439.4pt；块宽 =（标签两端对齐到 7 全角字 +
+# 冒号 1em + 12em）× 字号 → 左缩进 = (439.4−块宽)/2，左右边距相等 → 字和横线
+# 整块在版心居中（与上方名称/概算书/编号的居中对齐一致）。16pt → 块宽 20em×16 = 320pt
 _SIGN_LINE_CHARS = 12
 _SIGN_TEXT_W_PT = 15.5 * 72 / 2.54
-# 第3页：标签两端对齐到 7 全角字 + 冒号 + 横线，15pt → 块宽 20em×15 = 300pt
-_SIGN3_INDENT_PT = (_SIGN_TEXT_W_PT - (7 + 1 + _SIGN_LINE_CHARS) * 15) / 2  # ≈ 69.7pt
-# 第2页：标签两端对齐到 6 全角字 + 冒号 + 横线，16pt → 块宽 19em×16 = 304pt
-_P2_LABEL_W = 6
-_P2_FONT_PT = 16
-_P2_INDENT_PT = (_SIGN_TEXT_W_PT - (_P2_LABEL_W + 1 + _SIGN_LINE_CHARS) * _P2_FONT_PT) / 2  # ≈ 67.7pt
+_SIGN_FONT_PT = 16
+_SIGN_INDENT_PT = (_SIGN_TEXT_W_PT - (7 + 1 + _SIGN_LINE_CHARS) * _SIGN_FONT_PT) / 2  # ≈ 59.7pt
+_P2_LABELS = ["总院法定代表人", "总院总经理", "总院技术负责人", "院长", "院总工程师"]
 
 
 def _rewrite_sign_para(p, text, font_pt, indent_pt):
@@ -320,6 +421,174 @@ def _rebuild_toc(doc):
         _toc_entry_para(Paragraph(third_el, second._parent), *_TOC_ENTRIES[2])
 
 
+def _enlarge_gaisuanshu(doc):
+    """「概 算 书」三页标题按参考封面：36pt 黑体不加粗、字间全角空格、
+    精确行距 45pt（关闭网格吸附，行高不再被 618 网格抬到 61.8pt）。"""
+    for p in _paras(doc, lambda t: t.replace(" ", "") == "概算书"):
+        for r in p.runs:
+            if r.text == " ":
+                r.text = "　"
+            r.font.size = Pt(36)
+            r.font.bold = False
+        ppr = p._p.get_or_add_pPr()
+        for tag in ("w:spacing", "w:snapToGrid"):
+            for el in ppr.findall(qn(tag)):
+                ppr.remove(el)
+        p.paragraph_format.line_spacing = Pt(45)  # w:lineRule=exact
+
+
+def _tighten_cover(doc):
+    """封面纵向收紧（参考封面-12#水系实测：日期须落在本页、目录另起页）：
+    1. 项目名→概算书、概算书→工程编号 之间各只留 1 个空段（模板各页多 1 个，
+       删除后 工程编号-概算书 间距 ≈ 45pt 精确行距 + 1 网格行 ≈ 77pt）；
+    2. 删除各页日期段之后的无 run 空段（第2页日期后的衬底段；日期不再被
+       挤到下一页）；
+    3. 第1页证书行与公司名之间、第3页签署栏与公司名之间各补 1 个空段
+       （模板这两页比第2页少 1 个空段，补齐后三页日期落同一高度）；
+    4. 目录标题前分页（模板靠自然流排到下一页，日期回落后会粘连）。"""
+    gs_pred = lambda t: t.replace(" ", "").replace("　", "") == "概算书"
+    for p in _paras(doc, gs_pred):
+        el = p._p.getnext()
+        empties = []
+        while el is not None and el.tag == qn("w:p"):
+            npe = Paragraph(el, p._parent)
+            if npe.text.strip():
+                break
+            empties.append(el)
+            el = el.getnext()
+        for e in empties[1:]:  # 只留离标题最近的那个
+            e.getparent().remove(e)
+        el = p._p.getprevious()
+        empties = []
+        while el is not None and el.tag == qn("w:p"):
+            npe = Paragraph(el, p._parent)
+            if npe.text.strip():
+                break
+            empties.append(el)
+            el = el.getprevious()
+        for e in empties[1:]:
+            e.getparent().remove(e)
+        for e in empties[:1]:  # 保留的空段统一精确行距 30.9pt（段落标记字号
+            pe = Paragraph(e, p._parent)          # 不一，自然行高会差 1 网格行）
+            pe.paragraph_format.line_spacing = Pt(30.9)
+    _date_ps = [p for p in _paras(doc, lambda t: t in ("2026年1月",))]
+    for dp in _date_ps:
+        nxt = dp._p.getnext()
+        if nxt is not None and nxt.tag == qn("w:p"):
+            npe = Paragraph(nxt, dp._parent)
+            if not npe.runs and not npe.text.strip():
+                nxt.getparent().remove(nxt)
+    def _clean_empty_el(el):
+        """深拷贝空段并只保留 pPr（剥离 run/VML 徽章，防复制段落带出重复图片）。"""
+        new = copy.deepcopy(el)
+        for child in list(new):
+            if child.tag != qn("w:pPr"):
+                new.remove(child)
+        return new
+
+    _company_ps = [p for p in doc.paragraphs
+                   if p.text.strip().startswith("天津市政工程设计研究总院")]
+    _companies = list(_company_ps)
+    if len(_companies) >= 3 and len(_date_ps) >= 3:
+        # 第1页：证书行与公司名之间补 1 个空段（模板第1页该处比第2页少 1 个，
+        # 补齐后第1/2页日期落同一高度；模板该处空段带单位徽章 VML，
+        # 复制时须剥离，否则徽章重复出现两个）
+        _comp = _companies[0]
+        _src = _comp._p.getprevious()
+        if _src is not None and _src.tag == qn("w:p"):
+            _src_pe = Paragraph(_src, _comp._parent)
+            if not _src_pe.text.strip():
+                _new_el = _clean_empty_el(_src)
+                _new_pe = Paragraph(_new_el, _comp._parent)
+                _new_pe.paragraph_format.line_spacing = Pt(30.9)
+                _comp._p.addprevious(_new_el)
+        # 三页：公司名/日期整体下移到页面底端（公司名前补 46.35pt 空段，
+        # 日期行底 ≈770pt 贴页面底线，对齐参考封面 p1/p2 实测 739.1）
+        for _comp in _companies:
+            _new_el = _clean_empty_el(doc.paragraphs[0]._p)
+            _new_pe = Paragraph(_new_el, _comp._parent)
+            _new_pe.paragraph_format.line_spacing = Pt(46.35)
+            _comp._p.addprevious(_new_el)
+        # 第1页：编号与证书行之间补 1 个空段（与第2页签署区上方的 2 空段对齐）
+        _no1 = next((p for p in doc.paragraphs
+                     if p.text.strip().startswith("工程编号：")), None)
+        if _no1 is not None:
+            _el = _no1._p.getnext()
+            _emps = []
+            while _el is not None and _el.tag == qn("w:p"):
+                _npe = Paragraph(_el, _no1._parent)
+                if _npe.text.strip():
+                    break
+                _emps.append(_el)
+                _el = _el.getnext()
+            if len(_emps) == 2:
+                _new_el = _clean_empty_el(_emps[-1])
+                _new_pe = Paragraph(_new_el, _no1._parent)
+                _new_pe.paragraph_format.line_spacing = Pt(30.9)
+                _el.addprevious(_new_el)
+        # 第3页：编号与签署区之间补 1 个空段（模板只留 1 个，第2页有 2 个，
+        # 补齐后第3页签署区/公司名/日期与第1、2页同高）
+        _no_ps = [p for p in doc.paragraphs
+                  if p.text.strip().startswith("工程编号：")]
+        if len(_no_ps) >= 3:
+            _el = _no_ps[2]._p.getnext()
+            _emps = []
+            while _el is not None and _el.tag == qn("w:p"):
+                _npe = Paragraph(_el, _no_ps[2]._parent)
+                if _npe.text.strip():
+                    break
+                _emps.append(_el)
+                _el = _el.getnext()
+            if len(_emps) == 1:
+                _new_el = _clean_empty_el(_emps[-1])
+                _new_pe = Paragraph(_new_el, _no_ps[2]._parent)
+                _new_pe.paragraph_format.line_spacing = Pt(30.9)
+                _el.addprevious(_new_el)
+    # 第3页：顶部补 1 个与第1页页首同款的空段（删掉日期后的衬底段后
+    # 第3页整体上移，补回后三页块位置一致）
+    if len(_date_ps) >= 2:
+        _nxt = _date_ps[1]._p.getnext()
+        if _nxt is not None and _nxt.tag == qn("w:p"):
+            _first = doc.paragraphs[0]
+            if not _first.text.strip() and _first is not _nxt:
+                _new_el = _clean_empty_el(_first._p)
+                _new_pe = Paragraph(_new_el, _first._parent)
+                _new_pe.paragraph_format.page_break_before = True
+                _nxt.addprevious(_new_el)
+    toc_title = next((p for p in doc.paragraphs
+                      if p.text.strip() == "目    录"), None)
+    if toc_title is not None:
+        toc_title.paragraph_format.page_break_before = True
+
+
+def _align_badges(doc):
+    """单位徽章随公司名下移：把徽章 VML 形状从原空段移到公司名段落上、
+    margin-top 归 -3.3pt（徽章顶对齐公司名行顶上方 3.3pt，实测参考封面
+    「封面-12#水系」徽章锚在公司名行、顶比行顶高 3.3pt）。"""
+    import re
+    for p in doc.paragraphs:
+        if not p.text.strip().startswith("天津市政工程设计研究总院"):
+            continue
+        el = p._p.getprevious()
+        pict = None
+        while el is not None and el.tag == qn("w:p"):
+            _found = el.findall(".//" + qn("w:pict"))
+            if _found:
+                pict = _found[0]
+                break
+            if Paragraph(el, p._parent).text.strip():
+                break
+            el = el.getprevious()
+        if pict is None:
+            continue
+        p._p.append(pict.getparent())  # 承载 w:pict 的 w:r 移入公司名段落
+        for sh in pict.findall(
+                ".//{urn:schemas-microsoft-com:vml}shape"):
+            st = sh.get("style") or ""
+            st = re.sub(r"margin-top:[-\d.]+pt", "margin-top:-3.3pt", st)
+            sh.set("style", st)
+
+
 def _fill_cover(doc, info):
     """封面三页：项目名称（自动换行，行1 略长）、签署栏两端对齐、工程编号、日期。"""
     raw_name = str(info.get("name") or "").strip()
@@ -329,8 +598,9 @@ def _fill_cover(doc, info):
     if name_lines:
         _set_cover_name(doc, name_lines)
 
-    # 第2页签署区：总院总经理/总院总工程师/院长/院总工程师（模板一行三职称，拆为每行一项）
-    _p2_labels = ["总院总经理", "总院总工程师", "院长", "院总工程师"]
+    # 第2页签署区（参考「封面-12#水系」更新：总院法定代表人/总院总经理/
+    # 总院技术负责人/院长/院总工程师 5 项；模板一行三职称，拆为每行一项；
+    # 与第3页同款：标签两端对齐 + 等长下划线 + 整块居中）
     _p2_first = next((p for p in doc.paragraphs
                       if p.text.strip().startswith("总院总经理：")), None)
     _p2_last = next((p for p in doc.paragraphs
@@ -338,23 +608,34 @@ def _fill_cover(doc, info):
     if _p2_first is not None and _p2_last is not None:
         _inserted = []
         _anchor = _p2_first
-        for _lbl in _p2_labels[1:3]:  # 复制首段格式，插入第 2、3 项
+        for _ in _P2_LABELS[1:-1]:  # 复制首段格式，插入中间各项
             _new_el = copy.deepcopy(_p2_first._element)
             _anchor._element.addnext(_new_el)
             _new_p = Paragraph(_new_el, _p2_first._parent)
             _inserted.append(_new_p)
             _anchor = _new_p
-        for _p, _lbl in zip([_p2_first] + _inserted + [_p2_last], _p2_labels):
-            _rewrite_sign_para(_p, _distribute_label(_lbl, _P2_LABEL_W) + "：",
-                               _P2_FONT_PT, _P2_INDENT_PT)
-    # 第3页签署栏：标签两端对齐 + 等长下划线 + 整体居中
+        sign_w2 = max(_disp_len(l) for l in _P2_LABELS)
+        # 5 字标签按参考文件「创新道（富兴路—智兴路）…编制说明.docx」第2页：
+        # 用半角空格均匀隔开每个字（每字间 0.5em，总宽仍 7em），不用
+        # _distribute_label 的全角空格（空格会堆在前面两个字后，不均匀）
+        _p2_spaced = {"总院总经理": "总 院 总 经 理", "院总工程师": "院 总 工 程 师"}
+        for _p, _lbl in zip([_p2_first] + _inserted + [_p2_last], _P2_LABELS):
+            _lbl_txt = _p2_spaced.get(_lbl) or _distribute_label(_lbl, sign_w2)
+            _rewrite_sign_para(_p, _lbl_txt + "：",
+                               _SIGN_FONT_PT, _SIGN_INDENT_PT)
+    # 第3页签署栏：同款（标签两端对齐 + 等长下划线 + 整体居中）
     sign_w = max(_disp_len(l) for l in SIGN_LABELS)
     for p in doc.paragraphs:
         t = p.text.strip()
         lbl = next((l for l in SIGN_LABELS if t == l + "："), None)
         if lbl is not None:
             _rewrite_sign_para(p, _distribute_label(lbl, sign_w) + "：",
-                               15, _SIGN3_INDENT_PT)
+                               _SIGN_FONT_PT, _SIGN_INDENT_PT)
+
+    # 封面版式统一（在日期/编号替换前做结构删改，锚点仍是模板原文）
+    _enlarge_gaisuanshu(doc)
+    _tighten_cover(doc)
+    _align_badges(doc)
 
     if info.get("proj_no"):
         for p in _paras(doc, lambda t: t.startswith("工程编号：")):
@@ -413,9 +694,41 @@ def _fill_tianjin(doc, region, info, fee_lines, totals):
     for p in _paras(doc, lambda t: t.startswith("本项目总投资")):
         _set_para_text(p, inv)
 
+    # 二、编制依据 / 四、其他有关说明：模板条目带自动编号（渲染出编号缩进、
+    # 与三费用段写实序号的版式不一致），去掉 numPr 改写实序号「1、2、…」
+    for _h1, _h2 in (("二、编制依据", "三、工程建设其他费用有关说明"),
+                     ("四、其他有关说明", "五、工程投资")):
+        _i = 0
+        _in = False
+        for p in doc.paragraphs:
+            t = p.text.strip()
+            if t == _h1:
+                _in = True
+                continue
+            if _in and t == _h2:
+                break
+            if not _in or not t:
+                continue
+            _i += 1
+            ppr = p._p.find(qn("w:pPr"))
+            if ppr is not None:
+                numpr = ppr.find(qn("w:numPr"))
+                if numpr is not None:
+                    ppr.remove(numpr)
+            if p.runs and not p.runs[0].text.lstrip().startswith(f"{_i}、"):
+                p.runs[0].text = f"{_i}、" + p.runs[0].text
+
 
 def _fill_xiong_an(doc, region, info, fee_lines, totals):
     _fill_cover(doc, info)
+
+    # 模板转换残留：编制范围段带自动编号（渲染出「1. 编制范围」），参考文档无编号
+    for p in _paras(doc, lambda t: t == "编制范围"):
+        ppr = p._p.find(qn("w:pPr"))
+        if ppr is not None:
+            numpr = ppr.find(qn("w:numPr"))
+            if numpr is not None:
+                ppr.remove(numpr)
 
     if info.get("overview"):
         p = _heading_para(doc, "编制范围")
@@ -738,10 +1051,12 @@ def build_deliverable(*, region, info, fee_lines, totals, excel_bytes,
             xa = Document(_XA_TEMPLATE)
             _merge_xa_into_tj(tj, xa)
             _fill_xiong_an(tj, region, info, fee_lines, totals)
+            _normalize_bianzhi(tj)
             tj.save(docx_path)
         else:
             doc = Document(_TJ_TEMPLATE)
             _fill_tianjin(doc, region, info, fee_lines, totals)
+            _normalize_bianzhi(doc)
             doc.save(docx_path)
 
         # Excel 主表 → PDF，并取得页数（目录单位工程概算表页码 = 编制说明末页+1+该页数）
